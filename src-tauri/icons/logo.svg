@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="mc-title">
+  <title id="mc-title">MiniCard 标志</title>
+  <!-- 大卡：中性描边 + 8% 淡填充；color 决定深浅底（currentColor 自适应） -->
+  <rect x="7" y="7" width="38" height="38" rx="10.5"
+        fill="currentColor" fill-opacity="0.08"
+        stroke="currentColor" stroke-width="4"/>
+  <!-- 迷你卡：固定天蓝 #4C9AFF，压在大卡右下角并探出边界 -->
+  <rect x="35" y="35" width="24" height="24" rx="7" fill="#4C9AFF"/>
+</svg>

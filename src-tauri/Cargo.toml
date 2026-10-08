@@ -1,0 +1,26 @@
+[package]
+name = "mini-card"
+version = "0.1.0"
+edition = "2021"
+description = "mini-card main shell (Tauri 2 migration)"
+license = "GPL-3.0-only"
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1.6"
+raw-window-handle = "0.6"
+sysinfo = "0.39.6"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_System_Registry", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+ureq = "3.4.2"
+# 自更新用（见 src/update.rs）：ed25519 验签 / sha256 校验 / 解 zip
+sha2 = "0.10"
+ed25519-dalek = "2"
+base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tauri-plugin-global-shortcut = "2.3.2"
+windows = { version = "0.62.2", default-features = false, features = ["Media_Control", "Foundation", "Foundation_Collections", "Storage_Streams", "Win32_System_Com"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

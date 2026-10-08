@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口 + 卡片窗口：默认能力（事件监听/快照推送）+ 拖动",
+  "windows": ["main", "card-*"],
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
+}

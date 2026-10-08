@@ -1,0 +1,984 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MiniCard</title>
+<style>
+  /* ─── tokens（brand-spec.md 同源，与主界面/设计稿一致） ─── */
+  :root {
+    --surface: oklch(0.966 0.005 258.3 / 0.08);
+    --fg:      oklch(0.966 0.005 258.3);
+    --muted:   oklch(0.85 0.02 261.1);    /* 2026-09-30 四轮（白偏灰方向）：0.775 → 0.85。活卡 5 档扫描（0.775/0.80/0.82/0.85/0.88）+ vision 定档：0.88 发白抢主数字层次，0.85 是甜点。只动亮度，字重/投影/白纱/模糊都不动 */
+    /* 卡面文字阴影色：深色主题压一层黑、浅色主题托一层白，让文字从「花哨的磨砂壁纸」上浮起来。
+       （用户 2026-09-30：「灰色的字有些情况会稍微有点看不清」） */
+    --tshadow: oklch(0 0 0 / 0.45);
+    --border:  oklch(1 0 0 / 0.10);
+    --accent:  oklch(0.685 0.168 256.0);
+    --warn:    oklch(0.740 0.155 60.0);
+    /* 主按钮文字色（番茄钟 .pm-btn.primary 用）与控件 hover 底：卡片稿里的 --bg / --fg-soft */
+    --bg:      oklch(0.210 0.025 255.0);
+    --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent);
+    --font-body: 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
+    --font-mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  /* 透明窗口：底层模糊由系统 Acrylic 提供 */
+  /* 等比缩放（2026-09-28 尺寸档位制）：本文件卡面 CSS 一律用 rem，根字号由 JS 按
+     「窗口高 ÷ 该卡中档高」设置 → 小/中/大三档都是同一张设计稿的等比缩放，
+     留白补偿/字号/间距一起缩，不必每个档位重调一遍。1rem == 16px 就是中档的原始值。
+     例外（保持 px）：1px 发丝描边、999px 胶囊圆角、.wall 的 inset/blur（由 JS 逐帧驱动）。 */
+  html { font-size: 16px; }
+  html, body { background: transparent; margin: 0; height: 100%; overflow: hidden; }
+  body {
+    color: var(--fg); font-family: var(--font-body); font-size: 1rem; line-height: 1.55;
+    text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  /* ─── 玻璃卡片：铺满整个窗口。玻璃 = .wall（壁纸切片 + CSS blur）+ .veil（白纱）。
+     系统那条 backdrop-filter / Acrylic 在 Win11 22H2+ 上要么失效要么把背景盖死，
+     所以磨砂层改成「取壁纸对应区域、自己糊」——等价于设计稿的 backdrop-filter: blur(Npx)。 ─── */
+  .card {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    padding: 0.875rem 1rem 0.875rem;   /* 上下对称：配合 card-body 垂直居中 → 上沿留空 = 下沿留空（设计稿 v9 同源） */
+    /* 2026-10-01 用户「有些卡灰字有阴影有些没有，时钟这种是我觉得好看的」：原来写 rem →
+       阴影随每张卡的缩放比变（实测 性能 0.625/1.25 ~ 网络·番茄 1/2，0.625px 的模糊基本看不见）。
+       现改固定 px，全六卡完全一致 = 时钟原来的 0.833/1.667（与原时钟肉眼无差）。 */
+    text-shadow: 0 0.833px 1.667px var(--tshadow);
+    border-radius: 1rem;
+    overflow: hidden;                  /* 裁掉磨砂层模糊外溢的软边 */
+    background: none;
+    transition: border-color 0.15s ease;
+    cursor: default;
+  }
+  .card > * { position: relative; z-index: 2; }   /* 内容始终在玻璃之上 */
+  .wall {                              /* 磨砂层：壁纸切片 + blur（inset 由 JS 按 blur 半径放大） */
+    position: absolute; inset: -120px; z-index: 0;
+    background-repeat: no-repeat; background-size: 0 0;
+    filter: blur(30px);
+  }
+  .veil {                              /* 白纱层：玻璃厚度（--surface 的 alpha）+ 卡片描边 */
+    position: absolute; inset: 0; z-index: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: inherit;
+    pointer-events: none;
+  }
+  .card:hover .veil { border-color: color-mix(in oklch, var(--fg) 30%, transparent); }
+  /* 子元素不参与命中：mousedown 目标恒为 .card 自身，data-tauri-drag-region 才能全卡生效 */
+  .card * { pointer-events: none; }
+  .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  /* 三态公共件（与设计稿逐字同源） */
+  .err-dot {
+    position: absolute; top: 1rem; right: 1rem; width: 0.375rem; height: 0.375rem;
+    border-radius: 999px; background: var(--warn);
+    box-shadow: 0 0 0 0.1875rem color-mix(in oklch, var(--warn) 26%, transparent);
+  }
+  .err-note { font-family: var(--font-mono); font-size: 0.65625rem; color: var(--muted); margin-bottom: 0.25rem; }
+  .dim { opacity: 0.4; }
+  .empty { flex: 1; display: grid; place-items: center; color: var(--muted); font-size: 0.78125rem; }
+
+  /* ─── 性能卡 ─── */
+  /* 三行等分铺满（2026-09-30 用户「性能卡上下留空太大」）：
+     卡高比设计比例更高时（240×180 = 4:3 vs 设计 300×180 = 5:3），多出来的高度分进三行的行内居中，
+     而不是全堆在上下两端。行间距由行自身的富余提供 → gap 归 0，分隔线正好落在两行内容正中间。
+     设计尺寸(300×180)下本来没有富余，观感与改前几乎一致。 */
+  .perf-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: 0; }
+  .perf-row { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: 0.25rem; }
+  /* 2026-10-01 用户「性能卡两条分割线去掉」：三行改靠行内富余自然分隔（行间本就有 ~7px 空隙），
+     实测去掉后墨迹留白不变（13.6/12.8），补偿与字号都不用重调。 */
+  .rowline { display: flex; align-items: baseline; justify-content: space-between; gap: 0.625rem; }
+  .lab { font-size: 0.875rem; color: var(--fg); }
+  .pct { font-size: 0.8125rem; color: var(--fg); text-align: right; }
+  .bar { height: 0.4375rem; border-radius: 999px; overflow: hidden; background: color-mix(in oklch, var(--fg) 25%, transparent); }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: color-mix(in oklch, var(--fg) 90%, transparent); }
+  /* 性能行自身放大（2026-09-28 两轮 + 2026-10-01 第三轮「内容稍微放大、上下留空再小一点」
+     + 2026-10-06「性能卡上的字还可以调大一点」）：
+     .pct/.bar 与磁盘卡共用，必须在 .perf-rows 作用域里改，别动全局那条（会连带改磁盘卡排版）。
+     字号 17→21px、条高 12→15px（条/字 0.71 = 设计稿同比例）、行内距 7→7.5px；同时收行盒
+     （line-height 1.55→1.15：字体 +24% 而行盒 16.5→16.1px 不涨，靠的全是这里）。
+     实测（活卡离屏 DSF=4，阈值取 alpha>30 —— 进度条底轨 alpha≈64，>94 会漏掉它、只剩填充段，
+     下端留白就随 GPU 占用值漂）：上下留白 14.00/14.75 → 11.50/11.50（差 0）、
+     标签墨迹高 8.8→10.7、条墨迹高 7.0→9.5，无溢出。 */
+  /* 2026-10-07 用户「字和数值离自己的条远、离上面的条近」：行内距 7.5→4px，字明确贴向自己的条；
+     腾出的高度被行盒居中自动分走（.perf-row 是 flex:1 + 居中 → 三者联动：行内距↓ = 行间距↑ + 留白↑），
+     同时 .card-perf 上下内边距 10→7px 把留白拉回原值。活卡实测（alpha>30）：
+     字→自己的条 7.4→5.0/5.2、上条→字 7.75→11.0、上下留白 11.5/11.5（不变）。 */
+  .perf-rows .lab { font-size: 1.3125rem; line-height: 1.15; }
+  .perf-rows .pct { font-size: 1.3125rem; line-height: 1.15; }
+  .perf-rows .bar { height: 0.9375rem; }
+
+  /* ─── 磁盘卡 ─── */
+  .disk-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: 0.5rem; }
+  .disk-row { flex: 0 0 auto; display: flex; align-items: center; gap: 0.6875rem; }
+  /* 2026-10-01 用户「硬盘的分割线也去掉我看下效果」：只删 border，行距（gap + padding-top）保留，
+     实测留白 12.8/12.8 → 14.4/14.4（两道 1px 线消失）。紧凑档同样生效（共用这条）。 */
+  .disk-row + .disk-row { padding-top: 0.4375rem; }
+  /* 行距档（2026-10-02 高度随盘数变之后新增）：档位由 renderDisks 按盘数挂类名，
+     与 Rust config::disk_height_px 的映射**成对存在**，改一处必须重量另一处：
+       1-2 盘 → 60/120 高，正常档（不挂类名）
+       3 盘   → 120 高，d3
+       4 盘   → 180 高，mid
+       5 盘   → 180 高，d5
+     各档取值来自离线实测（docs/verify/minicard_center/disk_sweep3.py，根字号钉 15px）：
+     上下留白 8~22px、不溢出、不顶边。别凭感觉改。
+     2026-10-07 用户「元素都稍微放大一点」：文字 12/12.5→13.5/14px、条 6/7→7/8px、
+     徽标字母 0.875→1rem、框 max-height 1.75→2rem；行距/行内距各收半档把五档都压回原高度
+     （tier_geom.py 放大后余量 2.0/8.2/2.5/6.1/1.1，全部不溢出；活卡已复核）。
+     2026-10-07 第三批（用户「四周留空偏大：元素做大、留空搞小」）：.card-disk padding
+     上下 14→8、左右 16→12 设计；文字 13.5/14→15px（d3/d5 行内距 3→2 腾预算）、条 7→8px、
+     字母 1→1.0625rem（框随列 ~24px）；tier_geom 余量（含补偿回补后的定稿）7.4/12.9/6.9/12.5/3.6，
+     disk_badge_gap 五档 Δtop/Δbot ≈0。留白配平（第三批续）：光学补偿逐档重标定
+     （base 0.3125 / mid 0.225 / d3·d5 0.2rem——徽标成为顶部元素后顶部隐形空档变大，
+     原 d35 的 0 需回补）、d35 徽标 mt 0.263rem；五档上下留白差 ≤1px
+     （d5 上11.75/下11.25/左右 11.25，原 14.25/14.5/15/15；活卡复核同量级）。 */
+  /* 3 盘 / 5 盘共用紧凑档（多挂一个类名而不是改阈值，免得两处判断打架） */
+  .disk-rows.d3, .disk-rows.d5 { gap: 0.1875rem; }
+  .disk-rows.d3 .disk-row, .disk-rows.d5 .disk-row { gap: 0.625rem; }
+  .disk-rows.d3 .disk-row + .disk-row, .disk-rows.d5 .disk-row + .disk-row { padding-top: 0.1875rem; }
+  /* 徽标统一由基类撑右列 + 1rem 字号（三档一致），d3/d5 不再单独压字号 */
+  .disk-rows.d3 .dbody, .disk-rows.d5 .dbody { gap: 0.125rem; }
+  .disk-rows.d3 .used, .disk-rows.d3 .pct, .disk-rows.d5 .used, .disk-rows.d5 .pct { font-size: 0.9375rem; line-height: 1.3; }
+  .disk-rows.d3 .bar, .disk-rows.d5 .bar { height: 0.5rem; margin-top: 0; }
+  /* 4 盘：比正常紧一档、比紧凑松一档（180 高里 4 行套紧凑会空 30px、套正常会溢出） */
+  .disk-rows.mid { gap: 0.25rem; }
+  .disk-rows.mid .disk-row { gap: 0.6875rem; }
+  .disk-rows.mid .disk-row + .disk-row { padding-top: 0.1875rem; }
+  /* mid 档徽标不再单独定义（字母字号统一在基类 .dbadge） */
+  .disk-rows.mid .dbody { gap: 0.25rem; }
+  .disk-rows.mid .used, .disk-rows.mid .pct { font-size: 0.875rem; line-height: 1.5; }
+  .disk-rows.mid .bar { height: 0.5rem; margin-top: 0; }
+  /* 序号徽标（2026-10-02 用户「字母和框都有点小，尽量跟右边的数字和条一样大」）：
+     撑到**右列高度**（= 数字行 + 行内距 + 进度条）。右列恒比徽标高，所以撑起来不会
+     把行顶高。2026-10-07 两轮：① 元素整体放大（字 14→16px、条/文字同放大）；
+     ② 方框对齐（用户「框顶=数字顶部、框底=条的下线，保持正方形」）→ margin-top 逐档
+     补偿（见下方规则）+ line-height:1（见框内注释）+ max-height 2.25rem：
+     修正后框高 = 右列高 − mt，恒在右列内，不会顶溢。
+     ⚠️ 改这里要重量 disk_badge_gap.py（对齐）+ tier_geom.py（不溢出；d5 余量 1.1px）。 */
+  .dbadge {
+    align-self: stretch; aspect-ratio: 1 / 1; flex: 0 0 auto;
+    width: auto; height: auto; max-height: 2.25rem;
+    line-height: 1;                 /* 字母行盒不许撑出自然高度（否则 margin 会让 stretch 失效、行被撑大） */
+    margin: 0.39rem 0 0;            /* 框顶对齐数字墨迹顶；mb 0 → 框底 = 右列底 = 条底线（逐档在下面覆写；2026-10-07 随字号重标定） */
+    border-radius: 0.4375rem;
+    display: grid; place-items: center;
+    /* 字母 1rem（活卡 15px，2026-10-07 与元素整体放大一起从 0.875rem 提档）：比右侧数字
+       （0.84375~0.875rem）大一圈。框高已由「右列高 − margin-top」精确决定（对齐=数字顶→条底），
+       d5 框 25.8→22.3px，字母仍在框内居中；字号不再影响框高（line-height:1 已断开内容撑高）。 */
+    font-family: var(--font-mono); font-size: 1.0625rem; color: var(--muted);
+    border: 1px solid color-mix(in oklch, var(--fg) 24%, transparent);
+    background: color-mix(in oklch, var(--fg) 7%, transparent);
+  }
+  /* 2026-10-07 方框对齐（用户「框顶=数字顶部、框底=条的下线，保持正方形」「数字的归属感」）：
+     行盒 LH 逐档不同（base 1.55 / mid 1.5 / d3·d5 1.3）→ 补偿逐档；disk_badge_gap.py
+     五档实测 Δtop/Δbot ≈0（DSF4 透明帧，阈值 60）。 */
+  .disk-rows.mid .dbadge { margin-top: 0.305rem; }
+  .disk-rows.d3 .dbadge, .disk-rows.d5 .dbadge { margin-top: 0.263rem; }
+  .dbody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.375rem; }
+  /* 窄卡兜底：宽度由进度条吸收，文字放不下时截断而不是折行（折行会把整行顶高） */
+  .used { font-size: 0.9375rem; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .disk-rows .pct { font-size: 0.9375rem; }   /* 基础档百分比与 .used 同号（d3/mid/d5 各有覆盖） */
+  .disk-rows .bar { height: 0.5rem; background: color-mix(in oklch, var(--fg) 12%, transparent); }
+  .disk-rows .bar > i { background: color-mix(in oklch, var(--fg) 90%, transparent); }   /* 正常态白色：不吃主界面强调色 */
+  .disk-row.warn .bar > i { background: var(--warn); }
+  .disk-row.warn .pct { color: var(--warn); font-weight: 600; }
+
+  /* ─── 时钟卡 ─── */
+  .clock-body { align-items: center; justify-content: center; gap: 0.375rem; }
+  .clock-time {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 4.5rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: var(--fg);
+  }
+  .clock-date { font-size: 1rem; color: var(--muted); }   /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」） */
+  .clock-lunar { font-size: 0.875rem; line-height: 1.5; color: var(--muted); }   /* 11→14 */
+  .clock-stack { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.375rem; }
+
+  /* ─── 天气卡 ─── */
+  /* 2026-10-06 用户「三行元素做大一点，空那么多有点浪费」：卡尺寸固定（60px 格 → 240×180），
+     只能靠放大内容吃掉空档。三行整体放大一档（城市 17→20、温度 54→68、太阳 44→54、
+     三日 字号 11.5→13.5 / 图标 20→25 / 高低温 12.5→14.5、底行 14→17），
+     同时收紧结构间距与行盒（.w-3 上边距 10→7 + 内 padding 12→9、底行上边距 10→7、城市下边距 6→4、
+     city/day 行高 1.3/1.35→1.15、temp 行高 1→0.92）。活卡实测（DSF=4 墨迹）：
+     上·下留白 12.75/13.25 → 11.75/12.00（含下条的居中补偿），温度→三日空隙 26.0→20.0、
+     三日→底行 22.0→18.0，各行墨迹高 +12~28%，无溢出（末行墨迹距卡沿 13px）。 */
+  .card-weather { padding: 0.625rem 1rem; }   /* 上下 14→10（与性能卡同档） */
+  .card-weather .w-stack:not(.dim) { padding-top: 0.1667rem; }   /* 行盒留白上 11 / 下 13 → 内容下移 1px 归平 */
+  .w-stack { flex: 1; display: flex; flex-direction: column; justify-content: center; min-height: 0; }
+  .w-top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+  .w-city { font-size: 1.25rem; line-height: 1.15; letter-spacing: 0.02em; color: var(--muted); margin-bottom: 0.25rem; }
+  .w-temp { font-size: 4.25rem; font-weight: 500; line-height: 0.92; color: var(--fg); }
+  .w-sun { width: 3.375rem; height: 3.375rem; flex: 0 0 3.375rem; stroke: var(--fg); stroke-width: 1.5; fill: none; opacity: 0.9; }
+  /* 2026-10-01 用户「元素之间空隙调小一点 / 方块确定居中」：padding 14→12、底行上边距 14→10，
+     让方块上下两条空隙相等（实测 7.5 / 7.5，差 0）。2026-10-06 随内容放大再收一档：padding 12→9、
+     上边距 10→7（留白总量没变的前提下把空间让给字号）。 */
+  .w-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; margin-top: 0.4375rem; padding: 0.5625rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .w-day { display: flex; flex-direction: column; align-items: center; gap: 0.34375rem; font-size: 0.84375rem; line-height: 1.15; color: var(--muted); }
+  /* 2026-10-06 图标在日期/温度之间视觉不居中：两处 gap 本来就相等（0.4375rem），
+     是字形盒留白不等：CJK「今天」字形下缘离行盒底还有空白，数字「25°」字形上缘几乎贴着行盒顶。
+     用对称正负 margin 把图标上提，列高不变、两行文字不动。补偿值随字号/行高变动重标定：
+     2026-10-06 内容放大（day 行高 1.35→1.15）后由 0.04rem 降到 0.02rem
+     （240×180 卡 = 0.24px；设计基准 320×240 = 0.32px；活卡墨迹实测上下空隙差 ≤0.5px）。 */
+  .w-day svg { width: 1.5625rem; height: 1.5625rem; stroke: currentColor; stroke-width: 1.6; fill: none;
+    margin: -0.02rem 0 0.02rem; }
+  .w-day .t { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 0.90625rem; line-height: 1; }
+  .w-day .t .hi { color: var(--fg); }
+  .w-day .t .sep, .w-day .t .lo { color: var(--muted); }
+  .w-air { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; margin-top: 0.4375rem; font-size: 1.0625rem; color: var(--muted); }
+
+  /* ─── 网络速率卡（OD 卡片稿 卡 5：方形窗 190×190 · 只有上下行两行数值） ─── */
+  /* 2026-09-30：网络卡中档从 180×180（3×3 格）改成 120×120（2×2 格，与番茄钟同一方块），
+     内件整组按 120 设计基准重排（= 原 180 基准 ×0.667）。可用宽 = 120 − 2×10 = 100px，
+     最长形态 "999.9 MB/s" ≈ 75 + 18 + 5 = 98px，刚好放得下不裁单位（180 基准时单位会被挤出右沿）。 */
+  .card-net { padding: 0 0.5rem; }   /* 上·下 0 / 左右 8（八改：左右 10→8 换 4px 宽度给 38px 数值；
+     上下 0 见七改——上下居中靠两行各占半卡，内容中心 30/90） */
+  /* 2026-10-01 用户「番茄钟/性能卡内容太小、周围留空太大」：内边距收到 10px，
+     多出来的空间交给内容本身（字号/间距同步放大），墨迹留白见下方各卡实测。 */
+  .card-pomo { padding: 0.625rem; }
+  .card-perf { padding: 0.4375rem 1rem; }   /* 上下 7px（2026-10-07 与 .perf-row 行内距配对），左右 16px 不动 */
+  .card-disk { padding: 0.5rem 0.75rem; }   /* 2026-10-07 用户「四周留空偏大」：上下 14→8、左右 16→12 设计 */
+  /* 2026-10-01 两行分置上下（.net-rows space-between）、分隔线画在正中（::after top:50%）；
+     分隔线走 padding box，不受任何 padding 调整影响，恒 y=60 卡片正中。 */
+  .net-rows {
+    flex: 1; min-height: 0; display: flex; flex-direction: column;
+    justify-content: space-between; gap: 0; position: relative;
+  }
+  .net-rows::after {
+    content: ''; position: absolute; left: 0; right: 0; top: 50%;
+    border-top: 1px solid var(--border);   /* 分隔线画正中（y=60），不挂在行上；第九批整块替换时被我漏掉，2026-10-01 当天补回 */
+  }
+  /* ── 六改（用户「单位就跟在数字后面、箭头固定在左侧的一个位置、箭头可以稍微大一点」）──
+     ① 单位回同行 → 每行墨迹 38.8 → 19.3；120 高里「上下留白×2 + 中间空带」恒等 81.4（守恒）。
+     ② 箭头 14→20px 装进 0.75rem(12px) 固定列 + flex-start → x 恒为 10，不随数值长短移动。
+     ③ 数值 32→27px、单位 10→9px。 */
+  /* ── 七改（用户「两个数据根据分割线做居中…我说的是上下居中，不是左右居中」「字体还可以更大一点吗」）──
+     ① 上下居中 = 每个数值「到卡边」与「到分隔线」等距：padding 上下 13.6→0 → 两行 flex:1 各占半卡，
+        内容中心 36.8/83.2 → **30/90**（实测 到卡顶30、到分隔线30 ✓ 等距）；代价是中间空带 27.2→40.0、
+        上下留白 26.4/28.0→20.0/20.0（这是「各归半卡正中」的必然结果，墨迹高只有 21.5 撑不满 60 半卡）。
+     ② 横向不动：仍是 flex-start、箭头 x=10（用户明确「不是左右居中」）。
+     ③ 字体：数值 27→29px、箭头 20→22px（仍装在 12px 固定列里，x 不变）；为换宽度 gap 2→1、
+        单位 margin 2→1 → 最坏值 98.1 ≤ 100（余量 1.9），箭头与数字的视觉间隙仍是 2.6px。 */
+  .net-row {
+    flex: 1 1 0; min-height: 0; display: flex; flex-direction: row;
+    align-items: center; justify-content: flex-start; gap: 0.0625rem;
+  }
+  /* 箭头 ↑/↓：22px 白字，12px 固定列（x 恒为 8 = 左右 padding；字形 10.4px 留 1.6px 列内余量）。 */
+  .net-lab { flex: 0 0 auto; width: 0.75rem; white-space: nowrap; font-size: 1.375rem; line-height: 1.3; color: var(--fg); }
+  /* 八改（用户「网络card的字体不能再大了吗 还有单位的字体也不能再大了吗」）：
+     数值 1.8125→2.375rem（**29→38px，+31%**）、单位 0.5625→0.6875rem（**9→11px，+22%**）；
+     左右 padding 10→8（可用宽 100→104）。实测 3 位最坏值组宽 101.1 ≤ 104（余 2.9）、
+     箭头 x=8 固定；38/11 在 10 宽下是 101.1 > 100 会溢出 1.1，所以必须收 2px padding。 */
+  .net-val {
+    flex: 0 0 auto; white-space: nowrap; text-align: left;
+    display: block;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 2.375rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em;
+    color: var(--fg);
+  }
+  .net-val i {
+    font-style: normal; font-family: var(--font-body); font-weight: 400;
+    font-size: 0.6875rem; letter-spacing: 0.02em; color: var(--muted); margin-left: 0.0625rem;
+  }
+  /* 布局六改留档：居中 → 字左值右单行（嫌丑）→ 箭头左/数值右（组间空56）→ 并组居中+28 →
+     单位下行+32（上下空带16，但单位脱离了数字）→ 单位同行+箭头固定左（本版）。 */
+
+  /* ─── 番茄钟卡（OD 卡片稿 卡 6：264×200 · 三态 设定/运行/完成） ───
+     卡片侧唯一需要真点击的卡：按钮必须开 pointer-events（.card * 全局是 none，
+     mousedown 目标恒为 .card，拖动手势才不会被吞）——按钮上按下时不进拖动（见 mousedown 处判断）。 */
+  .pomo-body {
+    flex: 1; min-height: 0; display: flex; flex-direction: column;
+    justify-content: center; gap: 0.25rem;
+    /* 光学补偿（2026-09-28 实测）：窗高改 190 后，padding-bottom 9 会把内容顶到上沿（实测 3.5 / 28.9），
+       改成 padding-top 4 让四边都落在 ≈16：实测 15 / 15 / 16 / 16 */   /* 光学补偿：数字字形上缘留白更大 */
+    /* 2026-09-30：中档 240×240 → 120×120（2×2 格），整卡内件按 120 设计基准重排。
+       2026-10-01 用户「内容太小、周围留空太大」→ 内件整组放大一档，卡片尺寸不变：
+       时间 26→34px、槽 26→31px、按钮 22→25px、步进 20→23px；卡片 padding 14→10px。
+       步进行宽 = 23+4+42+4+23 = 96px（= --pomo-row 6rem），开始/重设行与之等宽；
+       卡宽 120 − 两侧 10 = 100，仍留 4px 余量（勿再放大步进行，会贴边）。 */
+    --pomo-row: 6rem;
+  }
+  .pm-time {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 2.125rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em;
+    color: var(--fg); text-align: center;
+  }
+  /* 槽高 31px（2026-10-01 随内容放大，原 26px）：设定态的步进行（23px 按钮）∓ 运行态的进度轨（17 阶段字 + 5 间隔 + 7 条 = 29）
+     两种态共用同一槽高，跑起来不会把轨道压出槽外（2026-09-30 实测：22px 槽会把 26px 的轨道顶出 4px；本轮 31px 槽实测轨道 29px ✓）。 */
+  .pomo-slot { height: 1.9375rem; flex-shrink: 0; display: flex; align-items: center; }
+  .pomo-setter { display: flex; align-items: center; justify-content: center; gap: 0.25rem; width: var(--pomo-row); margin-inline: auto; }
+  .pm-step {
+    width: 1.4375rem; height: 1.4375rem; flex: 0 0 1.4375rem; border-radius: 0.375rem;
+    display: grid; place-items: center;
+    font-family: var(--font-body); font-size: 0.8125rem; line-height: 1; color: var(--fg);
+    background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent);
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .pm-step:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
+  .pm-step:active { background: color-mix(in oklch, var(--fg) 10%, transparent); }
+  .pm-dur { min-width: 2.625rem; white-space: nowrap; text-align: center; font-size: 0.75rem; color: var(--muted); }
+  .pomo-track { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.3125rem; }
+  /* 2026-10-08 用户「不够清晰 / 字体不统一」：中文改回正文族（mono 栈对中文只是回落）、11→12px 与 .pm-dur 对齐、去掉字距 */
+  .pm-phase { font-family: var(--font-body); font-size: 0.75rem; line-height: 1.4; letter-spacing: normal; color: var(--muted); text-align: center; position: relative; top: -0.5px; }   /* 2026-10-08 光学：实测墨迹已居中，小字在投影下视觉略沉 → 上提 0.5px */
+  .pomo-track .bar > i { transition: width 0.35s linear; }
+  .pomo-acts { display: flex; gap: 0.375rem; }
+  .pomo-body[data-mode="set"] .pomo-acts { width: var(--pomo-row); margin-inline: auto; }
+  .pm-btn {
+    flex: 1; height: 1.5625rem; border-radius: 0.375rem; display: grid; place-items: center;
+    font-family: var(--font-body); font-size: 0.8125rem; font-weight: 600; letter-spacing: normal;   /* 2026-10-08：12→13px（= .pm-step 同档）提清晰度，去字距 */
+    user-select: none; transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  /* 2026-09-28 用户要求：主按钮不再上强调色，与 ghost 完全一致（卡片里只留进度条用强调色）
+     2026-10-08 字重也统一为 600（原 ghost 500 对中文静默回落 400，与主按钮实际渲染的 700 摆一起太乱） */
+  .pm-btn.primary { background: transparent; color: var(--fg); border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent); }
+  .pm-btn.primary:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
+  .pm-btn.primary:active { background: color-mix(in oklch, var(--fg) 10%, transparent); }
+  .pm-btn.ghost { font-weight: 600; color: var(--fg); background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent); }
+  .pm-btn.ghost:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
+  .pm-btn.ghost:active { background: color-mix(in oklch, var(--fg) 10%, transparent); }
+  /* 模式显隐：设定 ⇄ 运行/暂停 ⇄ 完成 */
+  .pomo-body[data-mode="set"] .pomo-track { display: none; }
+  .pomo-body:not([data-mode="set"]) .pomo-setter { display: none; }
+  .pomo-body:not([data-mode="set"]) .only-set { display: none; }
+  .pomo-body:not([data-mode="run"]):not([data-mode="paused"]) .only-run { display: none; }
+  .pomo-body:not([data-mode="done"]) .only-done { display: none; }
+  /* 唯一的 pointer-events 例外：番茄钟的加减/开始/暂停/重设按钮要真能点。
+     ⚠️ 别用 font: inherit —— 简写会把各按钮类自己的 font-size 一起重置回 16px；
+     120×120 档下按钮只有 41px 宽，16px 的「暂停」两字直接折行、第二行溢出到卡外被裁（2026-09-30 实拍抓到）。
+     只继承字族，字号/行高/内边距各归各类。 */
+  .pomo-body button { pointer-events: auto; cursor: pointer; font-family: inherit; line-height: 1; padding: 0 0.25rem; }
+  /* 墨迹光学补偿（网格 place-items:center 只保证「行盒」居中，行盒居中 ≠ 墨迹居中）。
+     2026-10-01 首标定：± 墨迹沉 1.6px → padding-bottom 0.2rem（内容盒中心上提 0.1rem）。
+     2026-10-08 用户「都偏下」复标（1920×1080@100% 实机原生渲染）：按钮字墨迹低 +0.5、± 反成高 −1.0 →
+     统一 padding-bottom 0.1rem（上提 0.8px）：± −1.0→−0.2、按钮 +0.5→−0.3（略偏高，抵住下方 0.8px 投影的视觉重量）。
+     选择器必须带 .pomo-body 前缀：上面那条 button 的 padding 简写特异性 (0,1,1) 比 .pm-step (0,1,0) 高。 */
+  .pomo-body .pm-step,
+  .pomo-body .pm-btn { padding-bottom: 0.1rem; }
+
+  /* 定位高亮圈：主界面「定位」按钮 → Rust card_locate → 卡片 eval __flash() */
+  .ring {
+    position: absolute; inset: 0; z-index: 3; border-radius: inherit;
+    border: 2px solid var(--accent); opacity: 0; pointer-events: none;
+  }
+  .card.flash .ring { animation: mcring 0.55s ease-in-out 3; }
+  @keyframes mcring { 0%, 100% { opacity: 0; } 45% { opacity: 0.95; } }
+
+  /* ─── 正常态：内容上下居中（设计稿 v9）───
+     四卡容器均 justify-content:center + .card 上下 padding 对称 14/14（盒模型上沿 = 下沿）；
+     再按本机渲染实测做光学补偿：字形/行盒自带空白使视觉留白上大下小，
+     容器 padding 把内容簇移「差值的一半」，墨迹级上下留白相等；仅作用正常态。
+     本机渲染实测（性能 300×186 / 磁盘 340×200 / 时钟 300×170）：
+     对称 padding 后 上-下 = +6.5 / +4 / +6 → 补偿值取实测差值，把差值归零（结果 ≤1px，即 0.0625rem）。
+     2026-09-28 性能卡内容两轮放大（行间 gap 9→12 / 行内距 9→12 / 行内 gap 4→5 / 字号 13→14 / 条高 7→9）：
+     墨迹留空 29.5/29.5 → 16.5/16.0（离屏 alpha 量法，300×186）；活卡 320×190 实测 18.0/18.0（差 0）。 */
+  /* 行等分后重标定（2026-09-30 活卡探针实测标定，120/180 两档都过）：
+     三行等分时字形的上缘空白让墨迹偏下 +4.8px，0.4rem 的 padding-bottom 把整簇上推一半 → 差 ≤1px。
+     改行高/字号/行数都要重量。 */
+  .perf-rows:not(.dim) { padding-bottom: 0.3rem; }   /* 2026-10-06 字号放大后重标定（原 0.4rem）：把墨迹上下留白摆平到 12.0/11.75 */
+  .disk-rows:not(.dim) { padding-bottom: 0.3125rem; }   /* 光学补偿逐档：2026-10-07 第三批按「徽标=顶部元素」的墨迹偏移重标定 */
+  /* 2026-09-28 尺寸档位制：以下两条按「中档」实测定值（rem，随档位等比缩放）。
+     实测（活卡离屏 alpha 量法，上/下留空）：性能 320×192 19.0/19.0、磁盘 340×204 18.0/20.0→19.0/19.0、
+     时钟 240×144 19.0/18.0、网络 192×144 18.0/21.0→20.0/20.0、番茄 212×212 40.0/40.0；
+     三档复核（小/中/大，离线同 CSS）差全部 ≤1px → 换档不用再重调补偿。
+     注意离线 harness（假数据）与活卡（真数据）会差 2~3px（网络卡尤为明显），定值以活卡为准。 */
+  .clock-body { padding-bottom: 0.46875rem; }   /* 时钟只用于正常态（异常态走 .clock-stack） */
+  /* 光学补偿（2026-10-01 内容放大后重新标定，120 基准 · 槽高 31px · 卡片 padding 10px）：
+     活卡实测 改前 20.0/19.2 → 放大后 12.8/13.6（差 −0.8，≤1px 达标）。
+     注意：这个值跟槽高/字号/卡片 padding 绑定，改了 120 基准的任何一条内件尺寸都要重量一遍。 */
+  .pomo-body { padding-bottom: 0.3125rem; }
+  /* 网络卡不需要光学补偿（活卡实测加不加都是 0）；磁盘紧凑档同理，故不设 padding-bottom */
+  /* 紧凑排版（>4 盘）行高更矮，首行徽标边框上沿离行顶更近 → 光学差本身就 ≈0，不能再补 */
+  /* 补偿按行距档分设（与 disk_sweep3 的取值一一对应；1-2 盘走上面那条 0.25rem） */
+  .disk-rows.mid:not(.dim) { padding-bottom: 0.225rem; }
+  /* 紧凑档（d3/d5）不补：行高矮，首行徽标边框上沿离行顶更近，补了反而偏 */
+  .disk-rows.d3:not(.dim), .disk-rows.d5:not(.dim) { padding-bottom: 0.2rem; }   /* 原 0：徽标对齐后顶部隐形空档变大，需回补 */
+  .w-stack:not(.dim) { padding-block: 0.0625rem; }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <div class="wall" id="wall"></div>
+  <div class="veil"></div>
+  <div class="ring"></div>
+  <div class="card-body" id="body"><div class="empty">等待数据…</div></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var params = new URLSearchParams(location.search);
+  var kind = params.get('kind') || 'Performance';
+  // ─── 等比缩放（尺寸格子系统 2026-09-28 改版）───
+  // 卡面 CSS 全用 rem，根字号 = 16 × 缩放比；缩放比按卡分两种，见下面 HEIGHT_ONLY 规则。
+  // ★ 设计宽高 = 该卡 CSS 数值对应的尺寸（不一定等于中档尺寸）。
+  // 2026-10-01 用户「宽度变小显示的内容可以不变吧，把条调短就行，没必要全部等比例缩小」：
+  //  · 带弹性进度条的卡（性能/磁盘）**只按高缩放** k = h/BASEh —— 字号/徽标/条高都不变，
+  //    宽度差全部由进度条吃掉（条变短）；.used 有 nowrap+ellipsis 兜底，再窄也不折行不溢出。
+  //  · 纯文字/图标卡（时钟/天气/网络/番茄钟）仍用 min(w/BASEw, h/BASEh)：窄档不会横着溢出，
+  //    多出来的那一边自动变成居中的留白（2026-09-30 从「只看高度」改成 min 的原因，别改回去）。
+  var BASE = {
+    Performance: [320, 192],   // 中档 300×180（5×3 格），缩放 0.94
+    Disks:       [320, 192],   // 中档 300×180（5×3 格）
+    Clock:       [240, 144],   // 中档 240×120（4×2 格）
+    Weather:     [320, 240],   // 中档 300×240（5×4 格）
+    NetRate:     [120, 120],   // 中档 120×120（2×2 格 = 基准方块 ×2，方形重排）
+    Pomodoro:    [120, 120]    // 中档 120×120（2×2 格，与网络卡同一方块）
+  };
+  var HEIGHT_ONLY = { Performance: 1 };   // 有进度条的卡：宽度只压条
+  // 磁盘卡高度随盘数变（1 盘 60 / 2-3 盘 120 / 4-5 盘 180，见 Rust config::disk_height_px），
+  // 但**字号不跟窗口高变**：若还按 h/192 缩放，60 高时 k 会被 Math.max 的下限钳到 0.4，
+  // 整张卡缩成四成（那不是「一行字塞进矮卡」，是整卡缩小）。所以它的 k 钉在「180 高」这档，
+  // 高度差全部由行距档吸收（renderDisks 的 d3 / mid / d5）。BASE.Disks=[320,192] → k=0.9375。
+  var FIXED_SCALE = { Disks: 180 };
+  function applyScale() {
+    var b = BASE[kind] || [320, 192];
+    var w = window.innerWidth || b[0], h = window.innerHeight || b[1];
+    var k = FIXED_SCALE[kind] ? FIXED_SCALE[kind] / b[1]
+          : HEIGHT_ONLY[kind] ? h / b[1]
+          : Math.min(w / b[0], h / b[1]);
+    document.documentElement.style.fontSize = (16 * Math.max(0.4, Math.min(2.5, k))).toFixed(3) + 'px';
+  }
+  window.__getScale = function () { return document.documentElement.style.fontSize; };   // 诊断用
+  applyScale();
+  window.addEventListener('resize', applyScale);
+  // 磁盘卡的窗口高是 host 侧改的（Rust sync_disk_height），尺寸一变压根字号与磨砂切片都要重算。
+  // resize 事件不保证在 set_size 生效之后才来，所以 host 改完尺寸会显式 eval 这个钩子兜一次。
+  window.__onResize = function () { applyScale(); drawWall(); };
+  // 玻璃厚度：设置页滑块 0-100 → surface 白色 alpha 0~0.30（30 ≈ 设计稿的 0.08）。
+  // 以前这个值只喂给 SetWindowCompositionAttribute，那条路在 Win11 22H2+ 已失效 → 现在直接落到 CSS 上。
+  function setGlass(v) {
+    var a = Math.max(0, Math.min(100, Number(v) || 0)) / 100 * 0.30;
+    document.documentElement.style.setProperty('--surface', 'oklch(0.966 0.005 258.3 / ' + a.toFixed(3) + ')');
+  }
+  window.__setGlass = setGlass;
+  setGlass(params.get('glass') || 30);
+  var cardId = params.get('id') || '';
+  var bodyEl = document.getElementById('body');
+  var cardEl = document.getElementById('card');
+  // 网络速率卡：方窗 170×144（高度对齐桌面时钟卡），四周 14px（OD 卡片稿 .card-net）
+  if (kind === 'NetRate') cardEl.classList.add('card-net');
+  if (kind === 'Pomodoro') cardEl.classList.add('card-pomo');
+  if (kind === 'Performance') cardEl.classList.add('card-perf');
+  if (kind === 'Weather') cardEl.classList.add('card-weather');
+  if (kind === 'Disks') cardEl.classList.add('card-disk');
+  // 预览模式：主界面「卡片库」把它当缩略图嵌进 iframe。iframe 里收不到 Tauri 事件
+  // （event.listen 只在顶层 webview 生效），所以改成轮询 get_snapshot；也不接拖动/双击隐藏。
+  var previewMode = params.get('preview') === '1';
+  // 固定位置：主界面「桌面卡片」页的图钉。固定后按住不再进原生拖拽循环（双击隐藏仍保留）。
+  // 刷新间隔（主界面参数面板的「刷新间隔」）：毫秒，0/缺省 = 按类型默认节流
+  var RATE = Number(params.get('rate')) || 0;
+  window.__setRate = function (ms) { RATE = Number(ms) || 0; lastRenderAt = 0; render(true); };
+  window.__getRate = function () { return RATE; };       // 诊断用只读钩子
+  // 卡片选项（主界面参数弹窗）：gpu=是否显示 GPU 行，warn=磁盘超阈值是否转橙
+  var SHOW_GPU = params.get('gpu') !== '0';
+  var WARN_90 = params.get('warn') !== '0';
+  window.__setOpts = function (o) {
+    o = o || {};
+    if ('gpu' in o) SHOW_GPU = !!o.gpu;
+    if ('warn' in o) WARN_90 = !!o.warn;
+    render(true);
+  };
+  window.__getOpts = function () { return { gpu: SHOW_GPU, warn: WARN_90 }; };   // 诊断用只读钩子
+  var PINNED = params.get('pinned') === '1';
+  window.__setPinned = function (v) { PINNED = !!v; };
+  window.__getPinned = function () { return PINNED; };   // 诊断用只读钩子
+  window.__setAccent = function (rgb) {
+    if (!rgb) return;
+    document.documentElement.style.setProperty('--accent', 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')');
+  };
+  window.__setTheme = function (dark) {
+    // 只切文字/描边的明暗（深色设计稿是默认值；浅色给一版可读的反色）
+    var r = dark ? null : { fg: 'oklch(0.28 0.02 258)', muted: 'oklch(0.47 0.02 261)', border: 'oklch(0 0 0 / 0.10)' };
+    var s = document.documentElement.style;
+    s.setProperty('--fg', r ? r.fg : 'oklch(0.966 0.005 258.3)');
+    s.setProperty('--muted', r ? r.muted : 'oklch(0.85 0.02 261.1)');
+    s.setProperty('--tshadow', r ? 'oklch(1 0 0 / 0.6)' : 'oklch(0 0 0 / 0.45)');
+    s.setProperty('--border', r ? r.border : 'oklch(1 0 0 / 0.10)');
+  };
+  window.__flash = function () {
+    cardEl.classList.remove('flash');
+    void cardEl.offsetWidth;          // 重启动画
+    cardEl.classList.add('flash');
+  };
+  window.__unflash = function () { cardEl.classList.remove('flash'); };
+  // 首帧就按 config 里的强调色/明暗上色（URL 带过来，省一次 eval）
+  var accParam = (params.get('accent') || '').split(',').map(Number);
+  if (accParam.length === 3 && accParam.every(function (v) { return isFinite(v); })) window.__setAccent(accParam);
+  if (params.get('dark') === '0') window.__setTheme(false);
+
+  // ─── 磨砂层：系统 blur 在 Win11 22H2+ 已失效 → 改成「壁纸对应区域 + CSS blur」自己画 ───
+  var wallEl = document.getElementById('wall');
+  var wallImg = null, wallPos = [0, 0], wallMon = [0, 0], wallGeo = null, wallPad = 120;
+  function drawWall() {
+    if (!wallEl || !wallGeo || !wallImg) return;
+    wallEl.style.backgroundImage = 'url("' + wallImg + '")';
+    wallEl.style.backgroundSize = wallGeo.bw.toFixed(1) + 'px ' + wallGeo.bh.toFixed(1) + 'px';
+    // 元素左上角（屏幕坐标 = 卡片位置 - wallPad）要对上壁纸里同一屏幕点
+    wallEl.style.backgroundPosition =
+      (-(wallGeo.ox + wallPos[0] - wallPad)).toFixed(1) + 'px ' +
+      (-(wallGeo.oy + wallPos[1] - wallPad)).toFixed(1) + 'px';
+  }
+  function setBlur(v) {
+    if (!wallEl) return;
+    var r = Math.max(0, Math.min(100, Number(v) || 0));
+    wallPad = Math.max(60, r * 3);          // inset 至少 3× 半径，模糊软边才落在卡外
+    wallEl.style.inset = (-wallPad) + 'px';
+    wallEl.style.filter = 'blur(' + r + 'px)';
+    drawWall();
+  }
+  function setWall(p) {
+    if (!p || !p.wall) return;
+    wallImg = p.wall;
+    // 2026-10-07 多屏修：payload 是「本卡自己显示器」的坐标系 ——
+    //   p.mon = 该显示器逻辑尺寸（物理/本卡 scale），p.pos = 卡在显示器内的相对位置（同尺）。
+    // 旧版给「主屏尺寸 + 全卡绝对坐标」，副屏上的卡会裁到错位的壁纸块。
+    // ⚠️ 这两个值 Rust 侧已除过 scale（= CSS px，跟卡片位置同一坐标系），这里不要再除：
+    // 2026-09-30 踩过「再除一次 → 壁纸缩到 0.8×、屏幕右/下侧的卡玻璃整片失效」。
+    var sw = p.mon[0], sh = p.mon[1];
+    wallMon = [sw, sh];
+    if (p.pos) wallPos = p.pos;
+    if (p.blur != null) setBlur(p.blur);
+    var im = new Image();
+    im.onload = function () {
+      var k = Math.max(sw / im.naturalWidth, sh / im.naturalHeight);   // Windows「填充」= 每台显示器各自 cover
+      wallGeo = { bw: im.naturalWidth * k, bh: im.naturalHeight * k,
+                  ox: (im.naturalWidth * k - sw) / 2, oy: (im.naturalHeight * k - sh) / 2 };
+      drawWall();
+    };
+    im.src = p.wall;
+  }
+  window.__setWall = setWall;
+  window.__setBlur = setBlur;
+  // 诊断用只读钩子（多屏/几何校验）：当前磨砂层的输入与解算结果
+  window.__getWall = function () {
+    return { mon: wallMon, pos: wallPos, pad: wallPad, geo: wallGeo };
+  };
+  var noWall = previewMode && params.get('wall') === '0';   // 库预览：不拉壁纸（6 个 iframe 各存一份太重）
+  if (noWall) {
+    if (wallEl) wallEl.style.display = 'none';
+  } else {
+    setBlur(params.get('blur') || 30);      // 首帧先按 URL 的值糊上，get_glass 回来后再精确定位
+    if (window.__TAURI__) {
+      // 逐卡取数：payload 里的 mon/pos 都是「本卡所在显示器」口径（多屏下每张卡不同）
+      window.__TAURI__.core.invoke('get_glass', { id: cardId }).then(setWall).catch(function () {});
+      // 拖动/移动：后端推 wpos = 显示器内相对位置（换屏时 Rust 直接推全量，见 push_glass_pos）
+      window.__TAURI__.event.listen('glass_pos', function (e) {
+        var d = e.payload || {};
+        if (d.id === cardId && d.wpos) { wallPos = d.wpos; drawWall(); }
+      }).catch(function () {});
+    }
+  }
+
+  var snap = null, lastAt = 0, lastRenderAt = 0, pendingTimer = null;
+  var wsnap = null, wAt = 0;   // 天气自成一路：30 分钟一刷，与 1s 快照无关
+  var curState = 'boot';   // boot=首帧前, empty, normal, error
+
+  function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+  function hhmm(t) { var d = new Date(t); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
+
+  function fmtSize(b) {
+    var GB = 1073741824, TB = GB * 1024;
+    if (b >= TB) { var tb = b / TB; return (tb >= 100 ? Math.round(tb) : (Math.round(tb * 10) / 10)) + ' TB'; }
+    if (b >= GB) { return Math.round(b / GB) + ' GB'; }
+    return Math.max(1, Math.round(b / 1048576)) + ' MB';
+  }
+
+  /* ── 各卡渲染（结构与 cards-design.html 逐字同源） ── */
+
+  function renderPerf() {
+    var cpu = Math.round(snap.cpu) || 0;
+    var ramPct = snap.mem_total > 0 ? Math.round(snap.mem_used / snap.mem_total * 100) : 0;
+    var gpu = (snap.gpus && snap.gpus.length) ? Math.round(snap.gpus[0].usage) : null;
+    var rows =
+      row('CPU', cpu + '%', cpu) +
+      row('RAM', ramPct + '%', ramPct) +
+      (SHOW_GPU
+        ? (gpu === null
+            ? '<div class="perf-row"><div class="rowline"><span class="lab">GPU</span><span class="pct">未检测到</span></div></div>'
+            : row('GPU', gpu + '%', gpu))
+        : '');
+    return '<div class="perf-rows' + (curState === 'error' ? ' dim' : '') + '">' + rows + '</div>';
+    function row(lab, pct, v) {
+      return '<div class="perf-row"><div class="rowline"><span class="lab">' + lab +
+        '</span><span class="pct num">' + pct + '</span></div>' +
+        '<div class="bar" role="img" aria-label="' + lab + ' 占用 ' + pct + '"><i style="width:' + v + '%"></i></div></div>';
+    }
+  }
+
+  function renderDisks() {
+    // 盘列表由 Rust 侧统一「过滤 + 按盘符排序 + 截到 5 块」（data.rs）。
+    // 这里不再自己 slice：卡片显示的行数必须等于 host 用来算高度的盘数，否则高度会算错。
+    var list = (snap.disks || []).filter(function (d) { return d.total > 0; });
+    var rows = list.map(function (d) {
+      var pct = Math.round(d.used / d.total * 100);
+      var letter = (d.name || '?').charAt(0);
+      var warn = WARN_90 && pct > 90;   // 阈值 90%（设计稿「超 90% 变色」），可在参数弹窗里关掉
+      return '<div class="disk-row' + (warn ? ' warn' : '') + '">' +
+        '<span class="dbadge" aria-hidden="true">' + esc(letter) + '</span>' +
+        '<div class="dbody"><div class="rowline"><span class="used num">' + fmtSize(d.used) + ' / ' + fmtSize(d.total) +
+        '</span><span class="pct num">' + pct + '%</span></div>' +
+        '<div class="bar" role="img" aria-label="' + letter + ' 盘已用 ' + pct + '%' + (warn ? '，超出告警阈值' : '') +
+        '"><i style="width:' + pct + '%"></i></div></div></div>';
+    }).join('');
+    // 行距档跟着盘数走（与 config::disk_height_px 的映射成对）：
+    //   1-2 盘正常 / 3 盘 d3 / 4 盘 mid / 5 盘 d5
+    var tier = list.length === 3 ? ' d3'
+             : list.length === 4 ? ' mid'
+             : list.length >= 5 ? ' d5' : '';
+    return '<div class="disk-rows' + tier + (curState === 'error' ? ' dim' : '') + '">' + rows + '</div>';
+  }
+
+  var CN_DAY = ['初一','初二','初三','初四','初五','初六','初七','初八','初九','初十',
+                '十一','十二','十三','十四','十五','十六','十七','十八','十九','二十',
+                '廿一','廿二','廿三','廿四','廿五','廿六','廿七','廿八','廿九','三十','三十一'];
+  function lunarOf(d) {
+    try {
+      var parts = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', { month: 'long', day: 'numeric' }).formatToParts(d);
+      var m = '', day = '';
+      parts.forEach(function (p) { if (p.type === 'month') m = p.value; if (p.type === 'day') day = p.value; });
+      if (!m || !day) return '';
+      if (/^\d+$/.test(day)) day = CN_DAY[parseInt(day, 10) - 1] || '';
+      if (/^\d+月$/.test(m)) m = m;   // ICU 已给汉字月则直接用
+      return day ? '农历' + m + day : '';
+    } catch (e) { return ''; }
+  }
+
+  function renderClock() {
+    var d = new Date();
+    var wk = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()];
+    var time = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+    var date = d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + wk;
+    var lunar = lunarOf(d);
+    var inner =
+      '<div class="clock-time num">' + time + '</div>' +
+      '<div class="clock-date">' + date + '</div>' +
+      (lunar ? '<div class="clock-lunar">' + esc(lunar) + '</div>' : '');
+    // 时钟永远有数据：异常态仅在本进程时钟源失效时出现（当前不会），保留结构与设计稿一致
+    return '<div class="card-body clock-body' + (curState === 'error' ? ' dim' : '') + '">' + inner + '</div>';
+  }
+
+  // 图标集：照设计稿的描边风格画（24×24 线性，stroke 由 CSS 给）
+  var WMO = {
+    sun: '<circle cx="12" cy="12" r="4.5"/><path d="M12 3.4v1.8M12 18.8v1.8M3.4 12h1.8M18.8 12h1.8M6 6l1.3 1.3M16.7 16.7L18 18M18 6l-1.3 1.3M7.3 16.7L6 18"/>',
+    cloudSun: '<circle cx="15" cy="7.6" r="2.9"/><path d="M15 3v1.4M10.4 7.6H11.8M11.8 4.4l1 1M19.4 4.4l-1 1M20.6 7.6h-1.4"/><path d="M7.5 18h9a3.7 3.7 0 0 0 .6-7.35A5.5 5.5 0 0 0 7 9.6 4.2 4.2 0 0 0 7.5 18z"/>',
+    cloud: '<path d="M7.5 18h9a3.7 3.7 0 0 0 .6-7.35A5.5 5.5 0 0 0 7 9.6 4.2 4.2 0 0 0 7.5 18z"/>',
+    rain: '<path d="M7.5 15.5h9a3.7 3.7 0 0 0 .6-7.35A5.5 5.5 0 0 0 7 7.1 4.2 4.2 0 0 0 7.5 15.5z"/><path d="M9 18.5l-.8 2M13 18.5l-.8 2M17 18.5l-.8 2"/>',
+    drizzle: '<path d="M7.5 15.5h9a3.7 3.7 0 0 0 .6-7.35A5.5 5.5 0 0 0 7 7.1 4.2 4.2 0 0 0 7.5 15.5z"/><path d="M10.5 19l-.5 1.4M14.5 19l-.5 1.4"/>',
+    snow: '<path d="M7.5 15.5h9a3.7 3.7 0 0 0 .6-7.35A5.5 5.5 0 0 0 7 7.1 4.2 4.2 0 0 0 7.5 15.5z"/><circle cx="9.6" cy="19.8" r="1"/><circle cx="13.2" cy="19.8" r="1"/><circle cx="16.8" cy="19.8" r="1"/>',
+    thunder: '<path d="M7.5 15.5h9a3.7 3.7 0 0 0 .6-7.35A5.5 5.5 0 0 0 7 7.1 4.2 4.2 0 0 0 7.5 15.5z"/><path d="M12.8 17.4l-2 3.1h1.9l-.8 2.3"/>'
+  };
+  // WMO 天气码 → 图标（分组与 weather.rs 的中文映射一致）
+  function wmoIcon(code) {
+    if (code === 0 || code === 1) return 'sun';
+    if (code === 2) return 'cloudSun';
+    if (code === 3 || code === 45 || code === 48) return 'cloud';
+    if (code >= 51 && code <= 57) return 'drizzle';
+    if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return 'rain';
+    if ((code >= 71 && code <= 77) || code === 85 || code === 86) return 'snow';
+    if (code >= 95) return 'thunder';
+    return 'cloud';
+  }
+  // 2026-10-01 用户「三日天气的标志有点偏向」：图标内容在 24×24 画框里原本不居中。
+  // 逐个 getBBox 实测中心：thunder 偏下1.51、cloudSun 偏上1.50、snow 偏下0.51、
+  // cloud/rain/drizzle 偏下0.31~0.37、横向全偏 −0.38；sun 本就正中。
+  // 修法 = 把 viewBox 平移 (cx−12, cy−12)，内容中心落到画框正中（不改路径坐标，描边粗细不变）。
+  var WMO_OFF = { sun: [0, 0], cloudSun: [-0.18, -1.5], cloud: [-0.38, 0.37], rain: [-0.38, 0.36], drizzle: [-0.38, 0.31], snow: [-0.38, 0.51], thunder: [-0.38, 1.51] };
+  function svgIc(name, cls) {
+    var o = WMO_OFF[name] || [0, 0];
+    return '<svg' + (cls ? ' class="' + cls + '"' : '') + ' viewBox="' + o[0] + ' ' + o[1] + ' 24 24" aria-hidden="true">' + (WMO[name] || WMO.cloud) + '</svg>';
+  }
+
+  // 正常态：城市 + 当前温度 + 当前天气图标｜三日预报（今天/明天/后天）｜底行空气质量 · 湿度
+  // 结构照设计稿 card-weather-normal-body，一字不改（数据换成 Open-Meteo 真值）
+  function renderWeather() {
+    var c = wsnap;
+    var days = (c.days || []).slice(0, 3).map(function (d) {
+      var hi = isFinite(d.hi) ? Math.round(d.hi) + '°' : '--';
+      var lo = isFinite(d.lo) ? Math.round(d.lo) + '°' : '--';
+      return '<div class="w-day"><span class="d">' + esc(d.label) + '</span>' + svgIc(wmoIcon(d.code)) +
+        '<span class="t"><span class="hi">' + hi + '</span><span class="sep">/</span><span class="lo">' + lo + '</span></span></div>';
+    }).join('');
+    var air = c.air ? '空气质量 ' + esc(c.air) : '空气质量 --';
+    var hum = c.humidity >= 0 ? '湿度 ' + c.humidity + '%' : '湿度 --';
+    return '<div class="card-body w-stack' + (curState === 'error' ? ' dim' : '') + '">' +
+      '<div class="w-top"><div>' +
+        '<div class="w-city">' + esc(c.city || '') + '</div>' +
+        '<div class="w-temp num">' + (isFinite(c.temp) ? Math.round(c.temp) + '°' : '--') + '</div>' +
+      '</div>' + svgIc(wmoIcon(c.code), 'w-sun') + '</div>' +
+      '<div class="w-3">' + days + '</div>' +
+      '<div class="w-air"><span>' + air + '</span><span>' + hum + '</span></div>' +
+      '</div>';
+  }
+
+  /* ── 网络速率卡：上行 / 下行两行数值（OD 卡片稿 卡 5） ── */
+  function fmtRate(bps) {            // bps = 字节/秒
+    var v = Math.max(0, Number(bps) || 0);
+    var mb = v / 1048576;
+    // 2026-10-01 用户「数字/单位还能再大吗」→ 大字号的前提是数值 ≤3 位：
+    //   10.0..99.9 是 4 位（38px 时最坏 116 > 可用 100），10 以上取整；≥1000MB 切 GB 兜底。
+    if (mb >= 1000) return [(v / 1073741824).toFixed(1), 'GB/s'];
+    if (mb >= 10) return [String(Math.round(mb)), 'MB/s'];
+    if (mb >= 0.05) return [mb.toFixed(1), 'MB/s'];
+    var kb = v / 1024;
+    if (kb >= 1) return [String(Math.round(kb)), 'KB/s'];
+    return ['0', 'B/s'];
+  }
+  function renderNet() {
+    var n = snap.net || { rx: 0, tx: 0 };
+    var up = fmtRate(n.tx), down = fmtRate(n.rx);
+    // 2026-10-01 第三版：标签只留箭头（文字放左时 25px 数值放不下，见 .net-val 注释）
+    function line(arr, v) {
+      return '<div class="net-row"><span class="net-lab" aria-hidden="true">' + arr +
+        '</span><span class="net-val num">' + v[0] + '<i>' + v[1] + '</i></span></div>';
+    }
+    return '<div class="card-body net-rows' + (curState === 'error' ? ' dim' : '') + '">' +
+      line('↑', up) + line('↓', down) + '</div>';
+  }
+
+  /* ── 番茄钟卡：设定（5–60 分钟，5 分钟步进）/ 运行 / 完成（OD 卡片稿 卡 6）
+     状态写 localStorage → 卡片重开、app 重启都不丢；预览 iframe 不读写（6 个预览共用同一 origin）。 ── */
+  var POMO_KEY = 'minicard.pomo';
+  var pomo = { mode: 'set', dur: 25, remain: 25 * 60000, endAt: 0 };
+  function pomoLoad() {
+    if (previewMode) return;
+    try {
+      var o = JSON.parse(window.localStorage.getItem(POMO_KEY) || 'null');
+      if (!o) return;
+      if (['set', 'run', 'paused', 'done'].indexOf(o.mode) >= 0) pomo.mode = o.mode;
+      pomo.dur = Math.min(60, Math.max(5, Math.round(Number(o.dur) || 25)));
+      pomo.remain = Math.max(0, Number(o.remain) || 0);
+      pomo.endAt = Number(o.endAt) || 0;
+      if (pomo.mode === 'run' && pomo.endAt <= Date.now()) { pomo.mode = 'done'; pomo.remain = 0; }
+    } catch (e) { /* 坏数据当没存过 */ }
+  }
+  function pomoSave() {
+    if (previewMode) return;
+    try { window.localStorage.setItem(POMO_KEY, JSON.stringify(pomo)); } catch (e) { /* 忽略 */ }
+  }
+  function pomoTotal() { return pomo.dur * 60000; }
+  function pomoRemain() { return Math.max(0, pomo.mode === 'run' ? pomo.endAt - Date.now() : pomo.remain); }
+  function mmss(ms) {
+    var t = Math.max(0, Math.ceil(ms / 1000));
+    return ('0' + Math.floor(t / 60)).slice(-2) + ':' + ('0' + (t % 60)).slice(-2);
+  }
+  function pomoMode() { return (pomo.mode === 'run' && pomoRemain() <= 0) ? 'done' : pomo.mode; }
+  function pomoPct(mode, remain) {
+    var total = pomoTotal();
+    if (!(total > 0)) return 0;
+    return Math.min(100, Math.max(0, (total - remain) / total * 100));   // 宽度用一位小数，长时长的进度条才看得出在动
+  }
+  function pomoPhase(mode) { return mode === 'paused' ? '已暂停' : (mode === 'done' ? '本轮完成' : '专注中'); }
+  function renderPomo() {
+    var mode = pomoMode();
+    var remain = mode === 'done' ? 0 : (mode === 'set' ? pomoTotal() : pomoRemain());
+    var pct = pomoPct(mode, remain);
+    return '<div class="card-body pomo-body" data-mode="' + mode + '">' +
+      '<div class="pm-time num">' + mmss(remain) + '</div>' +
+      '<div class="pomo-slot">' +
+        '<div class="pomo-setter">' +
+          '<button type="button" class="pm-step" data-act="minus" aria-label="减少 5 分钟">−</button>' +
+          '<span class="pm-dur">' + pomo.dur + ' 分钟</span>' +
+          '<button type="button" class="pm-step" data-act="plus" aria-label="增加 5 分钟">+</button>' +
+        '</div>' +
+        '<div class="pomo-track"><span class="pm-phase">' + pomoPhase(mode) + '</span>' +
+          '<div class="bar" role="img" aria-label="专注进度 ' + Math.round(pct) + '%"><i class="pm-fill" style="width:' + pct.toFixed(1) + '%"></i></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="pomo-acts">' +
+        '<button type="button" class="pm-btn primary only-set" data-act="start">开始</button>' +
+        '<button type="button" class="pm-btn primary only-run" data-act="toggle">' + (mode === 'paused' ? '继续' : '暂停') + '</button>' +
+        '<button type="button" class="pm-btn ghost only-run" data-act="reset">重设</button>' +
+        '<button type="button" class="pm-btn ghost only-done" data-act="again">重新开始</button>' +
+      '</div>' +
+    '</div>';
+  }
+  /// 模式没变就只改数字/进度（不整段重建，按钮的 hover/按下态不被打断）
+  function pomoPaint(force) {
+    var mode = pomoMode();
+    var body = bodyEl.querySelector('.pomo-body');
+    if (!body || force || body.dataset.mode !== mode) {
+      bodyEl.innerHTML = renderPomo();
+      return;
+    }
+    var remain = mode === 'set' ? pomoTotal() : pomoRemain();
+    var t = body.querySelector('.pm-time'); if (t) t.textContent = mmss(remain);
+    var d = body.querySelector('.pm-dur'); if (d) d.textContent = pomo.dur + ' 分钟';
+    var ph = body.querySelector('.pm-phase'); if (ph) ph.textContent = pomoPhase(mode);
+    var fi = body.querySelector('.pm-fill'); if (fi) fi.style.width = pomoPct(mode, remain).toFixed(1) + '%';
+  }
+  function pomoAct(act) {
+    if (act === 'minus') pomo.dur = Math.max(5, pomo.dur - 5);
+    else if (act === 'plus') pomo.dur = Math.min(60, pomo.dur + 5);
+    else if (act === 'start' || act === 'again') {
+      pomo.mode = 'run';
+      pomo.remain = pomoTotal();
+      pomo.endAt = Date.now() + pomo.remain;
+    } else if (act === 'toggle') {
+      if (pomo.mode === 'run') { pomo.remain = pomoRemain(); pomo.mode = 'paused'; }
+      else { pomo.endAt = Date.now() + Math.max(0, pomo.remain); pomo.mode = 'run'; }
+    } else if (act === 'reset') { pomo.mode = 'set'; pomo.remain = pomoTotal(); }
+    pomoSave();
+    pomoPaint(true);
+  }
+  // 到点切完成态 + 闪一圈高亮（没有系统通知插件，卡面自己提示）
+  function pomoTick() {
+    if (kind !== 'Pomodoro') return;
+    if (pomo.mode === 'run' && pomoRemain() <= 0) {
+      pomo.mode = 'done';
+      pomo.remain = 0;
+      pomoSave();
+      pomoPaint(true);
+      if (!previewMode && window.__flash) window.__flash();
+      return;
+    }
+    if (pomo.mode !== 'set') pomoPaint(false);
+  }
+  bodyEl.addEventListener('click', function (e) {
+    if (kind !== 'Pomodoro') return;
+    var b = e.target && e.target.closest ? e.target.closest('[data-act]') : null;
+    if (b) pomoAct(b.dataset.act);
+  });
+
+  function computeState() {
+    if (kind === 'Clock') return 'normal';
+    if (kind === 'Pomodoro') return 'normal';   // 纯前端计时器，不依赖数据源
+    if (kind === 'Weather') {
+      // 天气 30 分钟一刷：35 分钟没更新才算异常
+      if (!wsnap) return 'empty';
+      return Date.now() - wAt > 35 * 60 * 1000 ? 'error' : 'normal';
+    }
+    if (!snap) return 'empty';
+    if (Date.now() - lastAt > 3500) return 'error';
+    return 'normal';
+  }
+
+  function render(force) {
+    var st = computeState();
+    if (!force && st === curState && st !== 'boot') {
+      // 状态没变时：normal 态跟随数据更新，error/empty 不动
+      if (st !== 'normal') return;
+      if (kind === 'Disks' && Date.now() - lastRenderAt < (RATE || 5000)) return;   // 磁盘默认 5s 节流
+      if (kind === 'Weather' && Date.now() - lastRenderAt < (RATE || 30000)) return; // 天气默认 30min 一刷
+      if (RATE && Date.now() - lastRenderAt < RATE) return;                          // 用户在参数面板改过：按它节流
+    }
+    curState = st;
+    var html;
+    if (st === 'empty') {
+      html = '<div class="empty">等待数据…</div>';
+    } else if (st === 'error') {
+      // 数据异常：整卡只留一行字，跟无数据态同款（不再画告警点 + 变暗内容）
+      html = '<div class="empty">数据异常</div>';
+    } else {
+      // 番茄钟自己管重绘（每秒只改数字，不整段重建）
+      if (kind === 'Pomodoro') { pomoPaint(true); lastRenderAt = Date.now(); return; }
+      html =
+        kind === 'Performance' ? renderPerf() :
+        kind === 'Disks' ? renderDisks() :
+        kind === 'NetRate' ? renderNet() :
+        kind === 'Clock' ? renderClock() : renderWeather();
+    }
+    bodyEl.innerHTML = html;
+    lastRenderAt = Date.now();
+    // 性能/磁盘的 normal 态容器不是 .card-body，包一层保持 flex 布局
+    if ((kind === 'Performance' || kind === 'Disks') && st === 'normal') {
+      // perf-rows/disk-rows 自身 flex:1，直接挂即可
+    }
+  }
+
+  /* ── 数据接入：Tauri 事件推送 + 首帧拉取 ── */
+  function onSnap(p) {
+    if (!p) return;
+    snap = p; lastAt = Date.now();
+    if (kind === 'Disks' && !pendingTimer && Date.now() - lastRenderAt < (RATE || 5000)) {
+      pendingTimer = setTimeout(function () { pendingTimer = null; render(); },
+        (RATE || 5000) - (Date.now() - lastRenderAt));
+    } else {
+      render();
+    }
+  }
+
+  var T = window.__TAURI__;
+  if (T && T.core && T.event) {
+    function pull() {
+      T.core.invoke('get_snapshot').then(function (s) { if (s && (s.cpu || (s.disks || []).length)) onSnap(s); })
+        .catch(function () {});
+    }
+    pull();
+    if (previewMode) {
+      setInterval(pull, 2000);        // iframe 里收不到 snapshot 事件 → 自己轮询
+    } else {
+      T.event.listen('snapshot', function (e) { onSnap(e.payload); }).catch(function () {});
+    }
+
+    // 天气：单独一路（挂 weather 事件 + 首帧拉一次；非天气卡不打扰）
+    if (kind === 'Weather') {
+      function pullW() {
+        T.core.invoke('get_weather').then(function (w) {
+          if (w) { wsnap = w; wAt = Date.now(); render(); }
+        }).catch(function () {});
+      }
+      pullW();
+      if (previewMode) {
+        setInterval(pullW, 60000);    // iframe 收不到事件 → 低频轮询（天气本来就 30min 一刷）
+      } else {
+        T.event.listen('weather', function (e) { wsnap = e.payload; wAt = Date.now(); render(); })
+          .catch(function () {});
+      }
+    }
+  }
+
+  // 状态陈旧检查（1s tick）：数据断流 → 异常态
+  setInterval(function () {
+    if (kind === 'Clock') { render(); return; }
+    var st = computeState();
+    if (st !== curState) render(true);
+  }, 1000);
+
+  // 时钟走秒
+  if (kind === 'Clock') setInterval(function () { render(); }, 1000);
+
+  // 番茄钟：半秒一跳，秒数不顿挫；到点自动进完成态
+  if (kind === 'Pomodoro') { pomoLoad(); setInterval(pomoTick, 500); }
+
+  /* ── 交互：按住 150ms 拖动（卡片侧唯一手势）
+     不要 data-tauri-drag-region：它在 mousedown 当场进原生拖拽循环，吞掉后续点击。
+     「双击隐藏」已按用户要求移除（2026-09-28）：卡片显隐统一只在主界面「桌面卡片」页的开关里做。
+     库预览（previewMode）嵌在 iframe 里，不接任何手势。 */
+  var holdTimer = null;
+  function winApi() { return window.__TAURI__ && window.__TAURI__.window; }
+
+  if (!previewMode) {
+  function startDrag() {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    var wa = winApi();
+    if (wa && wa.getCurrentWindow) {
+      try { wa.getCurrentWindow().startDragging(); } catch (err) { console.error(err); }
+    }
+  }
+  cardEl.addEventListener('mousedown', function (e) {
+    if (e.button !== 0 || PINNED) return;
+    // 番茄钟的按钮：在按钮上按下不启动拖动计时，否则按住 150ms 会把卡片拖走
+    if (e.target && e.target.closest && e.target.closest('button')) return;
+    if (holdTimer) clearTimeout(holdTimer);
+    holdTimer = setTimeout(startDrag, 150);
+  });
+  cardEl.addEventListener('mousemove', function () {
+    // 鼠标在按住期间移动：立刻进入拖动，手感不拖泥
+    if (!holdTimer || PINNED) return;
+    startDrag();
+  });
+  cardEl.addEventListener('mouseup', function () {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+  });
+  cardEl.addEventListener('mouseleave', function () {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+  });
+  }
+
+  render(true);
+})();
+</script>
+</body>
+</html>

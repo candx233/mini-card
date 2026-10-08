@@ -1,0 +1,40 @@
+# Rust build output
+/src-tauri/target/
+
+# Tauri generated bindings
+/src-tauri/gen/schemas/
+
+# Node
+node_modules/
+web/dist/
+
+# Local logs & screenshots
+run.log
+*.log
+m0_*.png
+*_shot*.png
+*_crop*.png
+
+# Editor backups（*.bak 不匹配 .bak_xxx / .rem_bak，故补齐）
+*.bak_od
+*.bak_*
+*_bak
+*.bak
+.vscode/
+.idea/
+
+# Python / 验证取证产物（脚本保留，产物可再生）
+__pycache__/
+_edge/
+_m.html
+docs/verify/**/*.png
+
+# Env / secrets
+.env
+.env.*
+
+# 设计阶段文档与本地量测脚本（只保留在本地，不进仓库）
+/design-brief.md
+/design-brief-cards.md
+/IDEA.md
+/docs/
