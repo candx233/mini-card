@@ -285,46 +285,50 @@
   /* 布局六改留档：居中 → 字左值右单行（嫌丑）→ 箭头左/数值右（组间空56）→ 并组居中+28 →
      单位下行+32（上下空带16，但单位脱离了数字）→ 单位同行+箭头固定左（本版）。 */
 
-  /* ─── 番茄钟卡（OD 卡片稿 卡 6：264×200 · 三态 设定/运行/完成） ───
+  /* ─── 番茄钟卡（OD 卡片稿 卡 6 · 改版 C「按状态换构图」· 2026-10-08 用户选定实装）
+     四态构图：设定（准备专注 / −25+ / 开始）· 运行/暂停（专注中·已暂停 / 大时间 / 通栏细进度 / 双按钮）
+     · 完成（✓ 本轮完成 / 00:00 淡 / 满条 / 回到设定）。
+     设定态 = 方案 B「极简排版」：大数字主角 + 无边框 ± 字形（A 预设/B 极简/C 一体 三案中用户选定 B）。
      卡片侧唯一需要真点击的卡：按钮必须开 pointer-events（.card * 全局是 none，
-     mousedown 目标恒为 .card，拖动手势才不会被吞）——按钮上按下时不进拖动（见 mousedown 处判断）。 */
+     mousedown 目标恒为 .card，拖动手势才不会被吞）——见 .pomo-body button 一条。
+     120×120 基准（1rem = 16px），内容区 100×100；字号/间距按稿件 86 基准 ×1.16 折算。 */
   .pomo-body {
     flex: 1; min-height: 0; display: flex; flex-direction: column;
-    justify-content: center; gap: 0.25rem;
-    /* 光学补偿（2026-09-28 实测）：窗高改 190 后，padding-bottom 9 会把内容顶到上沿（实测 3.5 / 28.9），
-       改成 padding-top 4 让四边都落在 ≈16：实测 15 / 15 / 16 / 16 */   /* 光学补偿：数字字形上缘留白更大 */
-    /* 2026-09-30：中档 240×240 → 120×120（2×2 格），整卡内件按 120 设计基准重排。
-       2026-10-01 用户「内容太小、周围留空太大」→ 内件整组放大一档，卡片尺寸不变：
-       时间 26→34px、槽 26→31px、按钮 22→25px、步进 20→23px；卡片 padding 14→10px。
-       步进行宽 = 23+4+42+4+23 = 96px（= --pomo-row 6rem），开始/重设行与之等宽；
-       卡宽 120 − 两侧 10 = 100，仍留 4px 余量（勿再放大步进行，会贴边）。 */
-    --pomo-row: 6rem;
+    justify-content: center; gap: 0.125rem;   /* 头/时间/进度条为一组（紧凑），按钮组另行拉开 */
+  }
+  .pomo-body[data-mode="set"] { gap: 0.375rem; }   /* 设定态三行留白（方案 B 定稿节奏） */
+  .pmc-head { display: flex; align-items: center; justify-content: center; gap: 0.3125rem; min-height: 1.0625rem; }
+  .pmc-ck { display: none; color: var(--muted); }
+  .pmc-ck svg { width: 0.75rem; height: 0.75rem; }
+  .pomo-body[data-mode="done"] .pmc-ck { display: block; }
+  /* 设定态 hero：[− 25 +]；± = 无边框字形（命中区就是按钮自身 28×28） */
+  .pmc-hero { display: flex; align-items: center; justify-content: center; gap: 0.125rem; }
+  .pm-flank {
+    width: 1.75rem; height: 1.75rem; flex: 0 0 1.75rem; display: grid; place-items: center;
+    font-family: var(--font-body); font-size: 1rem; line-height: 1;
+    color: color-mix(in oklch, var(--fg) 55%, transparent);
+    background: transparent; border: 0;
+    transition: color 0.15s ease;
+  }
+  .pm-flank:hover { color: var(--fg); }
+  .pm-flank:active { color: color-mix(in oklch, var(--fg) 80%, transparent); }
+  .pm-num {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 2.125rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em;
+    color: var(--fg); text-align: center; min-width: 2.5rem;
   }
   .pm-time {
     font-family: var(--font-mono); font-variant-numeric: tabular-nums;
     font-size: 2.125rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em;
     color: var(--fg); text-align: center;
   }
-  /* 槽高 31px（2026-10-01 随内容放大，原 26px）：设定态的步进行（23px 按钮）∓ 运行态的进度轨（17 阶段字 + 5 间隔 + 7 条 = 29）
-     两种态共用同一槽高，跑起来不会把轨道压出槽外（2026-09-30 实测：22px 槽会把 26px 的轨道顶出 4px；本轮 31px 槽实测轨道 29px ✓）。 */
-  .pomo-slot { height: 1.9375rem; flex-shrink: 0; display: flex; align-items: center; }
-  .pomo-setter { display: flex; align-items: center; justify-content: center; gap: 0.25rem; width: var(--pomo-row); margin-inline: auto; }
-  .pm-step {
-    width: 1.4375rem; height: 1.4375rem; flex: 0 0 1.4375rem; border-radius: 0.375rem;
-    display: grid; place-items: center;
-    font-family: var(--font-body); font-size: 0.8125rem; line-height: 1; color: var(--fg);
-    background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent);
-    transition: background 0.15s ease, border-color 0.15s ease;
-  }
-  .pm-step:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
-  .pm-step:active { background: color-mix(in oklch, var(--fg) 10%, transparent); }
-  .pm-dur { min-width: 2.625rem; white-space: nowrap; text-align: center; font-size: 0.75rem; color: var(--muted); }
-  .pomo-track { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.3125rem; }
-  /* 2026-10-08 用户「不够清晰 / 字体不统一」：中文改回正文族（mono 栈对中文只是回落）、11→12px 与 .pm-dur 对齐、去掉字距 */
-  .pm-phase { font-family: var(--font-body); font-size: 0.75rem; line-height: 1.4; letter-spacing: normal; color: var(--muted); text-align: center; position: relative; top: -0.5px; }   /* 2026-10-08 光学：实测墨迹已居中，小字在投影下视觉略沉 → 上提 0.5px */
+  .pmc-acts { display: flex; gap: 0.375rem; width: 100%; }
+  .pomo-body:not([data-mode="set"]) .pmc-acts { margin-top: 0.375rem; }   /* 进度条→按钮 拉开一档 */
+  .pmc-acts .pm-btn { flex: 1; height: 1.5625rem; }
+  .pomo-track { flex: 0 0 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.3125rem; }
+  /* 2026-10-08 用户「不够清晰 / 字体不统一」：中文改回正文族（mono 栈对中文只是回落）、12px 与按钮对齐、去掉字距 */
+  .pm-phase { font-family: var(--font-body); font-size: 0.75rem; line-height: 1.4; letter-spacing: normal; color: var(--muted); text-align: center; position: relative; top: -0.5px; }   /* 2026-10-08 光学：上提 0.5px */
   .pomo-track .bar > i { transition: width 0.35s linear; }
-  .pomo-acts { display: flex; gap: 0.375rem; }
-  .pomo-body[data-mode="set"] .pomo-acts { width: var(--pomo-row); margin-inline: auto; }
   .pm-btn {
     flex: 1; height: 1.5625rem; border-radius: 0.375rem; display: grid; place-items: center;
     font-family: var(--font-body); font-size: 0.8125rem; font-weight: 600; letter-spacing: normal;   /* 2026-10-08：12→13px（= .pm-step 同档）提清晰度，去字距 */
@@ -338,24 +342,108 @@
   .pm-btn.ghost { font-weight: 600; color: var(--fg); background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent); }
   .pm-btn.ghost:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
   .pm-btn.ghost:active { background: color-mix(in oklch, var(--fg) 10%, transparent); }
-  /* 模式显隐：设定 ⇄ 运行/暂停 ⇄ 完成 */
-  .pomo-body[data-mode="set"] .pomo-track { display: none; }
-  .pomo-body:not([data-mode="set"]) .pomo-setter { display: none; }
-  .pomo-body:not([data-mode="set"]) .only-set { display: none; }
-  .pomo-body:not([data-mode="run"]):not([data-mode="paused"]) .only-run { display: none; }
-  .pomo-body:not([data-mode="done"]) .only-done { display: none; }
+  /* 模式显隐：设定 = 头+hero+开始；运行/暂停 = 头+时间+进度条+暂停/重设；完成 = ✓+时间+满条+回到设定 */
+  .pomo-body[data-mode="set"] .pm-time,
+  .pomo-body[data-mode="set"] .pomo-track,
+  .pomo-body[data-mode="set"] .pm-pause,
+  .pomo-body[data-mode="set"] .pm-reset,
+  .pomo-body[data-mode="set"] .pm-again { display: none; }
+  .pomo-body:not([data-mode="set"]) .pmc-hero { display: none; }
+  .pomo-body:not([data-mode="set"]) .pm-start { display: none; }
+  .pomo-body[data-mode="run"] .pm-again,
+  .pomo-body[data-mode="paused"] .pm-again,
+  .pomo-body[data-mode="done"] .pm-pause,
+  .pomo-body[data-mode="done"] .pm-reset { display: none; }
+  .pomo-body[data-mode="done"] .pm-time { opacity: 0.55; }
   /* 唯一的 pointer-events 例外：番茄钟的加减/开始/暂停/重设按钮要真能点。
      ⚠️ 别用 font: inherit —— 简写会把各按钮类自己的 font-size 一起重置回 16px；
      120×120 档下按钮只有 41px 宽，16px 的「暂停」两字直接折行、第二行溢出到卡外被裁（2026-09-30 实拍抓到）。
-     只继承字族，字号/行高/内边距各归各类。 */
+     只继承字族，字号/行高各归各类。 */
   .pomo-body button { pointer-events: auto; cursor: pointer; font-family: inherit; line-height: 1; padding: 0 0.25rem; }
-  /* 墨迹光学补偿（网格 place-items:center 只保证「行盒」居中，行盒居中 ≠ 墨迹居中）。
-     2026-10-01 首标定：± 墨迹沉 1.6px → padding-bottom 0.2rem（内容盒中心上提 0.1rem）。
-     2026-10-08 用户「都偏下」复标（1920×1080@100% 实机原生渲染）：按钮字墨迹低 +0.5、± 反成高 −1.0 →
-     统一 padding-bottom 0.1rem（上提 0.8px）：± −1.0→−0.2、按钮 +0.5→−0.3（略偏高，抵住下方 0.8px 投影的视觉重量）。
-     选择器必须带 .pomo-body 前缀：上面那条 button 的 padding 简写特异性 (0,1,1) 比 .pm-step (0,1,0) 高。 */
-  .pomo-body .pm-step,
+  /* 墨迹光学补偿（网格 place-items:center 只保证「行盒」居中，行盒居中 ≠ 墨迹居中）：
+     · .pm-flank 的 0.15rem = 卡片稿 86 基准 pb 2.0px ×1.16 折算的【初值】——等原生 1× 实机复标后定死
+       （稿件同图定标法：mc_measure_glyph_center.py，边框中心 vs 墨迹中心；稿上 ±0.5px 是整像素栅格的理论下限）；
+     · .pm-btn 的 0.1rem 沿用 2026-10-08 实机复标档（按钮字 +0.5→−0.3，抵下方 0.8px 投影的视觉重量）。
+     选择器必须带 .pomo-body 前缀：上面那条 button 的 padding 简写特异性 (0,1,1) 比这些 (0,2,0) 低不了多少，别减前缀。 */
+  .pomo-body .pm-flank { padding: 0 0 0.15rem; }
   .pomo-body .pm-btn { padding-bottom: 0.1rem; }
+
+  /* ─── 音乐卡（OD 卡片稿 卡 7：240×120 · Windows SMTC） ───
+     封面 = Rust 缓存 dataURL（换曲才重读）；无封面回退音符图标；按键左对齐与歌名同左缘（稿 v2 定案）。
+     稿件 208×88 基准整体 ×~1.1 折算到实卡内容区 220×100。 */
+  .card-music { padding: 0.625rem; }
+  .mc-body { flex: 1; min-height: 0; display: flex; flex-direction: row; align-items: center; gap: 0.625rem; }
+  .mc-cover {
+    flex: 0 0 auto; align-self: stretch; aspect-ratio: 1 / 1; border-radius: 0.75rem;
+    background: linear-gradient(135deg, color-mix(in oklch, var(--accent) 72%, transparent), color-mix(in oklch, var(--accent) 26%, transparent));
+    border: 1px solid var(--border);
+    background-size: cover; background-position: center;
+    display: grid; place-items: center;
+  }
+  .mc-cover svg { width: 1.75rem; height: 1.75rem; color: color-mix(in oklch, var(--fg) 80%, transparent); }
+  .mc-col { flex: 1; min-width: 0; align-self: stretch; display: flex; flex-direction: column; justify-content: space-between; }
+  .mc-meta { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; }
+  .mc-title { font-size: 1rem; font-weight: 600; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mc-artist { font-size: 0.8125rem; line-height: 1.25; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mc-prog { display: flex; align-items: center; gap: 0.375rem; }
+  .mc-prog .bar { flex: 1; height: 0.3125rem; }
+  .mc-prog .bar > i { background: var(--accent); }   /* 进度 = 强调色（与番茄钟同策略） */
+  .mc-time { font-family: var(--font-mono); font-size: 0.625rem; line-height: 1; color: var(--muted); white-space: nowrap; }
+  .mc-acts { display: flex; justify-content: flex-start; gap: 0.375rem; }
+  .mc-btn {
+    width: 1.75rem; height: 1.5rem; border-radius: 0.375rem; display: grid; place-items: center;
+    color: var(--fg); background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent);
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .mc-btn:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
+  .mc-btn svg { width: 0.875rem; height: 0.875rem; }
+  .card-music button { pointer-events: auto; cursor: pointer; padding: 0; }
+
+  /* ─── 日历卡（OD 卡片稿 卡 8：240×180 · 全月视图 · 周一起始 · 今日高亮） ─── */
+  .card-cal { padding: 0.625rem 0.75rem; }
+  .cal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+  .cal-head { display: flex; align-items: center; justify-content: space-between; }
+  .cal-title { font-size: 1rem; font-weight: 600; letter-spacing: 0.01em; line-height: 1.3; }
+  .cal-nav { display: flex; gap: 0.125rem; }
+  .cal-navbtn {
+    width: 1.25rem; height: 1.25rem; border-radius: 0.375rem; padding: 0; display: grid; place-items: center;
+    color: var(--muted); background: transparent; border: 0;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .cal-navbtn:hover { background: var(--fg-soft); color: var(--fg); }
+  .cal-navbtn svg { width: 0.75rem; height: 0.75rem; }
+  .cal-wd { display: grid; grid-template-columns: repeat(7, 1fr); font-size: 0.6875rem; line-height: 1.4; color: var(--muted); text-align: center; }
+  .cal-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(7, 1fr); grid-auto-rows: 1fr; align-items: center; }
+  .cal-d {
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 0.75rem; color: var(--fg);
+  }
+  .cal-d.other { opacity: 0.32; }
+  .cal-d i { font-style: normal; width: 1.25rem; height: 1.25rem; border-radius: 999px; display: grid; place-items: center; }
+  .cal-d.today i { background: var(--accent); color: var(--fg); font-weight: 600; }
+  .card-cal button { pointer-events: auto; cursor: pointer; }
+
+  /* ─── 待办卡（OD 卡片稿 卡 9：240×120 · 勾选在卡内 / 编辑在参数面板） ───
+     最多 4 行；超过 → 3 行 + 「还有 N 项」；未完成在上、完成沉底划线。 */
+  .card-todo { padding: 0.625rem 0.75rem; }
+  .td-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: 0.25rem; }
+  .td-row { display: flex; align-items: center; gap: 0.5rem; height: 1.3125rem; border-radius: 0.375rem; }
+  .td-row:hover { background: var(--fg-soft); }   /* 整行可点的提示 */
+  .td-ck {
+    flex: 0 0 auto; width: 1.0625rem; height: 1.0625rem; border-radius: 999px;
+    border: 1px solid color-mix(in oklch, var(--fg) 34%, transparent);
+    display: grid; place-items: center; color: var(--fg);
+  }
+  .td-ck svg { width: 0.625rem; height: 0.625rem; display: none; }
+  .td-row.done .td-ck { background: var(--accent); border-color: transparent; }
+  .td-row.done .td-ck svg { display: block; }
+  .td-t { flex: 1; min-width: 0; font-size: 0.9375rem; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .td-row.done .td-t { color: var(--muted); text-decoration: line-through; }
+  .td-more { height: 1.3125rem; display: flex; align-items: center; padding-left: 1.5625rem; font-size: 0.8125rem; color: var(--muted); }
+  .td-empty-l { display: flex; flex-direction: column; gap: 0.125rem; }
+  .td-empty-l span { font-size: 0.6875rem; opacity: 0.85; }
+  .card-todo .td-row { pointer-events: auto; cursor: pointer; }
 
   /* 定位高亮圈：主界面「定位」按钮 → Rust card_locate → 卡片 eval __flash() */
   .ring {
@@ -424,7 +512,10 @@
     Clock:       [240, 144],   // 中档 240×120（4×2 格）
     Weather:     [320, 240],   // 中档 300×240（5×4 格）
     NetRate:     [120, 120],   // 中档 120×120（2×2 格 = 基准方块 ×2，方形重排）
-    Pomodoro:    [120, 120]    // 中档 120×120（2×2 格，与网络卡同一方块）
+    Pomodoro:    [120, 120],   // 中档 120×120（2×2 格，与网络卡同一方块）
+    Music:       [240, 120],   // 音乐（OD 卡 7：4×2 格 · 2:1 · Windows SMTC）
+    Calendar:    [240, 180],   // 日历（OD 卡 8：4×3 格 · 4:3）
+    Todo:        [240, 120]    // 待办（OD 卡 9：4×2 格 · 2:1）
   };
   var HEIGHT_ONLY = { Performance: 1 };   // 有进度条的卡：宽度只压条
   // 磁盘卡高度随盘数变（1 盘 60 / 2-3 盘 120 / 4-5 盘 180，见 Rust config::disk_height_px），
@@ -463,6 +554,9 @@
   if (kind === 'Performance') cardEl.classList.add('card-perf');
   if (kind === 'Weather') cardEl.classList.add('card-weather');
   if (kind === 'Disks') cardEl.classList.add('card-disk');
+  if (kind === 'Music') cardEl.classList.add('card-music');
+  if (kind === 'Calendar') cardEl.classList.add('card-cal');
+  if (kind === 'Todo') cardEl.classList.add('card-todo');
   // 预览模式：主界面「卡片库」把它当缩略图嵌进 iframe。iframe 里收不到 Tauri 事件
   // （event.listen 只在顶层 webview 生效），所以改成轮询 get_snapshot；也不接拖动/双击隐藏。
   var previewMode = params.get('preview') === '1';
@@ -573,6 +667,7 @@
 
   var snap = null, lastAt = 0, lastRenderAt = 0, pendingTimer = null;
   var wsnap = null, wAt = 0;   // 天气自成一路：30 分钟一刷，与 1s 快照无关
+  var msnap = null, mAt = 0;   // 音乐：SMTC 1s 推送（事件 + 首帧拉取），10s 无更新算异常
   var curState = 'boot';   // boot=首帧前, empty, normal, error
 
   function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
@@ -769,28 +864,27 @@
     if (!(total > 0)) return 0;
     return Math.min(100, Math.max(0, (total - remain) / total * 100));   // 宽度用一位小数，长时长的进度条才看得出在动
   }
-  function pomoPhase(mode) { return mode === 'paused' ? '已暂停' : (mode === 'done' ? '本轮完成' : '专注中'); }
+  function pomoPhase(mode) { return mode === 'set' ? '准备专注' : mode === 'paused' ? '已暂停' : (mode === 'done' ? '本轮完成' : '专注中'); }
+  var CK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 12.6l4.2 4.2 8.6-9.2"/></svg>';
   function renderPomo() {
     var mode = pomoMode();
     var remain = mode === 'done' ? 0 : (mode === 'set' ? pomoTotal() : pomoRemain());
     var pct = pomoPct(mode, remain);
     return '<div class="card-body pomo-body" data-mode="' + mode + '">' +
-      '<div class="pm-time num">' + mmss(remain) + '</div>' +
-      '<div class="pomo-slot">' +
-        '<div class="pomo-setter">' +
-          '<button type="button" class="pm-step" data-act="minus" aria-label="减少 5 分钟">−</button>' +
-          '<span class="pm-dur">' + pomo.dur + ' 分钟</span>' +
-          '<button type="button" class="pm-step" data-act="plus" aria-label="增加 5 分钟">+</button>' +
-        '</div>' +
-        '<div class="pomo-track"><span class="pm-phase">' + pomoPhase(mode) + '</span>' +
-          '<div class="bar" role="img" aria-label="专注进度 ' + Math.round(pct) + '%"><i class="pm-fill" style="width:' + pct.toFixed(1) + '%"></i></div>' +
-        '</div>' +
+      '<div class="pmc-head"><span class="pmc-ck" aria-hidden="true">' + CK_SVG + '</span>' +
+        '<span class="pm-phase">' + pomoPhase(mode) + '</span></div>' +
+      '<div class="pmc-hero">' +
+        '<button type="button" class="pm-flank" data-act="minus" aria-label="减少 5 分钟">−</button>' +
+        '<span class="pm-num">' + pomo.dur + '</span>' +
+        '<button type="button" class="pm-flank" data-act="plus" aria-label="增加 5 分钟">+</button>' +
       '</div>' +
-      '<div class="pomo-acts">' +
-        '<button type="button" class="pm-btn primary only-set" data-act="start">开始</button>' +
-        '<button type="button" class="pm-btn primary only-run" data-act="toggle">' + (mode === 'paused' ? '继续' : '暂停') + '</button>' +
-        '<button type="button" class="pm-btn ghost only-run" data-act="reset">重设</button>' +
-        '<button type="button" class="pm-btn ghost only-done" data-act="again">重新开始</button>' +
+      '<div class="pm-time num">' + mmss(remain) + '</div>' +
+      '<div class="pomo-track"><div class="bar" role="img" aria-label="专注进度 ' + Math.round(pct) + '%"><i class="pm-fill" style="width:' + pct.toFixed(1) + '%"></i></div></div>' +
+      '<div class="pmc-acts">' +
+        '<button type="button" class="pm-btn primary pm-start" data-act="start">开始</button>' +
+        '<button type="button" class="pm-btn primary pm-pause" data-act="toggle">' + (mode === 'paused' ? '继续' : '暂停') + '</button>' +
+        '<button type="button" class="pm-btn ghost pm-reset" data-act="reset">重设</button>' +
+        '<button type="button" class="pm-btn primary pm-again" data-act="again">回到设定</button>' +
       '</div>' +
     '</div>';
   }
@@ -804,17 +898,21 @@
     }
     var remain = mode === 'set' ? pomoTotal() : pomoRemain();
     var t = body.querySelector('.pm-time'); if (t) t.textContent = mmss(remain);
-    var d = body.querySelector('.pm-dur'); if (d) d.textContent = pomo.dur + ' 分钟';
+    var d = body.querySelector('.pm-num'); if (d) d.textContent = pomo.dur;
     var ph = body.querySelector('.pm-phase'); if (ph) ph.textContent = pomoPhase(mode);
     var fi = body.querySelector('.pm-fill'); if (fi) fi.style.width = pomoPct(mode, remain).toFixed(1) + '%';
   }
   function pomoAct(act) {
     if (act === 'minus') pomo.dur = Math.max(5, pomo.dur - 5);
     else if (act === 'plus') pomo.dur = Math.min(60, pomo.dur + 5);
-    else if (act === 'start' || act === 'again') {
+    else if (act === 'start') {
       pomo.mode = 'run';
       pomo.remain = pomoTotal();
       pomo.endAt = Date.now() + pomo.remain;
+    } else if (act === 'again') {
+      // 完成态「回到设定」（改版 C）：先回设定微调，再点开始，而不是直接下一轮
+      pomo.mode = 'set';
+      pomo.remain = pomoTotal();
     } else if (act === 'toggle') {
       if (pomo.mode === 'run') { pomo.remain = pomoRemain(); pomo.mode = 'paused'; }
       else { pomo.endAt = Date.now() + Math.max(0, pomo.remain); pomo.mode = 'run'; }
@@ -836,14 +934,141 @@
     if (pomo.mode !== 'set') pomoPaint(false);
   }
   bodyEl.addEventListener('click', function (e) {
-    if (kind !== 'Pomodoro') return;
-    var b = e.target && e.target.closest ? e.target.closest('[data-act]') : null;
-    if (b) pomoAct(b.dataset.act);
+    var t = e.target;
+    if (!t || !t.closest) return;
+    if (kind === 'Todo') {
+      var row = t.closest('.td-row');
+      if (row && row.dataset.idx != null) { todoToggle(+row.dataset.idx); return; }
+    }
+    var b = t.closest('[data-act]');
+    if (!b) return;
+    if (kind === 'Pomodoro') pomoAct(b.dataset.act);
+    else if (kind === 'Calendar') calNav(b.dataset.act);
+    else if (kind === 'Music' && window.__TAURI__ && window.__TAURI__.core) {
+      window.__TAURI__.core.invoke('music_action', { action: b.dataset.act }).catch(function () {});
+    }
   });
+
+  /* ── 音乐卡（OD 卡 7：封面 + 歌名/歌手 + 进度 + 上一首/播放暂停/下一首 · Windows SMTC） ── */
+  var NOTE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6.2l9.5-2v11.6"/><circle cx="6.6" cy="18" r="2.4"/><circle cx="16.1" cy="15.8" r="2.4"/></svg>';
+  var I_PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 6v12"/><path d="M17.8 6.9v10.2L10 12z"/></svg>';
+  var I_NEXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 6v12"/><path d="M6.2 6.9v10.2L14 12z"/></svg>';
+  var I_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6.5v11L18 12z"/></svg>';
+  var I_PAUSE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 6.5v11M14 6.5v11"/></svg>';
+  function renderMusic() {
+    var m = msnap || {};
+    var dur = Number(m.duration_ms) || 0;
+    var pos = Math.max(0, Number(m.position_ms) || 0);
+    if (dur > 0) pos = Math.min(pos, dur);
+    var pct = dur > 0 ? Math.min(100, Math.max(0, pos / dur * 100)) : 0;
+    var playing = m.status === 'playing';
+    var tsec = Math.floor(pos / 1000);
+    var posTxt = ('0' + Math.floor(tsec / 60)).slice(-2) + ':' + ('0' + (tsec % 60)).slice(-2);
+    return '<div class="card-body mc-body">' +
+      '<div class="mc-cover" aria-hidden="true">' + (m.cover ? '' : NOTE_SVG) + '</div>' +
+      '<div class="mc-col">' +
+        '<div class="mc-meta">' +
+          '<div class="mc-title">' + esc(m.title || '—') + '</div>' +
+          '<div class="mc-artist">' + esc(m.artist || '—') + '</div>' +
+        '</div>' +
+        '<div class="mc-prog">' +
+          '<div class="bar" role="img" aria-label="播放进度 ' + Math.round(pct) + '%"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
+          '<span class="mc-time">' + posTxt + '</span>' +
+        '</div>' +
+        '<div class="mc-acts">' +
+          '<button type="button" class="mc-btn" data-act="previous" aria-label="上一首">' + I_PREV + '</button>' +
+          '<button type="button" class="mc-btn" data-act="toggle" aria-label="' + (playing ? '暂停' : '播放') + '">' + (playing ? I_PAUSE : I_PLAY) + '</button>' +
+          '<button type="button" class="mc-btn" data-act="next" aria-label="下一首">' + I_NEXT + '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  /* ── 日历卡（OD 卡 8：全月视图 · 周一起始 · 今日高亮 · ‹ › 翻月） ── */
+  var calY = 0, calM = 0;   // 0/0 = 跟随今天；翻月后固定在被翻的月份（跨天刷新时保留）
+  function calNav(act) {
+    var d = new Date();
+    if (!calY) { calY = d.getFullYear(); calM = d.getMonth(); }
+    if (act === 'prev') { calM--; if (calM < 0) { calM = 11; calY--; } }
+    else if (act === 'next') { calM++; if (calM > 11) { calM = 0; calY++; } }
+    else return;
+    render(true);
+  }
+  function renderCalendar() {
+    var now = new Date();
+    var y = calY || now.getFullYear();
+    var m = calY ? calM : now.getMonth();
+    var offset = (new Date(y, m, 1).getDay() + 6) % 7;          // 周一起始
+    var days = new Date(y, m + 1, 0).getDate();
+    var total = Math.ceil((offset + days) / 7) * 7;             // 5 或 6 行
+    var cells = '';
+    for (var i = 0; i < total; i++) {
+      var cell = new Date(y, m, i - offset + 1);                // 跨月自动归一
+      var out = cell.getMonth() !== m;
+      var isToday = cell.getFullYear() === now.getFullYear() && cell.getMonth() === now.getMonth() && cell.getDate() === now.getDate();
+      var n = cell.getDate();
+      cells += '<span class="cal-d' + (out ? ' other' : '') + (isToday ? ' today' : '') + '">' + (isToday ? '<i>' + n + '</i>' : n) + '</span>';
+    }
+    return '<div class="card-body cal-body">' +
+      '<div class="cal-head"><span class="cal-title">' + y + '年' + (m + 1) + '月</span>' +
+        '<span class="cal-nav">' +
+          '<button type="button" class="cal-navbtn" data-act="prev" aria-label="上个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></svg></button>' +
+          '<button type="button" class="cal-navbtn" data-act="next" aria-label="下个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 6l6 6-6 6"/></svg></button>' +
+        '</span></div>' +
+      '<div class="cal-wd"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>' +
+      '<div class="cal-grid">' + cells + '</div>' +
+    '</div>';
+  }
+
+  /* ── 待办卡（OD 卡 9：勾选在卡内，增删改在参数面板；数据 = config.toml 的 card.todo） ── */
+  var TDO = null;   // null = 还没拿到 config（显示等待）；[] = 空态
+  function todoLoad() {
+    if (!window.__TAURI__ || !window.__TAURI__.core) { TDO = []; render(true); return; }
+    window.__TAURI__.core.invoke('get_config').then(function (cfg) {
+      var c = (cfg.cards || []).filter(function (x) { return x.id === cardId; })[0];
+      TDO = (c && c.todo) ? c.todo : [];
+      render(true);
+    }).catch(function () { TDO = TDO || []; render(true); });
+  }
+  window.__todoRefresh = function () { todoLoad(); };   // 参数面板保存后 Rust eval 这个钩子
+  function todoToggle(idx) {
+    if (!TDO || !TDO[idx]) return;
+    TDO[idx].done = !TDO[idx].done;   // 本地先行（即时反馈），随后以落盘结果为准
+    render(true);
+    window.__TAURI__.core.invoke('todo_toggle', { id: cardId, index: idx }).then(function (items) {
+      if (items) { TDO = items; render(true); }
+    }).catch(function () {});
+  }
+  function renderTodo() {
+    var items = TDO || [];
+    if (!items.length) {
+      return '<div class="card-body"><div class="empty td-empty-l">暂无待办<span>在主界面 · 参数 里添加</span></div></div>';
+    }
+    // 未完成在上、完成沉底（稳定排序、保留原数组下标给 todo_toggle 用）
+    var order = items.map(function (t, i) { return i; });
+    order.sort(function (a, b) { return (items[a].done ? 1 : 0) - (items[b].done ? 1 : 0) || a - b; });
+    var shown = order.slice(0, items.length > 4 ? 3 : 4);
+    var more = items.length - shown.length;
+    var html = '';
+    shown.forEach(function (i) {
+      var t = items[i];
+      html += '<div class="td-row' + (t.done ? ' done' : '') + '" data-idx="' + i + '" role="button">' +
+        '<i class="td-ck" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.8l4.2 4.2L19 7.4"/></svg></i>' +
+        '<span class="td-t">' + esc(t.text) + '</span></div>';
+    });
+    if (more > 0) html += '<div class="td-more">还有 ' + more + ' 项</div>';
+    return '<div class="card-body td-rows">' + html + '</div>';
+  }
 
   function computeState() {
     if (kind === 'Clock') return 'normal';
     if (kind === 'Pomodoro') return 'normal';   // 纯前端计时器，不依赖数据源
+    if (kind === 'Calendar') return 'normal';   // 纯前端（日期）
+    if (kind === 'Todo') return TDO === null ? 'empty' : 'normal';   // 数据 = config 条目
+    if (kind === 'Music') {
+      if (!msnap) return 'empty';
+      return Date.now() - mAt > 10000 ? 'error' : (msnap.present ? 'normal' : 'empty');
+    }
     if (kind === 'Weather') {
       // 天气 30 分钟一刷：35 分钟没更新才算异常
       if (!wsnap) return 'empty';
@@ -866,7 +1091,7 @@
     curState = st;
     var html;
     if (st === 'empty') {
-      html = '<div class="empty">等待数据…</div>';
+      html = '<div class="empty">' + (kind === 'Music' ? '未在播放' : '等待数据…') + '</div>';
     } else if (st === 'error') {
       // 数据异常：整卡只留一行字，跟无数据态同款（不再画告警点 + 变暗内容）
       html = '<div class="empty">数据异常</div>';
@@ -877,9 +1102,17 @@
         kind === 'Performance' ? renderPerf() :
         kind === 'Disks' ? renderDisks() :
         kind === 'NetRate' ? renderNet() :
+        kind === 'Music' ? renderMusic() :
+        kind === 'Calendar' ? renderCalendar() :
+        kind === 'Todo' ? renderTodo() :
         kind === 'Clock' ? renderClock() : renderWeather();
     }
     bodyEl.innerHTML = html;
+    // 音乐卡：封面 dataURL（Rust 缓存）走 style 注入，避免进 HTML 字符串的转义坑
+    if (kind === 'Music' && msnap && msnap.cover) {
+      var cv = bodyEl.querySelector('.mc-cover');
+      if (cv) cv.style.backgroundImage = 'url("' + msnap.cover + '")';
+    }
     lastRenderAt = Date.now();
     // 性能/磁盘的 normal 态容器不是 .card-body，包一层保持 flex 布局
     if ((kind === 'Performance' || kind === 'Disks') && st === 'normal') {
@@ -927,6 +1160,25 @@
           .catch(function () {});
       }
     }
+
+    // 音乐：SMTC 事件 + 首帧拉取（iframe 预览收不到事件 → 低频轮询兜底）
+    if (kind === 'Music') {
+      function pullM() {
+        T.core.invoke('music_state').then(function (m) {
+          msnap = m || null; mAt = Date.now(); render();
+        }).catch(function () {});
+      }
+      pullM();
+      if (previewMode) {
+        setInterval(pullM, 2000);
+      } else {
+        T.event.listen('music', function (e) { msnap = e.payload; mAt = Date.now(); render(); })
+          .catch(function () {});
+      }
+    }
+
+    // 待办：读自己的 config 条目（勾选 → todo_toggle；面板编辑 → __todoRefresh 钩子拉回）
+    if (kind === 'Todo') todoLoad();
   }
 
   // 状态陈旧检查（1s tick）：数据断流 → 异常态
@@ -941,6 +1193,15 @@
 
   // 番茄钟：半秒一跳，秒数不顿挫；到点自动进完成态
   if (kind === 'Pomodoro') { pomoLoad(); setInterval(pomoTick, 500); }
+
+  // 日历：跨天自动刷新（30 秒检查一次，只在日期真的翻了才重绘；翻月状态保留）
+  if (kind === 'Calendar') {
+    var calDay0 = new Date().toDateString();
+    setInterval(function () {
+      var s = new Date().toDateString();
+      if (s !== calDay0) { calDay0 = s; render(true); }
+    }, 30000);
+  }
 
   /* ── 交互：按住 150ms 拖动（卡片侧唯一手势）
      不要 data-tauri-drag-region：它在 mousedown 当场进原生拖拽循环，吞掉后续点击。
@@ -959,8 +1220,9 @@
   }
   cardEl.addEventListener('mousedown', function (e) {
     if (e.button !== 0 || PINNED) return;
-    // 番茄钟的按钮：在按钮上按下不启动拖动计时，否则按住 150ms 会把卡片拖走
-    if (e.target && e.target.closest && e.target.closest('button')) return;
+    // 卡内可点元素：在它们上面按下不启动拖动计时，否则按住 150ms 会把卡片拖走。
+    // button = 番茄钟/音乐/日历导航；.td-row = 待办行（div，不落在 button 里，2026-10-09 补）。
+    if (e.target && e.target.closest && e.target.closest('button, .td-row')) return;
     if (holdTimer) clearTimeout(holdTimer);
     holdTimer = setTimeout(startDrag, 150);
   });

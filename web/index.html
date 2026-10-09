@@ -208,6 +208,13 @@
   }
   .add-btn.added:hover { background: var(--fg-soft); border-color: transparent; }
   #lib-empty { display: none; padding: 40px 0; text-align: center; color: var(--muted); font-size: 13px; }
+  /* 待办条目编辑（参数面板 · 卡 9：编辑只在这里，卡面只勾选） */
+  .todo-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+  .te-row { display: flex; align-items: center; gap: 6px; }
+  .te-row .input { flex: 1; min-width: 0; font-size: 12.5px; padding: 7px 9px; }
+  .te-row .icon-btn { flex: 0 0 auto; }
+  .te-done.on { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 60%, transparent); }
+  .todo-edit-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
 
   /* 迷你部件预览 */
   .mw {
@@ -682,6 +689,48 @@
             </div>
           </article>
 
+          <!-- 音乐（Windows SMTC） -->
+          <article class="tpl" id="tpl-music" data-od-id="tpl-music" data-name="音乐 媒体 歌曲 封面 播放 SMTC">
+            <div class="tpl-prev">
+              <div class="mw">
+                <div class="mw-head"><b>音乐</b><span class="meta">系统媒体会话</span></div>
+                <div class="mline"><span class="lab">封面 + 歌名 / 歌手 + 进度 + 播放控制</span></div>
+              </div>
+            </div>
+            <div class="tpl-body">
+              <div><h3>音乐</h3><p>正在播放的封面、歌名与上一首/暂停/下一首</p></div>
+              <button class="btn btn-secondary add-btn">＋ 添加到桌面</button>
+            </div>
+          </article>
+
+          <!-- 日历（全月视图） -->
+          <article class="tpl" id="tpl-calendar" data-od-id="tpl-calendar" data-name="日历 月历 日期 月份 万年历">
+            <div class="tpl-prev">
+              <div class="mw">
+                <div class="mw-head"><b>日历</b><span class="meta">全月</span></div>
+                <div class="mline"><span class="lab">周一起始 · 今日高亮 · ‹ › 翻月</span></div>
+              </div>
+            </div>
+            <div class="tpl-body">
+              <div><h3>日历</h3><p>全月视图，今天一眼可见</p></div>
+              <button class="btn btn-secondary add-btn">＋ 添加到桌面</button>
+            </div>
+          </article>
+
+          <!-- 待办（勾选在卡内，编辑在参数面板） -->
+          <article class="tpl" id="tpl-todo" data-od-id="tpl-todo" data-name="待办 todo 任务 清单 勾选 备忘">
+            <div class="tpl-prev">
+              <div class="mw">
+                <div class="mw-head"><b>待办</b><span class="meta">本地</span></div>
+                <div class="mline"><span class="lab">点一行，勾掉一件事</span></div>
+              </div>
+            </div>
+            <div class="tpl-body">
+              <div><h3>待办</h3><p>桌面清单，勾选即时生效</p></div>
+              <button class="btn btn-secondary add-btn">＋ 添加到桌面</button>
+            </div>
+          </article>
+
         </div>
         <div id="lib-empty" data-od-id="library-empty">没有匹配的卡片</div>
       </section>
@@ -1039,7 +1088,10 @@
     Clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
     Weather: '<svg viewBox="0 0 24 24"><path d="M7.5 18h9a3.7 3.7 0 0 0 .6-7.35A5.5 5.5 0 0 0 7 9.6 4.2 4.2 0 0 0 7.5 18z"/></svg>',
     NetRate: '<svg viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M5 20h14"/></svg>',
-    Pomodoro: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7"/><path d="M12 9.5v4l2.5 1.5M9.5 3.5h5"/></svg>'
+    Pomodoro: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7"/><path d="M12 9.5v4l2.5 1.5M9.5 3.5h5"/></svg>',
+    Music: '<svg viewBox="0 0 24 24"><path d="M9 18V6.2l9.5-2v11.6"/><circle cx="6.6" cy="18" r="2.4"/><circle cx="16.1" cy="15.8" r="2.4"/></svg>',
+    Calendar: '<svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3.5v4M16 3.5v4"/></svg>',
+    Todo: '<svg viewBox="0 0 24 24"><path d="M4 6.5l1.8 1.8L9 4.7"/><path d="M12.5 6.5H20"/><path d="M4 14.5l1.8 1.8L9 12.7"/><path d="M12.5 14.5H20"/></svg>'
   };
   // 尺寸（2026-10-02 定死）：每张卡**只有一个尺寸**，都是 60px 基准方格的整数倍 ——
   // 性能 4×2 / 磁盘 4×3 / 时钟 4×2 / 天气 4×3 / 网络 2×2 / 番茄 2×2 格。
@@ -1054,7 +1106,11 @@
     Clock:       { name: '桌面时钟', tpl: 'tpl-clock',   size: [240, 120], refresh_ms: 1000 },
     Weather:     { name: '天气',     tpl: 'tpl-weather', size: [240, 180], refresh_ms: 1800000, rates: [[900000,'15 分钟'],[1800000,'30 分钟'],[3600000,'1 小时']] },
     NetRate:     { name: '网络速率', tpl: 'tpl-net',     size: [120, 120], refresh_ms: 1000, rates: [[1000,'1 秒'],[2000,'2 秒'],[5000,'5 秒']] },
-    Pomodoro:    { name: '番茄钟',   tpl: 'tpl-pomo',    size: [120, 120], refresh_ms: 1000 }
+    Pomodoro:    { name: '番茄钟',   tpl: 'tpl-pomo',    size: [120, 120], refresh_ms: 1000 },
+    // 音乐 = SMTC 推送（1s 一条），无「刷新间隔」档；日历/待办无轮询，rate 仅用于展示
+    Music:       { name: '音乐',     tpl: 'tpl-music',   size: [240, 120], refresh_ms: 1000 },
+    Calendar:    { name: '日历',     tpl: 'tpl-calendar',size: [240, 180], refresh_ms: 60000 },
+    Todo:        { name: '待办',     tpl: 'tpl-todo',    size: [240, 120], refresh_ms: 60000 }
   };
 
   /* 尺寸已按卡片类型定死（2026-10-02 用户要求）：每张卡一个尺寸（见上面 KINDS[].size），
@@ -1225,6 +1281,17 @@
     var el = $('#pm-' + key);
     return el ? el.classList.contains('on') : null;
   }
+  /* 待办编辑行（参数面板 · 卡 9）：文本 + 完成开关 + 删除 */
+  function todoRowHtml(text, done) {
+    var esc2 = function (s) { return String(s).replace(/[&<>"]/g, function (ch) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]; }); };
+    return '<div class="te-row">' +
+      '<input class="input te-t" maxlength="80" placeholder="写点什么…" value="' + esc2(text) + '">' +
+      '<button class="icon-btn te-done' + (done ? ' on' : '') + '" type="button" title="完成 / 取消完成" aria-label="完成状态">' +
+        '<svg viewBox="0 0 24 24"><path d="M5 12.8l4.2 4.2L19 7.4"/></svg></button>' +
+      '<button class="icon-btn te-del" type="button" title="删除" aria-label="删除">' +
+        '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' +
+      '</div>';
+  }
   function openSheet(c) {
     sheetCard = c;
     var k = KINDS[c.kind] || KINDS.Performance;
@@ -1246,6 +1313,19 @@
     }
     if (c.kind === 'Disks') {
       html += pmSwitchRow('warn', '超 90% 变色', '容量条转为橙色提醒', c.warn90 !== false);
+    }
+    // 待办编辑器（卡 9）：增删改全部在这里；卡面上只保留点行勾选
+    if (c.kind === 'Todo') {
+      var items = c.todo || [];
+      html += '<div class="pm-row" data-k="todo"><div class="slabel"><span>待办条目</span></div>' +
+        '<div class="todo-edit" id="pm-todo">';
+      items.forEach(function (t) { html += todoRowHtml(t.text || '', !!t.done); });
+      html += '</div>' +
+        '<div class="todo-edit-actions">' +
+          '<button class="btn btn-secondary" id="pm-todo-add" type="button" style="font-size:12px;padding:7px 12px;">＋ 添加一条</button>' +
+          '<span class="snote" style="margin:0;">保存后在卡片上点一行即可勾选</span>' +
+        '</div>' +
+        '<p class="snote">未完成在上、完成沉底；卡面最多显示 4 行，超出显示「还有 N 项」</p></div>';
     }
     // 尺寸行已去掉：尺寸按卡片类型定死（见上方 KINDS / 尺寸说明）
     // 位置（自由，不吸格点；面板里改是精确落点）
@@ -1273,6 +1353,24 @@
         sw.setAttribute('aria-checked', on ? 'true' : 'false');
       });
     });
+    // 待办编辑器：行内 完成开关 / 删除；底部 添加一条（新行默认未完成）
+    var teWrap = $('#pm-todo');
+    if (teWrap) {
+      teWrap.addEventListener('click', function (e) {
+        var t = e.target;
+        if (!t || !t.closest) return;
+        var del = t.closest('.te-del');
+        if (del) { del.closest('.te-row').remove(); return; }
+        var dn = t.closest('.te-done');
+        if (dn) dn.classList.toggle('on');
+      });
+      var addBtn = $('#pm-todo-add');
+      if (addBtn) addBtn.addEventListener('click', function () {
+        teWrap.insertAdjacentHTML('beforeend', todoRowHtml('', false));
+        var inp = teWrap.lastElementChild.querySelector('input');
+        if (inp) inp.focus();
+      });
+    }
     $('#param-modal').classList.add('open');
   }
   function bindSheet() {
@@ -1290,6 +1388,16 @@
       // 尺寸面板已去掉：原样回传当前尺寸，保持 card_update 的契约（Rust 侧仍会吸整格）
       var size = [c.size[0], c.size[1]];
       var g = pmSwitchOn('gpu'), w = pmSwitchOn('warn');
+      // 待办：整表落盘（todo_set 顺手让开着的卡片窗口刷新；空白行剔除、上限 20 条在 Rust 侧同样兜底）
+      if (c.kind === 'Todo') {
+        var items = [];
+        $$('#pm-todo .te-row', $('#pm-body')).forEach(function (r) {
+          var inp = r.querySelector('input');
+          var txt = inp ? inp.value : '';
+          if (txt.trim()) items.push({ text: txt.trim(), done: !!r.querySelector('.te-done.on') });
+        });
+        invoke('todo_set', { id: c.id, items: items }).catch(function (e) { console.error(e); toast('待办保存失败'); });
+      }
       invoke('card_update', {
         id: c.id,
         size: size,
