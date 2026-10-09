@@ -400,7 +400,7 @@
     transition: background 0.15s ease, border-color 0.15s ease;
   }
   .mc-btn:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
-  .mc-btn svg { width: 1.125rem; height: 1.125rem; stroke-width: 1.75; }   /* 2026-10-09 用户「按钮太糊太小」：28×24/14px → 32×28/18px + 描边加粗 */
+  .mc-btn svg { width: 1.25rem; height: 1.25rem; stroke-width: 1.9; }   /* 2026-10-09 第二轮：18→20px、描边 1.75→1.9 */
   .card-music button { pointer-events: auto; cursor: pointer; padding: 0; }
 
   /* ─── 日历卡（OD 卡片稿 卡 8：240×180 · 全月视图 · 周一起始 · 今日高亮） ─── */
@@ -672,6 +672,7 @@
   var snap = null, lastAt = 0, lastRenderAt = 0, pendingTimer = null;
   var wsnap = null, wAt = 0;   // 天气自成一路：30 分钟一刷，与 1s 快照无关
   var msnap = null, mAt = 0, mKey = null;   // 音乐：SMTC 1s 推送（事件 + 首帧拉取），10s 无更新算异常；mKey = 歌名|歌手（切歌动画判定）
+  var mDir = 1;   // 下一次切歌的封面翻转方向：1=下一首（默认）/ -1=上一首（卡上按 ⏮/⏭ 时更新，翻完复位）
   var curState = 'boot';   // boot=首帧前, empty, normal, error
 
   function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
@@ -949,16 +950,20 @@
     if (kind === 'Pomodoro') pomoAct(b.dataset.act);
     else if (kind === 'Calendar') calNav(b.dataset.act);
     else if (kind === 'Music' && window.__TAURI__ && window.__TAURI__.core) {
+      // 记住方向：卡上按 ⏮/⏭ → 下一次封面翻转按对应方向（2026-10-09 用户）
+      if (b.dataset.act === 'previous') mDir = -1;
+      else if (b.dataset.act === 'next') mDir = 1;
       window.__TAURI__.core.invoke('music_action', { action: b.dataset.act }).catch(function () {});
     }
   });
 
   /* ── 音乐卡（OD 卡 7：封面 + 歌名/歌手 + 进度 + 上一首/播放暂停/下一首 · Windows SMTC） ── */
   var NOTE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6.2l9.5-2v11.6"/><circle cx="6.6" cy="18" r="2.4"/><circle cx="16.1" cy="15.8" r="2.4"/></svg>';
-  var I_PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 6v12"/><path d="M17.8 6.9v10.2L10 12z"/></svg>';
-  var I_NEXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 6v12"/><path d="M6.2 6.9v10.2L14 12z"/></svg>';
-  var I_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6.5v11L18 12z"/></svg>';
-  var I_PAUSE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 6.5v11M14 6.5v11"/></svg>';
+  // 播放控制图标（2026-10-09 重绘：三角=二次贝塞尔圆角（圆软）、暂停双竖加宽 4→5.6、显示尺寸 18→20px）
+  var I_PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 6.1v11.8"/><path d="M15.5 7.9Q17.9 6.1 17.9 9.1L17.9 14.9Q17.9 17.9 15.5 16.1L12.1 13.8Q9.7 12 12.1 10.2L15.5 7.9Z"/></svg>';
+  var I_NEXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.6 6.1v11.8"/><path d="M8.5 7.9Q6.1 6.1 6.1 9.1L6.1 14.9Q6.1 17.9 8.5 16.1L11.9 13.8Q14.3 12 11.9 10.2L8.5 7.9Z"/></svg>';
+  var I_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7.7Q9.5 6.1 9.5 9.1L9.5 14.9Q9.5 17.9 12 16.3L16.3 13.6Q18.8 12 16.3 10.4L12 7.7Z"/></svg>';
+  var I_PAUSE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.2 6.4v11.2M14.8 6.4v11.2"/></svg>';
   function renderMusic() {
     var m = msnap || {};
     var dur = Number(m.duration_ms) || 0;
@@ -1024,14 +1029,16 @@
     art.style.backgroundImage = url;
     art.style.opacity = '1';
   }
-  function coverFlip() {
+  function coverFlip(dir) {
     var cv = bodyEl.querySelector('.mc-cover'); if (!cv) return;
+    var d = dir < 0 ? -1 : 1;
+    // d=1（下一首）：向左翻（转出 −90°、自 +90° 转回）；d=−1（上一首）：镜像
     cv.style.transition = 'transform 0.22s cubic-bezier(0.6, 0, 0.8, 0.4)';   // 转出：ease-in
-    cv.style.transform = 'rotateY(90deg)';
+    cv.style.transform = 'rotateY(' + (d * -90) + 'deg)';
     setTimeout(function () {
       paintCover();
       cv.style.transition = 'none';
-      cv.style.transform = 'rotateY(-90deg)';
+      cv.style.transform = 'rotateY(' + (d * 90) + 'deg)';
       void cv.offsetWidth;                                                      // 逼一次 reflow，−90° 立即生效
       cv.style.transition = 'transform 0.26s cubic-bezier(0.2, 0.6, 0.4, 1)';   // 转回：ease-out
       cv.style.transform = 'rotateY(0deg)';
@@ -1077,8 +1084,11 @@
     var flip = !!(mKey && key && key !== '|' && mKey !== key);
     if (key && key !== '|') mKey = key;
     msnap = p || null; mAt = Date.now();
-    if (flip && curState === 'normal' && bodyEl.querySelector('.mc-body')) { musicPaint(); coverFlip(); }
-    else render();
+    if (flip && curState === 'normal' && bodyEl.querySelector('.mc-body')) {
+      musicPaint();
+      coverFlip(mDir);
+      mDir = 1;   // 方向提示用完复位（默认下一首）
+    } else render();
   }
   window.__musicPush = onMusic;   // 诊断钩子：CDP 注入假快照测切歌动画/晚到封面（2026-10-09）
 
