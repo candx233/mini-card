@@ -391,16 +391,17 @@
   .mc-artist { font-size: 0.8125rem; line-height: 1.25; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mc-prog { display: flex; align-items: center; gap: 0.375rem; margin-bottom: 0.5rem; }
   .mc-prog .bar { flex: 1; height: 0.3125rem; }
-  .mc-prog .bar > i { background: var(--accent); }   /* 进度 = 强调色（与番茄钟同策略） */
+  .mc-prog .bar > i { background: var(--accent); transition: width 0.25s linear; }   /* 进度=强调色；0.25s 线性 → 200ms 外推走表连成丝滑（2026-10-09） */
   .mc-time { font-family: var(--font-mono); font-size: 0.625rem; line-height: 1; color: var(--muted); white-space: nowrap; }
-  .mc-acts { display: flex; justify-content: flex-start; gap: 0.375rem; }
+  .mc-acts { display: flex; justify-content: flex-start; gap: 0.25rem; }   /* 2026-10-09 三轮：键 34×30 后 3×34+2×4=110 正好满列宽 */
   .mc-btn {
-    width: 2rem; height: 1.75rem; border-radius: 0.4375rem; display: grid; place-items: center;
+    width: 2.125rem; height: 1.875rem; border-radius: 0.5rem; display: grid; place-items: center;
+    /* 2026-10-09 三轮：32×28 → 34×30（用户「按钮…整体再大一点」） */
     color: var(--fg); background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent);
     transition: background 0.15s ease, border-color 0.15s ease;
   }
   .mc-btn:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
-  .mc-btn svg { width: 1.25rem; height: 1.25rem; stroke-width: 1.9; }   /* 2026-10-09 第二轮：18→20px、描边 1.75→1.9 */
+  .mc-btn svg { width: 1.375rem; height: 1.375rem; stroke-width: 2.2; }   /* 2026-10-09 三轮：20→22px、描边 1.9→2.2（用户「线条再粗一点」） */
   .card-music button { pointer-events: auto; cursor: pointer; padding: 0; }
 
   /* ─── 日历卡（OD 卡片稿 卡 8：240×180 · 全月视图 · 周一起始 · 今日高亮） ─── */
@@ -673,6 +674,7 @@
   var wsnap = null, wAt = 0;   // 天气自成一路：30 分钟一刷，与 1s 快照无关
   var msnap = null, mAt = 0, mKey = null;   // 音乐：SMTC 1s 推送（事件 + 首帧拉取），10s 无更新算异常；mKey = 歌名|歌手（切歌动画判定）
   var mDir = 1;   // 下一次切歌的封面翻转方向：1=下一首（默认）/ -1=上一首（卡上按 ⏮/⏭ 时更新，翻完复位）
+  var mBase = null;   // 进度外推基准 {pos,dur,playing,at}（2026-10-09 三轮：200ms 走表，修正「比声音慢一秒」）
   var curState = 'boot';   // boot=首帧前, empty, normal, error
 
   function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
@@ -959,10 +961,10 @@
 
   /* ── 音乐卡（OD 卡 7：封面 + 歌名/歌手 + 进度 + 上一首/播放暂停/下一首 · Windows SMTC） ── */
   var NOTE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6.2l9.5-2v11.6"/><circle cx="6.6" cy="18" r="2.4"/><circle cx="16.1" cy="15.8" r="2.4"/></svg>';
-  // 播放控制图标（2026-10-09 重绘：三角=二次贝塞尔圆角（圆软）、暂停双竖加宽 4→5.6、显示尺寸 18→20px）
-  var I_PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 6.1v11.8"/><path d="M15.5 7.9Q17.9 6.1 17.9 9.1L17.9 14.9Q17.9 17.9 15.5 16.1L12.1 13.8Q9.7 12 12.1 10.2L15.5 7.9Z"/></svg>';
-  var I_NEXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.6 6.1v11.8"/><path d="M8.5 7.9Q6.1 6.1 6.1 9.1L6.1 14.9Q6.1 17.9 8.5 16.1L11.9 13.8Q14.3 12 11.9 10.2L8.5 7.9Z"/></svg>';
-  var I_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7.7Q9.5 6.1 9.5 9.1L9.5 14.9Q9.5 17.9 12 16.3L16.3 13.6Q18.8 12 16.3 10.4L12 7.7Z"/></svg>';
+  // 播放控制图标（2026-10-09 三轮：三角=二次贝塞尔圆角 t=4.6（明显圆软）、22px、描边 2.2、暂停双竖间距 5.6）
+  var I_PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 6.1v11.8"/><path d="M14.2 8.8Q17.9 6.1 17.9 10.7L17.9 13.3Q17.9 17.9 14.2 15.2L13.4 14.7Q9.7 12 13.4 9.3L14.2 8.8Z"/></svg>';
+  var I_NEXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.6 6.1v11.8"/><path d="M9.8 8.8Q6.1 6.1 6.1 10.7L6.1 13.3Q6.1 17.9 9.8 15.2L10.6 14.7Q14.3 12 10.6 9.3L9.8 8.8Z"/></svg>';
+  var I_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 8.6Q9.5 6.1 9.5 10.7L9.5 13.3Q9.5 17.9 13.4 15.4L14.9 14.5Q18.8 12 14.9 9.5L13.4 8.6Z"/></svg>';
   var I_PAUSE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.2 6.4v11.2M14.8 6.4v11.2"/></svg>';
   function renderMusic() {
     var m = msnap || {};
@@ -1084,6 +1086,14 @@
     var flip = !!(mKey && key && key !== '|' && mKey !== key);
     if (key && key !== '|') mKey = key;
     msnap = p || null; mAt = Date.now();
+    // 时间外推基准（Rust 已按 LastUpdatedTime 补偿过推送值 → 这里 ≈ 推送时刻的真实进度；
+    // 前端在两次推送之间按本地时钟继续走表 → 观感实时，不再等下一秒推送）
+    mBase = {
+      pos: Math.max(0, Number((p && p.position_ms) || 0)),
+      dur: Math.max(0, Number((p && p.duration_ms) || 0)),
+      playing: !!(p && p.status === 'playing'),
+      at: performance.now()
+    };
     if (flip && curState === 'normal' && bodyEl.querySelector('.mc-body')) {
       musicPaint();
       coverFlip(mDir);
@@ -1290,6 +1300,25 @@
         T.event.listen('music', function (e) { onMusic(e.payload); })
           .catch(function () {});
       }
+
+      // 进度/时间 200ms 走表：Rust 推送带 LastUpdatedTime 补偿 → 基准≈推送时刻真实进度，
+      // 推送间隔内按本地时钟外推（2026-10-09 用户「条和播放时间都比声音慢一秒」）。
+      setInterval(function () {
+        if (kind !== 'Music' || curState !== 'normal' || !mBase || !mBase.playing || !(mBase.dur > 0)) return;
+        var cur = mBase.pos + (performance.now() - mBase.at);
+        if (cur > mBase.dur) cur = mBase.dur;
+        var fi = bodyEl.querySelector('.mc-prog .bar > i');
+        if (fi) {
+          var w = cur / mBase.dur * 100;
+          fi.style.width = (w > 100 ? 100 : w).toFixed(1) + '%';
+        }
+        var tt = bodyEl.querySelector('.mc-time');
+        if (tt) {
+          var ts = Math.floor(cur / 1000);
+          var txt = ('0' + Math.floor(ts / 60)).slice(-2) + ':' + ('0' + (ts % 60)).slice(-2);
+          if (tt.textContent !== txt) tt.textContent = txt;
+        }
+      }, 200);
     }
 
     // 待办：读自己的 config 条目（勾选 → todo_toggle；面板编辑 → __todoRefresh 钩子拉回）

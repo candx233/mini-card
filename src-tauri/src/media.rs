@@ -1,6 +1,7 @@
 //! Windows SMTC 媒体会话（音乐卡数据源 · 2026-10-08）
 //! 结构：
-//!   - 1s 轮询线程：读当前媒体会话（曲目 / 状态 / 进度 / 封面）→ emit("music") 给所有窗口；
+//!   - 500ms 轮询线程：读当前媒体会话（曲目 / 状态 / 进度 / 封面）→ emit("music") 给所有窗口；
+//!   - 进度带 LastUpdatedTime 补偿（播放器 timeline 写入时刻 → 现在 的间隔补上），配合前端走表消滞后；
 //!   - 封面 = Rust 侧缓存 dataURL（key = app|title|artist，换曲才重读缩略图；与 Spike 结论一致）；
 //!   - 命令：music_state（卡片首帧拉取 / 预览轮询）、music_action（上一首 / 播放暂停 / 下一首）。
 //! API 写法照 examples/smtc_probe.rs（windows 0.62 实机验证过）：
@@ -55,6 +56,14 @@ fn status_name(s: PlayStatus) -> &'static str {
     }
 }
 
+/// FILETIME 基准（100ns，1601-01-01 起）的当前时刻 —— SMTC LastUpdatedTime 同基准。
+fn now_filetime_100ns() -> i64 {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    (unix.as_nanos() / 100) as i64 + 116_444_736_000_000_000
+}
+
 fn read_thumb(
     thumb: &windows::Storage::Streams::IRandomAccessStreamReference,
 ) -> windows::core::Result<Vec<u8>> {
@@ -97,10 +106,27 @@ fn read_snap(mgr: &SessionManager) -> Option<MusicSnap> {
         .to_string();
 
     let (position_ms, duration_ms) = match s.GetTimelineProperties() {
-        Ok(tl) => (
-            tl.Position().map(|d| d.Duration as f64 / 1e7 * 1000.0).unwrap_or(0.0),
-            tl.EndTime().map(|d| d.Duration as f64 / 1e7 * 1000.0).unwrap_or(0.0),
-        ),
+        Ok(tl) => {
+            let p = tl.Position().map(|d| d.Duration as f64 / 1e7 * 1000.0).unwrap_or(0.0);
+            let end = tl.EndTime().map(|d| d.Duration as f64 / 1e7 * 1000.0).unwrap_or(0.0);
+            // 位置补偿（2026-10-09 用户「条和播放时间都比声音慢一秒」）：
+            // P 是播放器上一次写入 timeline 的进度，LastUpdatedTime 是那次写入的时刻；
+            // 正在播放时补上「写入时刻 → 现在」的间隔 ≈ 当前真实进度（速率按 1.0）。
+            // 超过 30s 的间隔视为时间线异常（个别播放器不更新），退回原始 P。
+            let mut pos = p;
+            if status == "playing" {
+                if let Ok(l) = tl.LastUpdatedTime() {
+                    let gap_ms = (now_filetime_100ns() - l.UniversalTime) as f64 / 1e4;
+                    if gap_ms > 0.0 && gap_ms < 30_000.0 {
+                        pos = p + gap_ms;
+                    }
+                }
+                if end > 0.0 {
+                    pos = pos.min(end);
+                }
+            }
+            (pos, end)
+        }
         Err(_) => (0.0, 0.0),
     };
 
@@ -164,7 +190,7 @@ pub fn spawn(app: AppHandle) {
                 *SNAP.lock().unwrap() = Some(snap.clone());
             }
             let _ = app.emit("music", &snap);
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
 }
