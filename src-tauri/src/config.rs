@@ -15,6 +15,9 @@ pub enum CardKind {
     Weather,
     NetRate,
     Pomodoro,
+    Music,
+    Calendar,
+    Todo,
 }
 
 impl CardKind {
@@ -26,6 +29,9 @@ impl CardKind {
             CardKind::Weather => "天气",
             CardKind::NetRate => "网络速率",
             CardKind::Pomodoro => "番茄钟",
+            CardKind::Music => "音乐",
+            CardKind::Calendar => "日历",
+            CardKind::Todo => "待办",
         }
     }
 
@@ -40,6 +46,9 @@ impl CardKind {
             CardKind::Weather     => [4, 3],
             CardKind::NetRate     => [2, 2],
             CardKind::Pomodoro    => [2, 2],
+            CardKind::Music       => [4, 2],
+            CardKind::Calendar    => [4, 3],
+            CardKind::Todo        => [4, 2],
         }
     }
 
@@ -96,6 +105,21 @@ pub fn disk_height_px(count: usize) -> f32 {
     cells as f32 * CELL
 }
 
+/// 待办条目（2026-10-08 · 卡 9）：卡片里只做勾选；增删改在主界面参数面板（todo_set 整表替换）。
+/// 存储走 config.toml（用户数据不押 WebView2 缓存）——见 CardInstance.todo。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TodoItem {
+    pub text: String,
+    pub done: bool,
+}
+
+impl Default for TodoItem {
+    fn default() -> Self {
+        Self { text: String::new(), done: false }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CardInstance {
@@ -113,6 +137,8 @@ pub struct CardInstance {
     pub show_gpu: bool,
     /// 参数弹窗「超 90% 变色」：关掉后磁盘容量条不再转橙色
     pub warn90: bool,
+    /// 待办条目（仅 Todo 卡使用；卡片勾选 → todo_toggle，面板编辑 → todo_set）
+    pub todo: Vec<TodoItem>,
 }
 
 impl Default for CardInstance {
@@ -127,6 +153,7 @@ impl Default for CardInstance {
             pinned: false,
             show_gpu: true,
             warn90: true,
+            todo: Vec::new(),
         }
     }
 }
@@ -235,6 +262,7 @@ impl Default for Config {
                     pinned: false,
                     show_gpu: true,
                     warn90: true,
+                    todo: Vec::new(),
                 },
                 CardInstance {
                     id: "disks-default".to_owned(),
@@ -246,6 +274,7 @@ impl Default for Config {
                     pinned: false,
                     show_gpu: true,
                     warn90: true,
+                    todo: Vec::new(),
                 },
             ],
             settings: Settings::default(),
@@ -305,7 +334,7 @@ impl Config {
 mod tests {
     use super::*;
 
-    fn kinds() -> [CardKind; 6] {
+    fn kinds() -> [CardKind; 9] {
         [
             CardKind::Performance,
             CardKind::Disks,
@@ -313,6 +342,9 @@ mod tests {
             CardKind::Weather,
             CardKind::NetRate,
             CardKind::Pomodoro,
+            CardKind::Music,
+            CardKind::Calendar,
+            CardKind::Todo,
         ]
     }
 

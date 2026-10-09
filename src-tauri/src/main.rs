@@ -9,6 +9,7 @@ mod config;
 mod data;
 mod display;
 mod guide;
+mod media;
 mod update;
 mod weather;
 
@@ -144,7 +145,7 @@ fn screen_size() -> (i32, i32) {
 }
 
 /// 极简 base64（只为把壁纸塞进 data URL，避免引 crate）
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for c in data.chunks(3) {
@@ -487,6 +488,48 @@ fn card_locate(app: AppHandle, id: String) -> bool {
 
 /* 位置不再有「对齐桌面」命令（2026-09-28 用户：先不做吸到格点，位置自由拖动）。
    拖动对齐改成拖动时的辅助线 + 磁吸边，见 src/guide.rs。 */
+
+/// 待办卡：勾选/取消一条（卡片内点击，`data-idx` = config.todo 原数组下标）。
+/// 落盘后回传最新列表（卡片以响应为准重绘）。
+#[tauri::command]
+fn todo_toggle(id: String, index: usize) -> Result<Vec<config::TodoItem>, String> {
+    let mut cfg = Config::load();
+    let Some(card) = cfg.cards.iter_mut().find(|c| c.id == id) else {
+        return Err("card not found".into());
+    };
+    if index >= card.todo.len() {
+        return Err("index out of range".into());
+    }
+    card.todo[index].done = !card.todo[index].done;
+    let items = card.todo.clone();
+    cfg.save()?;
+    Ok(items)
+}
+
+/// 参数面板编辑待办：整表替换（空文本剔除、上限 20 条）。
+/// 落盘后卡片窗口开着的话让它立即刷新（__todoRefresh 钩子）。
+#[tauri::command]
+fn todo_set(
+    app: AppHandle,
+    id: String,
+    items: Vec<config::TodoItem>,
+) -> Result<Vec<config::TodoItem>, String> {
+    let mut cfg = Config::load();
+    let Some(card) = cfg.cards.iter_mut().find(|c| c.id == id) else {
+        return Err("card not found".into());
+    };
+    card.todo = items
+        .into_iter()
+        .filter(|t| !t.text.trim().is_empty())
+        .take(20)
+        .collect();
+    let out = card.todo.clone();
+    cfg.save()?;
+    if let Some(w) = app.get_webview_window(&card_label(&id)) {
+        let _ = w.eval("window.__todoRefresh && window.__todoRefresh();");
+    }
+    Ok(out)
+}
 
 /* ───────────── 天气（Open-Meteo，免 key）─────────────
    注意：Tauri 的**同步**命令跑在主线程上 → 网络请求必须走 async + spawn_blocking，
@@ -1786,6 +1829,10 @@ fn main() {
             card_update,
             card_locate,
             card_pin,
+            todo_toggle,
+            todo_set,
+            media::music_state,
+            media::music_action,
             get_weather,
             weather_refresh,
             weather_search,
@@ -1871,6 +1918,9 @@ fn main() {
 
             // 天气：先贴上次落盘的值，再起 30 分钟轮询
             weather::spawn(weather_seed, handle.clone());
+
+            // 媒体（音乐卡）：1s 轮询 SMTC → emit("music")；封面 Rust 缓存换曲才重读
+            media::spawn(handle.clone());
 
             // 全局热键：注册 config 里存的那一组（失败不拦启动，界面里能重录）
             // 开关关着就不注册；键位仍留在 config 里（设置页那个 switch）
