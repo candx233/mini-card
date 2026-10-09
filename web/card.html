@@ -372,14 +372,16 @@
      封面 = Rust 缓存 dataURL（换曲才重读）；无封面回退音符图标；按键左对齐与歌名同左缘（稿 v2 定案）。
      稿件 208×88 基准整体 ×~1.1 折算到实卡内容区 220×100。 */
   .card-music { padding: 0.625rem; }
-  .mc-body { flex: 1; min-height: 0; display: flex; flex-direction: row; align-items: center; gap: 0.625rem; }
+  .mc-body { flex: 1; min-height: 0; display: flex; flex-direction: row; align-items: center; gap: 0.625rem; perspective: 600px; }   /* perspective：切歌封面翻转的景深（2026-10-09） */
   .mc-cover {
-    flex: 0 0 auto; align-self: stretch; aspect-ratio: 1 / 1; border-radius: 0.75rem;
+    position: relative; flex: 0 0 auto; align-self: stretch; aspect-ratio: 1 / 1; border-radius: 0.75rem;
     background: linear-gradient(135deg, color-mix(in oklch, var(--accent) 72%, transparent), color-mix(in oklch, var(--accent) 26%, transparent));
     border: 1px solid var(--border);
-    background-size: cover; background-position: center;
     display: grid; place-items: center;
+    will-change: transform;
   }
+  /* 专辑封面图层：盖在音符回退底上；切歌旋转动画换的就是它（2026-10-09 用户） */
+  .mc-art { position: absolute; inset: 0; border-radius: inherit; background-size: cover; background-position: center; }
   .mc-cover svg { width: 1.75rem; height: 1.75rem; color: color-mix(in oklch, var(--fg) 80%, transparent); }
   .mc-col { flex: 1; min-width: 0; align-self: stretch; display: flex; flex-direction: column; justify-content: center; }
   /* 右列纵向节奏 = 方案 D（2026-10-09 用户从 A/B/C/D 四案中选定）：
@@ -669,7 +671,7 @@
 
   var snap = null, lastAt = 0, lastRenderAt = 0, pendingTimer = null;
   var wsnap = null, wAt = 0;   // 天气自成一路：30 分钟一刷，与 1s 快照无关
-  var msnap = null, mAt = 0;   // 音乐：SMTC 1s 推送（事件 + 首帧拉取），10s 无更新算异常
+  var msnap = null, mAt = 0, mKey = null;   // 音乐：SMTC 1s 推送（事件 + 首帧拉取），10s 无更新算异常；mKey = 歌名|歌手（切歌动画判定）
   var curState = 'boot';   // boot=首帧前, empty, normal, error
 
   function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
@@ -967,7 +969,7 @@
     var tsec = Math.floor(pos / 1000);
     var posTxt = ('0' + Math.floor(tsec / 60)).slice(-2) + ':' + ('0' + (tsec % 60)).slice(-2);
     return '<div class="card-body mc-body">' +
-      '<div class="mc-cover" aria-hidden="true">' + (m.cover ? '' : NOTE_SVG) + '</div>' +
+      '<div class="mc-cover" aria-hidden="true">' + NOTE_SVG + '<div class="mc-art"></div></div>' +
       '<div class="mc-col">' +
         '<div class="mc-meta">' +
           '<div class="mc-title">' + esc(m.title || '—') + '</div>' +
@@ -989,7 +991,7 @@
           // 不出现假数据；时间位保留 0:00 与真播版式完全一致）
           function renderMusicDemo() {
             return '<div class="card-body mc-body">' +
-              '<div class="mc-cover" aria-hidden="true">' + NOTE_SVG + '</div>' +
+              '<div class="mc-cover" aria-hidden="true">' + NOTE_SVG + '<div class="mc-art"></div></div>' +
               '<div class="mc-col">' +
                 '<div class="mc-meta">' +
                   '<div class="mc-title">歌名</div>' +
@@ -1007,6 +1009,71 @@
               '</div>' +
             '</div>';
           }
+
+  /* ── 音乐卡的增量更新 + 切歌封面旋转动画（2026-10-09）──
+     数据每秒推送但只有「歌名|歌手」变化才算切歌；切歌走 coverFlip（整块封面转出 90° →
+     在侧立的瞬间换图 → 从 −90° 转回，读起来像卡面连续翻过一面）。其余更新走路更新
+     （musicPaint），不重建 DOM —— 否则动画会被每秒的 innerHTML 打断。 */
+  function paintCover() {
+    var art = bodyEl.querySelector('.mc-art'); if (!art) return;
+    art.style.backgroundImage = (msnap && msnap.cover) ? 'url("' + msnap.cover + '")' : '';
+    art.style.opacity = '1';
+  }
+  function coverFlip() {
+    var cv = bodyEl.querySelector('.mc-cover'); if (!cv) return;
+    cv.style.transition = 'transform 0.22s cubic-bezier(0.6, 0, 0.8, 0.4)';   // 转出：ease-in
+    cv.style.transform = 'rotateY(90deg)';
+    setTimeout(function () {
+      paintCover();
+      cv.style.transition = 'none';
+      cv.style.transform = 'rotateY(-90deg)';
+      void cv.offsetWidth;                                                      // 逼一次 reflow，−90° 立即生效
+      cv.style.transition = 'transform 0.26s cubic-bezier(0.2, 0.6, 0.4, 1)';   // 转回：ease-out
+      cv.style.transform = 'rotateY(0deg)';
+    }, 220);
+  }
+  function musicPaint() {
+    if (curState !== 'normal') return;
+    if (!bodyEl.querySelector('.mc-body')) return;
+    var m = msnap || {};
+    var t = bodyEl.querySelector('.mc-title'); if (t) t.textContent = m.title || '—';
+    var a = bodyEl.querySelector('.mc-artist'); if (a) a.textContent = m.artist || '—';
+    var dur = Number(m.duration_ms) || 0;
+    var pos = Math.max(0, Number(m.position_ms) || 0);
+    if (dur > 0) pos = Math.min(pos, dur);
+    var pct = dur > 0 ? Math.min(100, Math.max(0, pos / dur * 100)) : 0;
+    var fi = bodyEl.querySelector('.mc-prog .bar > i'); if (fi) fi.style.width = pct.toFixed(1) + '%';
+    var ts = Math.floor(pos / 1000);
+    var tt = bodyEl.querySelector('.mc-time');
+    if (tt) tt.textContent = ('0' + Math.floor(ts / 60)).slice(-2) + ':' + ('0' + (ts % 60)).slice(-2);
+    var playing = m.status === 'playing';
+    var btn = bodyEl.querySelector('.mc-btn[data-act="toggle"]');
+    if (btn && btn.dataset.icon !== (playing ? 'pause' : 'play')) {
+      btn.dataset.icon = playing ? 'pause' : 'play';
+      btn.setAttribute('aria-label', playing ? '暂停' : '播放');
+      btn.innerHTML = playing ? I_PAUSE : I_PLAY;
+    }
+    // 晚到的封面（同曲、key 未变）：补图 + 轻淡入 —— QQ 音乐刚启动时缩略图比元数据晚到（2026-10-09 用户报）
+    var art = bodyEl.querySelector('.mc-art');
+    if (art && m.cover && !art.style.backgroundImage) {
+      art.style.transition = 'opacity 0.25s ease';
+      art.style.opacity = '0';
+      art.style.backgroundImage = 'url("' + m.cover + '")';
+      void art.offsetWidth;
+      art.style.opacity = '1';
+    }
+  }
+  /* 音乐数据统一入口（首帧拉取 / 事件 / 预览轮询都走它） */
+  function onMusic(p) {
+    var key = (p && p.present) ? ((p.title || '') + '|' + (p.artist || '')) : null;
+    // 切歌 = 前有真歌名、现在有真歌名、且变了；中场空元数据帧（key='|'）不算、也不重置基准
+    var flip = !!(mKey && key && key !== '|' && mKey !== key);
+    if (key && key !== '|') mKey = key;
+    msnap = p || null; mAt = Date.now();
+    if (flip && curState === 'normal' && bodyEl.querySelector('.mc-body')) { musicPaint(); coverFlip(); }
+    else render();
+  }
+  window.__musicPush = onMusic;   // 诊断钩子：CDP 注入假快照测切歌动画/晚到封面（2026-10-09）
 
   /* ── 日历卡（OD 卡 8：全月视图 · 周一起始 · 今日高亮 · ‹ › 翻月） ── */
   var calY = 0, calM = 0;   // 0/0 = 跟随今天；翻月后固定在被翻的月份（跨天刷新时保留）
@@ -1123,6 +1190,12 @@
     } else {
       // 番茄钟自己管重绘（每秒只改数字，不整段重建）
       if (kind === 'Pomodoro') { pomoPaint(true); lastRenderAt = Date.now(); return; }
+      // 音乐卡同理：状态没变时走路更新（别每秒重建 DOM，否则切歌动画被打断）
+      if (kind === 'Music' && !force && bodyEl.querySelector('.mc-body')) {
+        musicPaint();
+        lastRenderAt = Date.now();
+        return;
+      }
       html =
         kind === 'Performance' ? renderPerf() :
         kind === 'Disks' ? renderDisks() :
@@ -1133,10 +1206,10 @@
         kind === 'Clock' ? renderClock() : renderWeather();
     }
     bodyEl.innerHTML = html;
-    // 音乐卡：封面 dataURL（Rust 缓存）走 style 注入，避免进 HTML 字符串的转义坑
-    if (kind === 'Music' && msnap && msnap.cover) {
-      var cv = bodyEl.querySelector('.mc-cover');
-      if (cv) cv.style.backgroundImage = 'url("' + msnap.cover + '")';
+    // 音乐卡：封面 dataURL（Rust 缓存）注入到 .mc-art 图层（不进 HTML 字符串，避转义坑）
+    if (kind === 'Music') {
+      var art = bodyEl.querySelector('.mc-art');
+      if (art && msnap && msnap.cover) art.style.backgroundImage = 'url("' + msnap.cover + '")';
     }
     lastRenderAt = Date.now();
     // 性能/磁盘的 normal 态容器不是 .card-body，包一层保持 flex 布局
@@ -1186,18 +1259,16 @@
       }
     }
 
-    // 音乐：SMTC 事件 + 首帧拉取（iframe 预览收不到事件 → 低频轮询兜底）
+    // 音乐：SMTC 事件 + 首帧拉取（iframe 预览收不到事件 → 低频轮询兜底）；统一走 onMusic（切歌动画）
     if (kind === 'Music') {
       function pullM() {
-        T.core.invoke('music_state').then(function (m) {
-          msnap = m || null; mAt = Date.now(); render();
-        }).catch(function () {});
+        T.core.invoke('music_state').then(function (m) { onMusic(m); }).catch(function () {});
       }
       pullM();
       if (previewMode) {
         setInterval(pullM, 2000);
       } else {
-        T.event.listen('music', function (e) { msnap = e.payload; mAt = Date.now(); render(); })
+        T.event.listen('music', function (e) { onMusic(e.payload); })
           .catch(function () {});
       }
     }

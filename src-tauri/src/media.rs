@@ -104,7 +104,9 @@ fn read_snap(mgr: &SessionManager) -> Option<MusicSnap> {
         Err(_) => (0.0, 0.0),
     };
 
-    // 封面：键（app|title|artist）变了才重读；读不到就留空（卡片回退图标）
+    // 封面：键（app|title|artist）变了重读；**读空也要重试**——
+    // QQ 音乐等刚启动时缩略图比元数据晚到 1~2 秒，只按 key 变化读一次会一直空到下一首
+    // （2026-10-09 用户实测：刚打开 QQ音乐没有封面、切歌才出）。
     let key = format!("{app}|{title}|{artist}");
     let changed = {
         let mut k = COVER_KEY.lock().unwrap();
@@ -115,7 +117,8 @@ fn read_snap(mgr: &SessionManager) -> Option<MusicSnap> {
             false
         }
     };
-    if changed {
+    let need_read = changed || COVER.lock().unwrap().is_empty();
+    if need_read {
         let mut cov = String::new();
         if let Ok(thumb) = props.Thumbnail() {
             if let Ok(bytes) = read_thumb(&thumb) {
