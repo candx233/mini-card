@@ -441,7 +441,7 @@
   .td-t { flex: 1; min-width: 0; font-size: 0.9375rem; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .td-row.done .td-t { color: var(--muted); text-decoration: line-through; }
   .td-more { height: 1.3125rem; display: flex; align-items: center; padding-left: 1.5625rem; font-size: 0.8125rem; color: var(--muted); }
-  .td-empty-l { display: flex; flex-direction: column; gap: 0.125rem; }
+  .td-empty-l { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.125rem; }
   .td-empty-l span { font-size: 0.6875rem; opacity: 0.85; }
   .card-todo .td-row { pointer-events: auto; cursor: pointer; }
 
@@ -979,10 +979,32 @@
           '<button type="button" class="mc-btn" data-act="previous" aria-label="上一首">' + I_PREV + '</button>' +
           '<button type="button" class="mc-btn" data-act="toggle" aria-label="' + (playing ? '暂停' : '播放') + '">' + (playing ? I_PAUSE : I_PLAY) + '</button>' +
           '<button type="button" class="mc-btn" data-act="next" aria-label="下一首">' + I_NEXT + '</button>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
-  }
+          '</div>' +
+          '</div>' +
+          '</div>';
+          }
+          // 无会话时的示例样张（2026-10-09 用户：没有播放时不要显示「未在播放」空字，显示案例样张，
+          // 与 OD 卡 7 的播放样例同构 —— 封面回退音符图标、数值固定 夜曲/周杰伦/58%/2:41）
+          function renderMusicDemo() {
+          return '<div class="card-body mc-body">' +
+          '<div class="mc-cover" aria-hidden="true">' + NOTE_SVG + '</div>' +
+          '<div class="mc-col">' +
+          '<div class="mc-meta">' +
+            '<div class="mc-title">夜曲</div>' +
+            '<div class="mc-artist">周杰伦</div>' +
+          '</div>' +
+          '<div class="mc-prog">' +
+            '<div class="bar" role="img" aria-label="播放进度示例"><i style="width:58%"></i></div>' +
+            '<span class="mc-time">2:41</span>' +
+          '</div>' +
+          '<div class="mc-acts">' +
+            '<button type="button" class="mc-btn" data-act="previous" aria-label="上一首">' + I_PREV + '</button>' +
+            '<button type="button" class="mc-btn" data-act="toggle" aria-label="暂停">' + I_PAUSE + '</button>' +
+            '<button type="button" class="mc-btn" data-act="next" aria-label="下一首">' + I_NEXT + '</button>' +
+          '</div>' +
+          '</div>' +
+          '</div>';
+          }
 
   /* ── 日历卡（OD 卡 8：全月视图 · 周一起始 · 今日高亮 · ‹ › 翻月） ── */
   var calY = 0, calM = 0;   // 0/0 = 跟随今天；翻月后固定在被翻的月份（跨天刷新时保留）
@@ -1091,7 +1113,8 @@
     curState = st;
     var html;
     if (st === 'empty') {
-      html = '<div class="empty">' + (kind === 'Music' ? '未在播放' : '等待数据…') + '</div>';
+      // 音乐无会话不走空字：渲染示例样张（卡片保持完整观感；2026-10-09 用户）
+      html = kind === 'Music' ? renderMusicDemo() : '<div class="empty">等待数据…</div>';
     } else if (st === 'error') {
       // 数据异常：整卡只留一行字，跟无数据态同款（不再画告警点 + 变暗内容）
       html = '<div class="empty">数据异常</div>';
