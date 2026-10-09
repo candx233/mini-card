@@ -393,12 +393,12 @@
   .mc-time { font-family: var(--font-mono); font-size: 0.625rem; line-height: 1; color: var(--muted); white-space: nowrap; }
   .mc-acts { display: flex; justify-content: flex-start; gap: 0.375rem; }
   .mc-btn {
-    width: 1.75rem; height: 1.5rem; border-radius: 0.375rem; display: grid; place-items: center;
+    width: 2rem; height: 1.75rem; border-radius: 0.4375rem; display: grid; place-items: center;
     color: var(--fg); background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent);
     transition: background 0.15s ease, border-color 0.15s ease;
   }
   .mc-btn:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
-  .mc-btn svg { width: 0.875rem; height: 0.875rem; }
+  .mc-btn svg { width: 1.125rem; height: 1.125rem; stroke-width: 1.75; }   /* 2026-10-09 用户「按钮太糊太小」：28×24/14px → 32×28/18px + 描边加粗 */
   .card-music button { pointer-events: auto; cursor: pointer; padding: 0; }
 
   /* ─── 日历卡（OD 卡片稿 卡 8：240×180 · 全月视图 · 周一起始 · 今日高亮） ─── */
@@ -985,15 +985,15 @@
           '</div>' +
           '</div>';
           }
-          // 无会话时的示例样张（2026-10-09 用户：没有播放时不要显示「未在播放」空字，显示案例样张：
-          // 只要 歌名/歌手 + 空着的进度条（不出现假进度），与 OD 卡 7 的样式同构）
+          // 无会话时的示例样张（2026-10-09 用户定稿：只要字面上的「歌名/歌手」占位 + 空着的进度条，
+          // 不出现假数据；时间位保留 0:00 与真播版式完全一致）
           function renderMusicDemo() {
             return '<div class="card-body mc-body">' +
               '<div class="mc-cover" aria-hidden="true">' + NOTE_SVG + '</div>' +
               '<div class="mc-col">' +
                 '<div class="mc-meta">' +
-                  '<div class="mc-title">夜曲</div>' +
-                  '<div class="mc-artist">周杰伦</div>' +
+                  '<div class="mc-title">歌名</div>' +
+                  '<div class="mc-artist">歌手</div>' +
                 '</div>' +
                 '<div class="mc-prog">' +
                   '<div class="bar" role="img" aria-label="播放进度 0%"><i style="width:0%"></i></div>' +
