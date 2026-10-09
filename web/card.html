@@ -376,7 +376,7 @@
   .mc-cover {
     position: relative; flex: 0 0 auto; align-self: stretch; aspect-ratio: 1 / 1; border-radius: 0.75rem;
     background: linear-gradient(135deg, color-mix(in oklch, var(--accent) 72%, transparent), color-mix(in oklch, var(--accent) 26%, transparent));
-    border: 1px solid var(--border);
+    /* 2026-10-09 用户：封面不要那圈 1px 边缘（去边框，图缘直接到圆角） */
     display: grid; place-items: center;
     will-change: transform;
   }
