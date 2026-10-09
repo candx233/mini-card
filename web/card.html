@@ -1015,8 +1015,13 @@
      在侧立的瞬间换图 → 从 −90° 转回，读起来像卡面连续翻过一面）。其余更新走路更新
      （musicPaint），不重建 DOM —— 否则动画会被每秒的 innerHTML 打断。 */
   function paintCover() {
+    var cv = bodyEl.querySelector('.mc-cover'); if (!cv) return;
     var art = bodyEl.querySelector('.mc-art'); if (!art) return;
-    art.style.backgroundImage = (msnap && msnap.cover) ? 'url("' + msnap.cover + '")' : '';
+    var url = (msnap && msnap.cover) ? 'url("' + msnap.cover + '")' : '';
+    // 图片同时压到 .mc-cover 自己的背景上：那 1px 半透明边框下面是它
+    // （只画在 .mc-art 里的话，边框下透出底色蓝渐变 = 用户 2026-10-09 报的「一圈蓝色」）
+    cv.style.backgroundImage = url;
+    art.style.backgroundImage = url;
     art.style.opacity = '1';
   }
   function coverFlip() {
@@ -1056,6 +1061,8 @@
     // 晚到的封面（同曲、key 未变）：补图 + 轻淡入 —— QQ 音乐刚启动时缩略图比元数据晚到（2026-10-09 用户报）
     var art = bodyEl.querySelector('.mc-art');
     if (art && m.cover && !art.style.backgroundImage) {
+      var cvc = bodyEl.querySelector('.mc-cover');
+      if (cvc) cvc.style.backgroundImage = 'url("' + m.cover + '")';   // 边框底层同步（防蓝圈）
       art.style.transition = 'opacity 0.25s ease';
       art.style.opacity = '0';
       art.style.backgroundImage = 'url("' + m.cover + '")';
@@ -1206,10 +1213,12 @@
         kind === 'Clock' ? renderClock() : renderWeather();
     }
     bodyEl.innerHTML = html;
-    // 音乐卡：封面 dataURL（Rust 缓存）注入到 .mc-art 图层（不进 HTML 字符串，避转义坑）
-    if (kind === 'Music') {
-      var art = bodyEl.querySelector('.mc-art');
-      if (art && msnap && msnap.cover) art.style.backgroundImage = 'url("' + msnap.cover + '")';
+    // 音乐卡：封面 dataURL（Rust 缓存）同步注入两层——.mc-cover 那层在 1px 边框底下（防蓝圈），.mc-art 是主图层
+    if (kind === 'Music' && msnap && msnap.cover) {
+      var cvb = bodyEl.querySelector('.mc-cover');
+      var artb = bodyEl.querySelector('.mc-art');
+      if (cvb) cvb.style.backgroundImage = 'url("' + msnap.cover + '")';
+      if (artb) artb.style.backgroundImage = 'url("' + msnap.cover + '")';
     }
     lastRenderAt = Date.now();
     // 性能/磁盘的 normal 态容器不是 .card-body，包一层保持 flex 布局
