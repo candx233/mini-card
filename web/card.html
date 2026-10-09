@@ -961,10 +961,10 @@
 
   /* ── 音乐卡（OD 卡 7：封面 + 歌名/歌手 + 进度 + 上一首/播放暂停/下一首 · Windows SMTC） ── */
   var NOTE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6.2l9.5-2v11.6"/><circle cx="6.6" cy="18" r="2.4"/><circle cx="16.1" cy="15.8" r="2.4"/></svg>';
-  // 播放控制图标（2026-10-09 三轮：三角=二次贝塞尔圆角 t=4.6（明显圆软）、22px、描边 2.2、暂停双竖间距 5.6）
-  var I_PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 6.1v11.8"/><path d="M14.2 8.8Q17.9 6.1 17.9 10.7L17.9 13.3Q17.9 17.9 14.2 15.2L13.4 14.7Q9.7 12 13.4 9.3L14.2 8.8Z"/></svg>';
-  var I_NEXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.6 6.1v11.8"/><path d="M9.8 8.8Q6.1 6.1 6.1 10.7L6.1 13.3Q6.1 17.9 9.8 15.2L10.6 14.7Q14.3 12 10.6 9.3L9.8 8.8Z"/></svg>';
-  var I_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 8.6Q9.5 6.1 9.5 10.7L9.5 13.3Q9.5 17.9 13.4 15.4L14.9 14.5Q18.8 12 14.9 9.5L13.4 8.6Z"/></svg>';
+  // 播放控制图标（2026-10-09 四轮：三角顶点外扩 +16%（圆角后不再显小）；t=4.6 圆软、22px、描边 2.2、暂停双竖间距 5.6）
+  var I_PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 6.1v11.8"/><path d="M14.7 8Q18.5 5.4 18.5 10L18.5 14Q18.5 18.6 14.7 16L12.6 14.6Q8.8 12 12.6 9.4L14.7 8Z"/></svg>';
+  var I_NEXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.6 6.1v11.8"/><path d="M9.3 8Q5.5 5.4 5.5 10L5.5 14Q5.5 18.6 9.3 16L11.4 14.6Q15.2 12 11.4 9.4L9.3 8Z"/></svg>';
+  var I_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12.9 7.8Q9 5.4 9 10L9 14Q9 18.6 12.9 16.2L16 14.4Q19.9 12 16 9.6L12.9 7.8Z"/></svg>';
   var I_PAUSE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.2 6.4v11.2M14.8 6.4v11.2"/></svg>';
   function renderMusic() {
     var m = msnap || {};
