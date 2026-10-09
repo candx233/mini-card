@@ -381,11 +381,13 @@
     display: grid; place-items: center;
   }
   .mc-cover svg { width: 1.75rem; height: 1.75rem; color: color-mix(in oklch, var(--fg) 80%, transparent); }
-  .mc-col { flex: 1; min-width: 0; align-self: stretch; display: flex; flex-direction: column; justify-content: space-between; }
-  .mc-meta { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; }
+  .mc-col { flex: 1; min-width: 0; align-self: stretch; display: flex; flex-direction: column; justify-content: center; }
+  /* 右列纵向节奏 = 方案 D（2026-10-09 用户从 A/B/C/D 四案中选定）：
+     三块（歌手块/小条/按钮）收紧居中，小条上下各 8px；代价 = 首尾各内收 ~6px、不再与封面上下沿严格贴齐 */
+  .mc-meta { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; margin-bottom: 0.5rem; }
   .mc-title { font-size: 1rem; font-weight: 600; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mc-artist { font-size: 0.8125rem; line-height: 1.25; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mc-prog { display: flex; align-items: center; gap: 0.375rem; }
+  .mc-prog { display: flex; align-items: center; gap: 0.375rem; margin-bottom: 0.5rem; }
   .mc-prog .bar { flex: 1; height: 0.3125rem; }
   .mc-prog .bar > i { background: var(--accent); }   /* 进度 = 强调色（与番茄钟同策略） */
   .mc-time { font-family: var(--font-mono); font-size: 0.625rem; line-height: 1; color: var(--muted); white-space: nowrap; }
@@ -983,27 +985,27 @@
           '</div>' +
           '</div>';
           }
-          // 无会话时的示例样张（2026-10-09 用户：没有播放时不要显示「未在播放」空字，显示案例样张，
-          // 与 OD 卡 7 的播放样例同构 —— 封面回退音符图标、数值固定 夜曲/周杰伦/58%/2:41）
+          // 无会话时的示例样张（2026-10-09 用户：没有播放时不要显示「未在播放」空字，显示案例样张：
+          // 只要 歌名/歌手 + 空着的进度条（不出现假进度），与 OD 卡 7 的样式同构）
           function renderMusicDemo() {
-          return '<div class="card-body mc-body">' +
-          '<div class="mc-cover" aria-hidden="true">' + NOTE_SVG + '</div>' +
-          '<div class="mc-col">' +
-          '<div class="mc-meta">' +
-            '<div class="mc-title">夜曲</div>' +
-            '<div class="mc-artist">周杰伦</div>' +
-          '</div>' +
-          '<div class="mc-prog">' +
-            '<div class="bar" role="img" aria-label="播放进度示例"><i style="width:58%"></i></div>' +
-            '<span class="mc-time">2:41</span>' +
-          '</div>' +
-          '<div class="mc-acts">' +
-            '<button type="button" class="mc-btn" data-act="previous" aria-label="上一首">' + I_PREV + '</button>' +
-            '<button type="button" class="mc-btn" data-act="toggle" aria-label="暂停">' + I_PAUSE + '</button>' +
-            '<button type="button" class="mc-btn" data-act="next" aria-label="下一首">' + I_NEXT + '</button>' +
-          '</div>' +
-          '</div>' +
-          '</div>';
+            return '<div class="card-body mc-body">' +
+              '<div class="mc-cover" aria-hidden="true">' + NOTE_SVG + '</div>' +
+              '<div class="mc-col">' +
+                '<div class="mc-meta">' +
+                  '<div class="mc-title">夜曲</div>' +
+                  '<div class="mc-artist">周杰伦</div>' +
+                '</div>' +
+                '<div class="mc-prog">' +
+                  '<div class="bar" role="img" aria-label="播放进度 0%"><i style="width:0%"></i></div>' +
+                  '<span class="mc-time">0:00</span>' +
+                '</div>' +
+                '<div class="mc-acts">' +
+                  '<button type="button" class="mc-btn" data-act="previous" aria-label="上一首">' + I_PREV + '</button>' +
+                  '<button type="button" class="mc-btn" data-act="toggle" aria-label="暂停">' + I_PAUSE + '</button>' +
+                  '<button type="button" class="mc-btn" data-act="next" aria-label="下一首">' + I_NEXT + '</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
           }
 
   /* ── 日历卡（OD 卡 8：全月视图 · 周一起始 · 今日高亮 · ‹ › 翻月） ── */
