@@ -30,6 +30,12 @@
 - 预报 / 空气质量 / 地理编码：Open-Meteo（CC-BY 4.0）
 - 城市代码表：基于 ruixingchen/ChinaCityList（MIT）
 
+## 字体
+
+界面字体使用 **MiSans**（由小米免费提供），以未改动的字形子集内嵌于 [`web/fonts/`](web/fonts)。
+字体版权归小米科技有限责任公司所有，适用《MiSans 字体知识产权许可协议》，
+**不在本仓库 GPL-3.0 的授权范围内**。
+
 ## License
 
 [GPL-3.0](LICENSE)

@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>MiniCard</title>
 <style>
+  /* ─── 界面字体：MiSans（小米 · 免费商用 · 允许嵌入；子集与许可见 web/fonts/）───
+     四档静态字重与小米官方 web 用法一致：400 Regular / 500 Medium / 600 Semibold / 700 Bold。
+     系统字体栈仅兜底子集缺字（子集覆盖 GB2312 + 界面全部文案）。 ─── */
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 400; font-display: block; src: url("fonts/MiSans-Regular.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 500; font-display: block; src: url("fonts/MiSans-Medium.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 600; font-display: block; src: url("fonts/MiSans-Semibold.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 700; font-display: block; src: url("fonts/MiSans-Bold.woff2") format("woff2"); }
   /* ─── tokens（brand-spec.md 同源，与主界面/设计稿一致） ─── */
   :root {
     --surface: oklch(0.966 0.005 258.3 / 0.08);
@@ -19,8 +26,9 @@
     /* 主按钮文字色（番茄钟 .pm-btn.primary 用）与控件 hover 底：卡片稿里的 --bg / --fg-soft */
     --bg:      oklch(0.210 0.025 255.0);
     --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent);
-    --font-body: 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
-    --font-mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+    /* 2026-10-10 十改：全界面字体换 MiSans（内嵌四档子集，见 web/fonts/）；缺字由系统栈兜底 */
+    --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
+    --font-mono: 'MiSans', 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
   }
   *, *::before, *::after { box-sizing: border-box; }
   /* 透明窗口：底层模糊由系统 Acrylic 提供 */
@@ -193,7 +201,7 @@
     font-family: var(--font-mono); font-variant-numeric: tabular-nums;
     font-size: 4.5rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: var(--fg);
   }
-  .clock-date { font-size: 1rem; color: var(--muted); }   /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」） */
+  .clock-date { font-size: 1rem; color: var(--muted); font-variant-numeric: tabular-nums; }   /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」）；tnum @2026-10-10 MiSans（日期数字等宽，跨天宽度不跳） */
   .clock-lunar { font-size: 0.875rem; line-height: 1.5; color: var(--muted); }   /* 11→14 */
   .clock-stack { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.375rem; }
 
@@ -282,15 +290,10 @@
     font-style: normal; font-family: var(--font-body); font-weight: 400;
     font-size: 0.6875rem; letter-spacing: 0.02em; color: var(--muted); margin-left: 0.0625rem;
   }
-  /* 九改（2026-10-10 用户「网络card数字和小数点之间空这么大」）：mono 是全角字格——「.」自己占 21.5px，
-     墨迹只有 6.3px，38px 字号下两侧各空 ~9px（实测点墨迹 9.2/8.8）。点包进 <i class="dv"> 单独命名：
-     覆盖 .net-val i 的正文族/11px 继承，按数字同款 mono 600 渲染，负 margin 收字格 → 实测 4.7/4.2，
-     与「0」椭圆弧的视觉留白均衡（对比稿在 scratch 已出，-0.12em 定档）。45KB/s 等 3 位整数无点、不受影响。 */
-  .net-val i.dv {
-    font-style: normal; font-family: var(--font-mono); font-weight: 600;
-    font-size: 2.375rem; letter-spacing: -0.02em; color: var(--fg);
-    margin: 0 -0.12em;
-  }
+  /* 十改（2026-10-10 全界面字体换 MiSans）：mono 栈不再是全角字格——MiSans「.」38px 下字宽 9.27px、
+     墨迹 3.95px（信隙各 2.66px），0→. / .→2 侧距实测 2.0 / 3.0px（2x 截图 bbox 口径；旧 hack 同口径
+     4.0/3.5，观感均衡、无须补格）。i.dv 负 margin hack 撤销（本段 CSS + JS 包装一起删）。
+     九改留档：Cascadia 全角字格「.」自占 21.5px、墨迹 6.3px，38px 下两侧曾各空 ~9px（-0.12em 收格后 4.7/4.2 目检定稿）。 */
   /* 布局六改留档：居中 → 字左值右单行（嫌丑）→ 箭头左/数值右（组间空56）→ 并组居中+28 →
      单位下行+32（上下空带16，但单位脱离了数字）→ 单位同行+箭头固定左（本版）。 */
 
@@ -404,7 +407,7 @@
   .mc-prog { display: flex; align-items: center; gap: 0.375rem; margin-bottom: 0.5rem; }
   .mc-prog .bar { flex: 1; height: 0.3125rem; }
   .mc-prog .bar > i { background: var(--accent); transition: width 0.25s linear; }   /* 进度=强调色；0.25s 线性 → 200ms 外推走表连成丝滑（2026-10-09） */
-  .mc-time { font-family: var(--font-mono); font-size: 0.625rem; line-height: 1; color: var(--muted); white-space: nowrap; }
+  .mc-time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 0.625rem; line-height: 1; color: var(--muted); white-space: nowrap; }   /* tnum @2026-10-10 MiSans（分:秒逐秒更新，宽度稳定） */
   .mc-acts { display: flex; justify-content: flex-start; gap: 0.25rem; }   /* 2026-10-09 三轮：键 34×30 后 3×34+2×4=110 正好满列宽 */
   .mc-btn {
     width: 2.125rem; height: 1.875rem; border-radius: 0.5rem; display: grid; place-items: center;
@@ -482,14 +485,14 @@
   /* 行等分后重标定（2026-09-30 活卡探针实测标定，120/180 两档都过）：
      三行等分时字形的上缘空白让墨迹偏下 +4.8px，0.4rem 的 padding-bottom 把整簇上推一半 → 差 ≤1px。
      改行高/字号/行数都要重量。 */
-  .perf-rows:not(.dim) { padding-bottom: 0.3rem; }   /* 2026-10-06 字号放大后重标定（原 0.4rem）：把墨迹上下留白摆平到 12.0/11.75 */
+  .perf-rows:not(.dim) { padding-bottom: 0.2rem; }   /* 2026-10-06 字号放大后重标定（原 0.4rem）；2026-10-10 换 MiSans 后活卡差 +1.0（11/12）再收 0.1rem → 预测对称 */
   .disk-rows:not(.dim) { padding-bottom: 0.3125rem; }   /* 光学补偿逐档：2026-10-07 第三批按「徽标=顶部元素」的墨迹偏移重标定 */
   /* 2026-09-28 尺寸档位制：以下两条按「中档」实测定值（rem，随档位等比缩放）。
      实测（活卡离屏 alpha 量法，上/下留空）：性能 320×192 19.0/19.0、磁盘 340×204 18.0/20.0→19.0/19.0、
      时钟 240×144 19.0/18.0、网络 192×144 18.0/21.0→20.0/20.0、番茄 212×212 40.0/40.0；
      三档复核（小/中/大，离线同 CSS）差全部 ≤1px → 换档不用再重调补偿。
      注意离线 harness（假数据）与活卡（真数据）会差 2~3px（网络卡尤为明显），定值以活卡为准。 */
-  .clock-body { padding-bottom: 0.46875rem; }   /* 时钟只用于正常态（异常态走 .clock-stack） */
+  .clock-body { padding-bottom: 0.24375rem; }   /* 时钟只用于正常态（异常态走 .clock-stack）；2026-10-10 换 MiSans 后活卡差 −3.0（10/13）重标定 0.46875→0.24375 */
   /* 光学补偿（2026-10-01 内容放大后重新标定，120 基准 · 槽高 31px · 卡片 padding 10px）：
      活卡实测 改前 20.0/19.2 → 放大后 12.8/13.6（差 −0.8，≤1px 达标）。
      注意：这个值跟槽高/字号/卡片 padding 绑定，改了 120 基准的任何一条内件尺寸都要重量一遍。 */
@@ -851,9 +854,9 @@
     var n = snap.net || { rx: 0, tx: 0 };
     var up = fmtRate(n.tx), down = fmtRate(n.rx);
     // 2026-10-01 第三版：标签只留箭头（文字放左时 25px 数值放不下，见 .net-val 注释）
-    // 2026-10-10 九改：数值里的小数点单独包 <i class="dv">（mono 全角字格下点两侧空 ~9px，见 .net-val i.dv）
+    // 2026-10-10 十改：字体换 MiSans 后「.」字宽天然收窄（点两侧 ≈2~3px，见 .net-val 注释），撤销 i.dv 包装
     function line(arr, v) {
-      var num = v[0].replace('.', '<i class="dv">.</i>');
+      var num = v[0];
       return '<div class="net-row"><span class="net-lab" aria-hidden="true">' + arr +
         '</span><span class="net-val num">' + num + '<i>' + v[1] + '</i></span></div>';
     }
