@@ -282,6 +282,15 @@
     font-style: normal; font-family: var(--font-body); font-weight: 400;
     font-size: 0.6875rem; letter-spacing: 0.02em; color: var(--muted); margin-left: 0.0625rem;
   }
+  /* 九改（2026-10-10 用户「网络card数字和小数点之间空这么大」）：mono 是全角字格——「.」自己占 21.5px，
+     墨迹只有 6.3px，38px 字号下两侧各空 ~9px（实测点墨迹 9.2/8.8）。点包进 <i class="dv"> 单独命名：
+     覆盖 .net-val i 的正文族/11px 继承，按数字同款 mono 600 渲染，负 margin 收字格 → 实测 4.7/4.2，
+     与「0」椭圆弧的视觉留白均衡（对比稿在 scratch 已出，-0.12em 定档）。45KB/s 等 3 位整数无点、不受影响。 */
+  .net-val i.dv {
+    font-style: normal; font-family: var(--font-mono); font-weight: 600;
+    font-size: 2.375rem; letter-spacing: -0.02em; color: var(--fg);
+    margin: 0 -0.12em;
+  }
   /* 布局六改留档：居中 → 字左值右单行（嫌丑）→ 箭头左/数值右（组间空56）→ 并组居中+28 →
      单位下行+32（上下空带16，但单位脱离了数字）→ 单位同行+箭头固定左（本版）。 */
 
@@ -836,9 +845,11 @@
     var n = snap.net || { rx: 0, tx: 0 };
     var up = fmtRate(n.tx), down = fmtRate(n.rx);
     // 2026-10-01 第三版：标签只留箭头（文字放左时 25px 数值放不下，见 .net-val 注释）
+    // 2026-10-10 九改：数值里的小数点单独包 <i class="dv">（mono 全角字格下点两侧空 ~9px，见 .net-val i.dv）
     function line(arr, v) {
+      var num = v[0].replace('.', '<i class="dv">.</i>');
       return '<div class="net-row"><span class="net-lab" aria-hidden="true">' + arr +
-        '</span><span class="net-val num">' + v[0] + '<i>' + v[1] + '</i></span></div>';
+        '</span><span class="net-val num">' + num + '<i>' + v[1] + '</i></span></div>';
     }
     return '<div class="card-body net-rows' + (curState === 'error' ? ' dim' : '') + '">' +
       line('↑', up) + line('↓', down) + '</div>';
