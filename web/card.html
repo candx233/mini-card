@@ -196,17 +196,19 @@
   .disk-row.warn .pct { color: var(--warn); font-weight: 600; }
 
   /* ─── 时钟卡 ─── */
-  .clock-body { align-items: center; justify-content: center; gap: 0.375rem; }
+  .clock-body { align-items: center; justify-content: center; gap: 0.25rem; }   /* 2026-10-10 第四轮收拢：6→4 设计 px（用户「几个元素都往中间凑一点」）；台架 240×120 DSF2 墨迹隙 16.5/12.5→13.0/11.5、卡内上/下 6.5/7.0→9.0/9.0 */
   .clock-time {
     font-family: var(--font-mono); font-variant-numeric: tabular-nums;
     font-size: 4.5rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: var(--fg);
   }
-  .clock-date { font-size: 1.125rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 0.1875rem; }
+  .clock-date { font-size: 1.125rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 0.0625rem; }
     /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」）→ 16→18（2026-10-10 用户「下面两行字稍微调大一点」）；
        tnum @2026-10-10 MiSans（日期数字等宽，跨天宽度不跳）。
        margin-top @2026-10-10 十一改：MiSans 数字墨迹比 Consolas 高 3.5px（44.5→48 @72px，台架 DSF=2 实测），
        时间→日期墨迹隙 17→13.5；补 3px 回原节奏（顺带把卡内上/下差 +0.5 → 0.0）。
-       16→18 同批台架实测（240×120 DSF2）：卡内上/下留白 9.5/9.5 → 7.0/7.0（差 0）、时间→日期墨迹隙 16.0→16.5。 */
+       16→18 同批台架实测（240×120 DSF2）：卡内上/下留白 9.5/9.5 → 7.0/7.0（差 0）、时间→日期墨迹隙 16.0→16.5。
+       margin-top 3→1 与 .clock-body gap 6→4 同属第四轮收拢（2026-10-10，用户「几个元素都往中间凑一点」）：
+       时间→日期隙 16.5→13.0、日期→农历 12.5→11.5、卡内上/下 6.5/7.0→9.0/9.0（台架 DSF2）。 */
   .clock-lunar { font-size: 1rem; line-height: 1.5; color: var(--muted); }   /* 11→14→16 设计 px（2026-10-10 同批调大；台架 240×120 实测农历行墨迹 12→13.5、下留白 9.5→7.0） */
   .clock-stack { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.375rem; }
 
