@@ -1094,7 +1094,7 @@
   var mqSliders = [];   // 活跃滑块 {el, span, dist, trMs, base}
   var mqMemo = {};      // 'title'/'artist' → {text, base}（base = 周期原点，Date.now() 基准，跨重建稳定）
   var mqRaf = 0;
-  var MQ_HOLD_A = 800, MQ_HOLD_B = 1000, MQ_SPEED = 20, MQ_TR_MAX = 14000;   // 两端停 ms / 速度 px/s / 单程上限 ms
+  var MQ_HOLD_A = 800, MQ_HOLD_B = 1000, MQ_SPEED = 13, MQ_TR_MAX = 20000;   // 两端停 ms / 速度 px/s（2026-10-10 用户：20→13 更从容）/ 单程上限 ms
   function mqEase(p) { return p < 0.5 ? 2 * p * p : 1 - 2 * (1 - p) * (1 - p); }   // easeInOutQuad
   function mqOffset(st, now) {
     var period = MQ_HOLD_A + st.trMs + MQ_HOLD_B + st.trMs;
