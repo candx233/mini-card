@@ -429,8 +429,8 @@
     font-size: 0.875rem; line-height: 1.25; color: var(--fg);
   }
   .cal-d.other { opacity: 0.32; }
-  .cal-d i { font-style: normal; width: 1.375rem; height: 1.375rem; border-radius: 999px; display: grid; place-items: center; }   /* 药丸随字号 20→22px */
-  .cal-d.today i { background: var(--accent); color: var(--fg); font-weight: 600; }
+  .cal-d i { font-style: normal; width: 1.375rem; height: 1.375rem; border-radius: 999px; display: grid; place-items: center; padding-top: 0.125rem; }   /* 药丸随字号 20→22px；padding-top 光学补偿：字形下行留白让数字墨迹偏上 1px（原生实测 上5/下7 → 上6/下6），2px 内容位移 1px（2026-10-10 用户「中心点没对上」） */
+  .cal-d.today i { background: color-mix(in oklch, color-mix(in oklch, var(--accent) 75%, white) 70%, transparent); color: var(--fg); font-weight: 600; }   /* 2026-10-10 用户「颜色淡一点、跟透明效果贴一点」：加白去饱和 + 70% 透明（活卡 #4B98ED→#668DC1，白字对比 2.99→4.12:1） */
   .card-cal button { pointer-events: auto; cursor: pointer; }
 
   /* ─── 待办卡（OD 卡片稿 卡 9：240×120 · 勾选在卡内 / 编辑在参数面板） ───
