@@ -390,9 +390,8 @@
     /* 2026-10-09 用户「歌手的显示位置要在上下两个元素的居中」：上距 2→5、下距 8→7（含半行距后上下墨迹间距≈等距） */
   .mc-title { font-size: 1rem; font-weight: 600; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mc-artist { font-size: 0.8125rem; line-height: 1.25; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* 长歌名/歌手：溢出时来回滚动（JS 溢出才挂 .mc-marquee；text-indent 动画，不套内层 span —— musicPaint 走 textContent 直写） */
-  .mc-marquee { text-overflow: clip; animation: mc-marquee var(--mc-mt, 6s) ease-in-out infinite alternate; }
-  @keyframes mc-marquee { 0%, 10% { text-indent: 0; } 90%, 100% { text-indent: var(--mc-mx, 0px); } }
+  /* 长歌名/歌手：溢出时来回滚动 v2（JS 驱动 translate3d；.mc-slide = 内层滑块） */
+  .mc-title .mc-slide, .mc-artist .mc-slide { display: inline-block; white-space: nowrap; will-change: transform; }
   .mc-prog { display: flex; align-items: center; gap: 0.375rem; margin-bottom: 0.5rem; }
   .mc-prog .bar { flex: 1; height: 0.3125rem; }
   .mc-prog .bar > i { background: var(--accent); transition: width 0.25s linear; }   /* 进度=强调色；0.25s 线性 → 200ms 外推走表连成丝滑（2026-10-09） */
@@ -426,10 +425,11 @@
   .cal-d {
     display: grid; place-items: center;
     font-family: var(--font-mono); font-variant-numeric: tabular-nums;
-    font-size: 0.75rem; color: var(--fg);
+    /* 2026-10-10 用户「日的数字太小」：11.25 → 14px；line-height 1.25 收行盒（6 行月份不挤） */
+    font-size: 0.875rem; line-height: 1.25; color: var(--fg);
   }
   .cal-d.other { opacity: 0.32; }
-  .cal-d i { font-style: normal; width: 1.25rem; height: 1.25rem; border-radius: 999px; display: grid; place-items: center; }
+  .cal-d i { font-style: normal; width: 1.375rem; height: 1.375rem; border-radius: 999px; display: grid; place-items: center; }   /* 药丸随字号 20→22px */
   .cal-d.today i { background: var(--accent); color: var(--fg); font-weight: 600; }
   .card-cal button { pointer-events: auto; cursor: pointer; }
 
@@ -679,6 +679,7 @@
   var msnap = null, mAt = 0, mKey = null;   // 音乐：SMTC 1s 推送（事件 + 首帧拉取），10s 无更新算异常；mKey = 歌名|歌手（切歌动画判定）
   var mDir = 1;   // 下一次切歌的封面翻转方向：1=下一首（默认）/ -1=上一首（卡上按 ⏮/⏭ 时更新，翻完复位）
   var mBase = null;   // 进度外推基准 {pos,dur,playing,at}（2026-10-09 三轮：200ms 走表，修正「比声音慢一秒」）
+  var mAbsentAt = 0;  // 会话 present:false 首次出现时刻：宽限 4s 再切示例样张（防短暂断流闪回整卡重建）
   var curState = 'boot';   // boot=首帧前, empty, normal, error
 
   function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
@@ -1054,8 +1055,10 @@
     if (curState !== 'normal') return;
     if (!bodyEl.querySelector('.mc-body')) return;
     var m = msnap || {};
-    var t = bodyEl.querySelector('.mc-title'); if (t) t.textContent = m.title || '—';
-    var a = bodyEl.querySelector('.mc-artist'); if (a) a.textContent = m.artist || '—';
+    var t = bodyEl.querySelector('.mc-title'); var tTxt = m.title || '—';
+    if (t && t.textContent !== tTxt) t.textContent = tTxt;   // 文本没变不重写：保住滚动滑块（v2）
+    var a = bodyEl.querySelector('.mc-artist'); var aTxt = m.artist || '—';
+    if (a && a.textContent !== aTxt) a.textContent = aTxt;
     var dur = Number(m.duration_ms) || 0;
     var pos = Math.max(0, Number(m.position_ms) || 0);
     if (dur > 0) pos = Math.min(pos, dur);
@@ -1084,28 +1087,77 @@
     }
     musicMarquee();   // 长文本滚动（每次走更后复查；文本没变不重置动画）
   }
-  /* 长歌名/歌手溢出 → 来回滚动（2026-10-09 用户：太长的滚动显示）。
-     用 text-indent 动画而不是内层 span：musicPaint 对这两个元素是 textContent 直写，
-     套内层结构会被换掉。文本或宽度没变时不重挂，避免每次推送重置动画回到开头。 */
+  /* 长歌名/歌手溢出 → 来回滚动 v2（2026-10-09 二次返工）。
+     v1（CSS text-indent 动画）在卡面重建/文本重写时会从 0 重放：观感「原地抖 + 忽然窜走」。
+     v2：内层 span + rAF 驱动 translate3d（合成层、不触发布局）；
+         进度按文本记忆（mqMemo），跨重建续播 —— 重组装时直接落到正确偏移，不再回零。 */
+  var mqSliders = [];   // 活跃滑块 {el, span, dist, trMs, base}
+  var mqMemo = {};      // 'title'/'artist' → {text, base}（base = 周期原点，Date.now() 基准，跨重建稳定）
+  var mqRaf = 0;
+  var MQ_HOLD_A = 800, MQ_HOLD_B = 1000, MQ_SPEED = 20, MQ_TR_MAX = 14000;   // 两端停 ms / 速度 px/s / 单程上限 ms
+  function mqEase(p) { return p < 0.5 ? 2 * p * p : 1 - 2 * (1 - p) * (1 - p); }   // easeInOutQuad
+  function mqOffset(st, now) {
+    var period = MQ_HOLD_A + st.trMs + MQ_HOLD_B + st.trMs;
+    var u = ((now - st.base) % period + period) % period;
+    if (u < MQ_HOLD_A) return 0;
+    if (u < MQ_HOLD_A + st.trMs) return st.dist * mqEase((u - MQ_HOLD_A) / st.trMs);
+    if (u < MQ_HOLD_A + st.trMs + MQ_HOLD_B) return st.dist;
+    return st.dist * (1 - mqEase((u - MQ_HOLD_A - st.trMs - MQ_HOLD_B) / st.trMs));
+  }
+  function mqTick() {
+    mqRaf = 0;
+    if (!mqSliders.length) return;
+    var now = Date.now();
+    for (var i = mqSliders.length - 1; i >= 0; i--) {
+      var st = mqSliders[i];
+      if (!st.span.isConnected) { mqSliders.splice(i, 1); continue; }   // 重建后旧节点废弃
+      st.span.style.transform = 'translate3d(' + (-mqOffset(st, now)).toFixed(2) + 'px, 0, 0)';
+    }
+    if (mqSliders.length) mqRaf = requestAnimationFrame(mqTick);
+  }
   function musicMarquee() {
-    var els = [bodyEl.querySelector('.mc-title'), bodyEl.querySelector('.mc-artist')];
-    for (var i = 0; i < els.length; i++) {
-      var el = els[i]; if (!el) continue;
+    var slots = [['title', '.mc-title'], ['artist', '.mc-artist']];
+    for (var i = 0; i < slots.length; i++) {
+      var key = slots[i][0];
+      var el = bodyEl.querySelector(slots[i][1]); if (!el) continue;
       var txt = el.textContent || '';
-      if (el._mqText === txt && el._mqW === el.clientWidth) continue;
+      if (el._mqText === txt && el._mqW === el.clientWidth && el.isConnected) continue;   // 文本/宽度没变：别动
       el._mqText = txt; el._mqW = el.clientWidth;
-      el.classList.remove('mc-marquee');
-      el.style.removeProperty('--mc-mx'); el.style.removeProperty('--mc-mt');
       var over = el.scrollWidth - el.clientWidth;
       if (over > 2) {
-        el.style.setProperty('--mc-mx', (-(over + 6)) + 'px');                       // 末尾多留 6px，字尾不贴边
-        el.style.setProperty('--mc-mt', Math.min(11, (over + 6) / 17.6 + 2.4).toFixed(2) + 's');   // ≈22px/s + 两端各停 ~1.2s
-        el.classList.add('mc-marquee');
+        var span = el.querySelector('.mc-slide');
+        if (!span || span.textContent !== txt) {
+          el.innerHTML = '';
+          span = document.createElement('span'); span.className = 'mc-slide'; span.textContent = txt;
+          el.appendChild(span);
+        }
+        var memo = mqMemo[key];
+        var base = (memo && memo.text === txt) ? memo.base : Date.now();   // 同文本续播；新文本从头
+        mqMemo[key] = { text: txt, base: base };
+        var st = { el: el, span: span, dist: over + 6, trMs: Math.min((over + 6) / MQ_SPEED * 1000, MQ_TR_MAX), base: base };
+        mqSliders = mqSliders.filter(function (s) { return s.el !== el; });
+        mqSliders.push(st);
+        st.span.style.transform = 'translate3d(' + (-mqOffset(st, Date.now())).toFixed(2) + 'px, 0, 0)';   // 立即落位，防闪
+      } else {
+        mqSliders = mqSliders.filter(function (s) { return s.el !== el; });
+        // 不动 mqMemo：短文本（示例样张等）路过时不覆盖长文本的记忆槽，
+        // 否则闪断重建后同曲回来会回零（2026-10-09 实测）
+        var sp0 = el.querySelector('.mc-slide');
+        if (sp0) el.textContent = txt;          // 回收滑块（还原纯文本）
       }
     }
+    if (mqSliders.length && !mqRaf) mqRaf = requestAnimationFrame(mqTick);
   }
   /* 音乐数据统一入口（首帧拉取 / 事件 / 预览轮询都走它） */
   function onMusic(p) {
+    var nowT = Date.now();
+    // 会话短暂断流（present:false 一闪）：宽限期内沿用上一份在场快照，避免闪回示例样张整卡重建
+    if (p && p.present) {
+      mAbsentAt = 0;
+    } else if (p) {
+      if (!mAbsentAt) mAbsentAt = nowT;
+      if (msnap && msnap.present && nowT - mAbsentAt < 4000) p = msnap;
+    }
     var key = (p && p.present) ? ((p.title || '') + '|' + (p.artist || '')) : null;
     // 切歌 = 前有真歌名、现在有真歌名、且变了；中场空元数据帧（key='|'）不算、也不重置基准
     var flip = !!(mKey && key && key !== '|' && mKey !== key);
