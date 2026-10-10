@@ -358,7 +358,7 @@
   .pomo-track .bar > i { transition: width 0.35s linear; }
   .pm-btn {
     flex: 1; height: 1.5625rem; border-radius: 0.375rem; display: grid; place-items: center;
-    font-family: var(--font-body); font-size: 0.8125rem; font-weight: 600; letter-spacing: normal;   /* 2026-10-08：12→13px（= .pm-step 同档）提清晰度，去字距 */
+    font-family: var(--font-body); font-size: 0.875rem; font-weight: 600; letter-spacing: normal;   /* 2026-10-08：12→13px（= .pm-step 同档）提清晰度，去字距；13→14px @2026-10-10 第六轮（用户「暂停/重设笔画比较多 不清楚」：1x 8x nearest 对比定稿；700 显块、字距/阴影均无效——按钮不吃 text-shadow 是 Chromium 表单控件行为） */
     user-select: none; transition: background 0.15s ease, border-color 0.15s ease;
   }
   /* 2026-09-28 用户要求：主按钮不再上强调色，与 ghost 完全一致（卡片里只留进度条用强调色）
