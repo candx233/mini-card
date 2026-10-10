@@ -201,7 +201,10 @@
     font-family: var(--font-mono); font-variant-numeric: tabular-nums;
     font-size: 4.5rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: var(--fg);
   }
-  .clock-date { font-size: 1rem; color: var(--muted); font-variant-numeric: tabular-nums; }   /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」）；tnum @2026-10-10 MiSans（日期数字等宽，跨天宽度不跳） */
+  .clock-date { font-size: 1rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 0.1875rem; }
+    /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」）；tnum @2026-10-10 MiSans（日期数字等宽，跨天宽度不跳）。
+       margin-top @2026-10-10 十一改：MiSans 数字墨迹比 Consolas 高 3.5px（44.5→48 @72px，台架 DSF=2 实测），
+       时间→日期墨迹隙 17→13.5；补 3px 回原节奏（顺带把卡内上/下差 +0.5 → 0.0）。 */
   .clock-lunar { font-size: 0.875rem; line-height: 1.5; color: var(--muted); }   /* 11→14 */
   .clock-stack { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.375rem; }
 
@@ -273,8 +276,14 @@
     flex: 1 1 0; min-height: 0; display: flex; flex-direction: row;
     align-items: center; justify-content: flex-start; gap: 0.0625rem;
   }
-  /* 箭头 ↑/↓：22px 白字，12px 固定列（x 恒为 8 = 左右 padding；字形 10.4px 留 1.6px 列内余量）。 */
-  .net-lab { flex: 0 0 auto; width: 0.75rem; white-space: nowrap; font-size: 1.375rem; line-height: 1.3; color: var(--fg); }
+  /* 箭头 ↑/↓：22px 白字，12px 固定列（x 恒为 8 = 左右 padding）。
+     2026-10-10 十一改（换 MiSans 后重标定）：MiSans「↑」字身 = 1em（22px）、墨迹居中于字身，
+     墨迹 10.08px 自列内 5.96px 起 → 右缘越出 12px 列 4.04px、与数值墨迹重叠 ~1.4px
+     （Consolas 时代：字身 0.55em、墨迹 8.49px、列内右余 1.7px、箭头→数字墨迹隙 5.75px）。
+     relative 左移 0.3125rem 只挪墨迹不动布局（数值 x=21 不变）→ 箭头墨迹 [8.75, 19.0]、
+     箭头→数字墨迹隙实测 2.75px（≈十改设计口径 2.6px；DSF=4，docs/verify/minicard_center/_net_ink.py）。 */
+  .net-lab { flex: 0 0 auto; width: 0.75rem; white-space: nowrap; font-size: 1.375rem; line-height: 1.3; color: var(--fg);
+    position: relative; left: -0.3125rem; }
   /* 八改（用户「网络card的字体不能再大了吗 还有单位的字体也不能再大了吗」）：
      数值 1.8125→2.375rem（**29→38px，+31%**）、单位 0.5625→0.6875rem（**9→11px，+22%**）；
      左右 padding 10→8（可用宽 100→104）。实测 3 位最坏值组宽 101.1 ≤ 104（余 2.9）、
