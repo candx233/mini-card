@@ -438,7 +438,7 @@
     font-size: 0.875rem; line-height: 1.25; color: var(--fg);
   }
   .cal-d.other { opacity: 0.32; }
-  .cal-d i { font-style: normal; width: 1.375rem; height: 1.375rem; border-radius: 0.25rem; display: grid; place-items: center; padding-top: 0.125rem; }   /* 2026-10-10 用户「把圆形换成方形」：999px → 0.25rem(4px)；padding-top 光学补偿——字形下行留白让数字墨迹偏上 1px（原生实测 上5/下7 → 上6/下6），2px 内容位移 1px */
+  .cal-d i { font-style: normal; width: 1.375rem; height: 1.375rem; border-radius: 0.4375rem; display: grid; place-items: center; padding-top: 0.125rem; }   /* 圆角 0.4375rem(7px，≈块宽 31%)：对齐用户手机参考图（选中块 r/size≈31% 的连续圆角）；padding-top 光学补偿——字形下行留白让数字墨迹偏上 1px（原生实测 上5/下7 → 上6/下6） */
   .cal-d.today i { background: var(--accent); color: var(--fg); font-weight: 600; }   /* 2026-10-10 用户「还是用之前的颜色」：淡色半透明回退为原强调色 */
   .card-cal button { pointer-events: auto; cursor: pointer; }
 
