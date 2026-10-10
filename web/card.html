@@ -201,11 +201,13 @@
     font-family: var(--font-mono); font-variant-numeric: tabular-nums;
     font-size: 4.5rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: var(--fg);
   }
-  .clock-date { font-size: 1rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 0.1875rem; }
-    /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」）；tnum @2026-10-10 MiSans（日期数字等宽，跨天宽度不跳）。
+  .clock-date { font-size: 1.125rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 0.1875rem; }
+    /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」）→ 16→18（2026-10-10 用户「下面两行字稍微调大一点」）；
+       tnum @2026-10-10 MiSans（日期数字等宽，跨天宽度不跳）。
        margin-top @2026-10-10 十一改：MiSans 数字墨迹比 Consolas 高 3.5px（44.5→48 @72px，台架 DSF=2 实测），
-       时间→日期墨迹隙 17→13.5；补 3px 回原节奏（顺带把卡内上/下差 +0.5 → 0.0）。 */
-  .clock-lunar { font-size: 0.875rem; line-height: 1.5; color: var(--muted); }   /* 11→14 */
+       时间→日期墨迹隙 17→13.5；补 3px 回原节奏（顺带把卡内上/下差 +0.5 → 0.0）。
+       16→18 同批台架实测（240×120 DSF2）：卡内上/下留白 9.5/9.5 → 7.0/7.0（差 0）、时间→日期墨迹隙 16.0→16.5。 */
+  .clock-lunar { font-size: 1rem; line-height: 1.5; color: var(--muted); }   /* 11→14→16 设计 px（2026-10-10 同批调大；台架 240×120 实测农历行墨迹 12→13.5、下留白 9.5→7.0） */
   .clock-stack { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.375rem; }
 
   /* ─── 天气卡 ─── */
@@ -317,7 +319,7 @@
     flex: 1; min-height: 0; display: flex; flex-direction: column;
     justify-content: center; gap: 0.125rem;   /* 头/时间/进度条为一组（紧凑），按钮组另行拉开 */
   }
-  .pomo-body[data-mode="set"] { gap: 0.375rem; }   /* 设定态三行留白（方案 B 定稿节奏） */
+  .pomo-body[data-mode="set"] { gap: 0.5rem; }   /* 设定态三行留白（方案 B 定稿节奏；2026-10-10 用户「元素之间太紧凑」6→8px） */
   .pmc-head { display: flex; align-items: center; justify-content: center; gap: 0.3125rem; min-height: 1.0625rem; }
   .pmc-ck { display: none; color: var(--muted); }
   .pmc-ck svg { width: 0.75rem; height: 0.75rem; }
@@ -348,7 +350,7 @@
   .pmc-acts .pm-btn { flex: 1; height: 1.5625rem; }
   .pomo-track { flex: 0 0 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.3125rem; }
   /* 2026-10-08 用户「不够清晰 / 字体不统一」：中文改回正文族（mono 栈对中文只是回落）、12px 与按钮对齐、去掉字距 */
-  .pm-phase { font-family: var(--font-body); font-size: 0.75rem; line-height: 1.4; letter-spacing: normal; color: var(--muted); text-align: center; position: relative; top: -0.5px; }   /* 2026-10-08 光学：上提 0.5px */
+  .pm-phase { font-family: var(--font-body); font-size: 0.875rem; line-height: 1.4; letter-spacing: normal; color: var(--muted); text-align: center; position: relative; top: -0.5px; }   /* 2026-10-08 光学：上提 0.5px；2026-10-10 用户「准备专注这四个字稍微大一点」12→14px */
   .pomo-track .bar > i { transition: width 0.35s linear; }
   .pm-btn {
     flex: 1; height: 1.5625rem; border-radius: 0.375rem; display: grid; place-items: center;
@@ -505,7 +507,7 @@
   /* 光学补偿（2026-10-01 内容放大后重新标定，120 基准 · 槽高 31px · 卡片 padding 10px）：
      活卡实测 改前 20.0/19.2 → 放大后 12.8/13.6（差 −0.8，≤1px 达标）。
      注意：这个值跟槽高/字号/卡片 padding 绑定，改了 120 基准的任何一条内件尺寸都要重量一遍。 */
-  .pomo-body { padding-bottom: 0.3125rem; }
+  .pomo-body { padding-bottom: 0.125rem; }   /* 2026-10-10 改版 C 四态重标定：旧值 0.3125rem 是改版 C 之前的（set/run 齐偏上 3.5px）→ 台架模拟 set 14.0/13.5、run 13.0/13.5 */
   /* 网络卡不需要光学补偿（活卡实测加不加都是 0）；磁盘紧凑档同理，故不设 padding-bottom */
   /* 紧凑排版（>4 盘）行高更矮，首行徽标边框上沿离行顶更近 → 光学差本身就 ≈0，不能再补 */
   /* 补偿按行距档分设（与 disk_sweep3 的取值一一对应；1-2 盘走上面那条 0.25rem） */
@@ -1390,7 +1392,10 @@
       if (previewMode) {
         setInterval(pullW, 60000);    // iframe 收不到事件 → 低频轮询（天气本来就 30min 一刷）
       } else {
-        T.event.listen('weather', function (e) { wsnap = e.payload; wAt = Date.now(); render(); })
+        // render(true)：weather 事件 = 数据确凿更新了，绕过天气 30 分钟节流立即重渲。
+        // 否则「重启先贴磁盘旧值 → 新值 emit 到达被节流吞」会停在旧值最长 30 分钟
+        //（2026-10-10 活卡实测复现：weather_refresh 后 DOM 标记原样存活 → 观感「没接真实数据」）。
+        T.event.listen('weather', function (e) { wsnap = e.payload; wAt = Date.now(); render(true); })
           .catch(function () {});
       }
     }
