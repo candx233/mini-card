@@ -314,7 +314,7 @@
 
   /* ─── 番茄钟卡（OD 卡片稿 卡 6 · 改版 C「按状态换构图」· 2026-10-08 用户选定实装）
      四态构图：设定（准备专注 / −25+ / 开始）· 运行/暂停（专注中·已暂停 / 大时间 / 通栏细进度 / 双按钮）
-     · 完成（✓ 本轮完成 / 00:00 淡 / 满条 / 回到设定）。
+     · 完成（本轮完成 / 00:00 淡 / 满条 / 回到设定；2026-10-11 用户要求去掉 ✓ 图标）。
      设定态 = 方案 B「极简排版」：大数字主角 + 无边框 ± 字形（A 预设/B 极简/C 一体 三案中用户选定 B）。
      卡片侧唯一需要真点击的卡：按钮必须开 pointer-events（.card * 全局是 none，
      mousedown 目标恒为 .card，拖动手势才不会被吞）——见 .pomo-body button 一条。
@@ -324,10 +324,9 @@
     justify-content: center; gap: 0.125rem;   /* 头/时间/进度条为一组（紧凑），按钮组另行拉开 */
   }
   .pomo-body[data-mode="set"] { gap: 0.5rem; }   /* 设定态三行留白（方案 B 定稿节奏；2026-10-10 用户「元素之间太紧凑」6→8px） */
-  .pmc-head { display: flex; align-items: center; justify-content: center; gap: 0.3125rem; min-height: 1.0625rem; }
-  .pmc-ck { display: none; color: var(--muted); }
-  .pmc-ck svg { width: 0.75rem; height: 0.75rem; }
-  .pomo-body[data-mode="done"] .pmc-ck { display: block; }
+  .pmc-head { display: flex; align-items: center; justify-content: center; min-height: 1.0625rem; }
+  /* 2026-10-11 用户「完成前面不用加勾」：.pmc-ck 三条规则 + CK_SVG 常量 + 样本 span 全删。完成态头只剩
+     居中文案，四态头位置一致；此前 icon 行盒 24.8px 把 done 态整体压低 ~2.6px，一并消除。 */
   /* 设定态 hero：[− 25 +]；± = 无边框字形（命中区就是按钮自身 28×28） */
   .pmc-hero { display: flex; align-items: center; justify-content: center; gap: 0.125rem; }
   .pm-flank {
@@ -358,18 +357,19 @@
   .pomo-track .bar > i { transition: width 0.35s linear; }
   .pm-btn {
     flex: 1; height: 1.5625rem; border-radius: 0.375rem; display: grid; place-items: center;
-    font-family: var(--font-body); font-size: 0.875rem; font-weight: 600; letter-spacing: normal;   /* 2026-10-08：12→13px（= .pm-step 同档）提清晰度，去字距；13→14px @2026-10-10 第六轮（用户「暂停/重设笔画比较多 不清楚」：1x 8x nearest 对比定稿；700 显块、字距/阴影均无效——按钮不吃 text-shadow 是 Chromium 表单控件行为） */
+    font-family: var(--font-body); font-size: 0.875rem; font-weight: 400; letter-spacing: normal;   /* 2026-10-08：12→13px（= .pm-step 同档）提清晰度，去字距；13→14px @2026-10-10 第六轮（用户「暂停/重设笔画比较多 不清楚」：1x 8x nearest 对比定稿；700 显块、字距/阴影均无效——按钮不吃 text-shadow 是 Chromium 表单控件行为）；600→400 @2026-10-11 第七轮（用户「取消加粗看能不能看清」：MiSans 真字重 400=Regular，1x 8x nearest 对比——400 笔画分离最好、500 次之、600 最糊） */
     user-select: none; transition: background 0.15s ease, border-color 0.15s ease;
   }
   /* 2026-09-28 用户要求：主按钮不再上强调色，与 ghost 完全一致（卡片里只留进度条用强调色）
-     2026-10-08 字重也统一为 600（原 ghost 500 对中文静默回落 400，与主按钮实际渲染的 700 摆一起太乱） */
+     2026-10-08 字重也统一为 600（原 ghost 500 对中文静默回落 400，与主按钮实际渲染的 700 摆一起太乱）
+     2026-10-11 整组 600→400（ghost 的 600 覆写一并删；MiSans 四档都是真字重，无静默回落问题） */
   .pm-btn.primary { background: transparent; color: var(--fg); border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent); }
   .pm-btn.primary:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
   .pm-btn.primary:active { background: color-mix(in oklch, var(--fg) 10%, transparent); }
-  .pm-btn.ghost { font-weight: 600; color: var(--fg); background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent); }
+  .pm-btn.ghost { color: var(--fg); background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent); }
   .pm-btn.ghost:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
   .pm-btn.ghost:active { background: color-mix(in oklch, var(--fg) 10%, transparent); }
-  /* 模式显隐：设定 = 头+hero+开始；运行/暂停 = 头+时间+进度条+暂停/重设；完成 = ✓+时间+满条+回到设定 */
+  /* 模式显隐：设定 = 头+hero+开始；运行/暂停 = 头+时间+进度条+暂停/重设；完成 = 时间+满条+回到设定 */
   .pomo-body[data-mode="set"] .pm-time,
   .pomo-body[data-mode="set"] .pomo-track,
   .pomo-body[data-mode="set"] .pm-pause,
@@ -912,14 +912,12 @@
     return Math.min(100, Math.max(0, (total - remain) / total * 100));   // 宽度用一位小数，长时长的进度条才看得出在动
   }
   function pomoPhase(mode) { return mode === 'set' ? '准备专注' : mode === 'paused' ? '已暂停' : (mode === 'done' ? '本轮完成' : '专注中'); }
-  var CK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 12.6l4.2 4.2 8.6-9.2"/></svg>';
   function renderPomo() {
     var mode = pomoMode();
     var remain = mode === 'done' ? 0 : (mode === 'set' ? pomoTotal() : pomoRemain());
     var pct = pomoPct(mode, remain);
     return '<div class="card-body pomo-body" data-mode="' + mode + '">' +
-      '<div class="pmc-head"><span class="pmc-ck" aria-hidden="true">' + CK_SVG + '</span>' +
-        '<span class="pm-phase">' + pomoPhase(mode) + '</span></div>' +
+      '<div class="pmc-head"><span class="pm-phase">' + pomoPhase(mode) + '</span></div>' +
       '<div class="pmc-hero">' +
         '<button type="button" class="pm-flank" data-act="minus" aria-label="减少 5 分钟">−</button>' +
         '<span class="pm-num">' + pomo.dur + '</span>' +
