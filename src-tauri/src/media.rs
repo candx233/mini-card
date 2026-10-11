@@ -1,6 +1,6 @@
-//! Windows SMTC 媒体会话（音乐卡数据源 · 2026-10-08）
+//! Windows SMTC 媒体会话（音乐卡数据源 · 2026-10-08 · 2026-10-11 改成只认音乐应用）
 //! 结构：
-//!   - 500ms 轮询线程：读当前媒体会话（曲目 / 状态 / 进度 / 封面）→ emit("music") 给所有窗口；
+//!   - 500ms 轮询线程：读当前**音乐**会话（曲目 / 状态 / 进度 / 封面）→ emit("music") 给所有窗口；
 //!   - 进度带 LastUpdatedTime 补偿（播放器 timeline 写入时刻 → 现在 的间隔补上），配合前端走表消滞后；
 //!   - 封面 = Rust 侧缓存 dataURL（key = app|title|artist，换曲才重读缩略图；与 Spike 结论一致）；
 //!   - 命令：music_state（卡片首帧拉取 / 预览轮询）、music_action（上一首 / 播放暂停 / 下一首）。
@@ -76,18 +76,73 @@ fn read_thumb(
     Ok(bytes)
 }
 
+/// 只认音乐应用的会话（2026-10-11 用户「音乐卡只接入音乐」）——
+/// 起因：网页 B 站看视频时，浏览器也会挂 SMTC 会话，且会被 GetCurrentSession() 顶到「当前」位，
+/// 卡片就把视频标题当歌播。这里按 AUMID 小写子串过滤：只认音乐播放器，浏览器/视频类一律不算。
+/// 加新播放器 = 在表里补一个子串（用进程名/代号即可，不要求精确 AUMID）。
+const MUSIC_APP_HINTS: &[&str] = &[
+    "qqmusic",    // QQ 音乐（本机实测 AUMID = QQMusic.exe）
+    "cloudmusic", // 网易云音乐（本机进程 cloudmusic.exe，占位会话未播放时不挂 SMTC）
+    "netease",    // 网易系包名兜底（如 Netease.CloudMusic）
+    "orpheus",    // 网易云内部代号兜底
+    "spotify",
+    "kugou",      // 酷狗
+    "kuwo",       // 酷我
+    "kwmusic",
+    "migu",       // 咪咕音乐
+    "foobar",     // foobar2000
+    "aimp",
+    "musicbee",
+    "itunes",     // iTunes
+    "applemusic", // Apple Music
+    "zunemusic",  // Groove 音乐
+    "wmplayer",   // Windows Media Player
+];
+
+fn is_music_app(aumid: &str) -> bool {
+    let a = aumid.to_lowercase();
+    MUSIC_APP_HINTS.iter().any(|h| a.contains(h))
+}
+
+/// 挑会话：只在音乐应用里挑 —— 正在播放的最优先；其次系统认定的「当前」会话（若也是音乐应用）；
+/// 再次其它音乐会话（已加载未播 / 暂停）。没有音乐会话 → None（卡片显示占位样张）。
 fn current_session(mgr: &SessionManager) -> Option<Session> {
-    if let Ok(s) = mgr.GetCurrentSession() {
-        return Some(s);
-    }
-    // 没有「当前」会话时退而取第一个（刚打开、还没被系统认定焦点的播放器）
+    let cur_app = mgr
+        .GetCurrentSession()
+        .ok()
+        .and_then(|s| s.SourceAppUserModelId().ok())
+        .map(|h| h.to_string())
+        .unwrap_or_default();
     let sessions = mgr.GetSessions().ok()?;
     let n = sessions.Size().ok()?;
-    if n > 0 {
-        sessions.GetAt(0).ok()
-    } else {
-        None
+    let mut best: Option<(u8, Session)> = None;
+    for i in 0..n {
+        let s = match sessions.GetAt(i) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let app = s
+            .SourceAppUserModelId()
+            .map(|h| h.to_string())
+            .unwrap_or_default();
+        if !is_music_app(&app) {
+            continue;
+        }
+        let st = s.GetPlaybackInfo().ok().and_then(|i| i.PlaybackStatus().ok());
+        let mut score: u8 = 1;
+        if st == Some(PlayStatus::Playing) {
+            score = 3;
+        } else if !cur_app.is_empty() && app == cur_app {
+            score = 2;
+        }
+        if st == Some(PlayStatus::Closed) {
+            score = 0; // 关掉的残留会话：仅当没有别的音乐会话时兜底
+        }
+        if best.as_ref().map(|(b, _)| score > *b).unwrap_or(true) {
+            best = Some((score, s));
+        }
     }
+    best.map(|(_, s)| s)
 }
 
 fn read_snap(mgr: &SessionManager) -> Option<MusicSnap> {
@@ -212,7 +267,7 @@ pub async fn music_action(action: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .join()
             .map_err(|e| e.to_string())?;
-        let s = current_session(&mgr).ok_or("没有正在播放的媒体会话")?;
+        let s = current_session(&mgr).ok_or("没有正在播放的音乐会话")?;
         match action.as_str() {
             "toggle" => s
                 .TryTogglePlayPauseAsync()
