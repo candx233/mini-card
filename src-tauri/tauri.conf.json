@@ -11,6 +11,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Mini Card",
         "visible": false,
         "width": 928,

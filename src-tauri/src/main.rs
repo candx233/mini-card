@@ -133,9 +133,21 @@ fn overlay_card_positions(app: &AppHandle, cfg: &mut Config) {
 }
 
 fn persist_bounds(w: &WebviewWindow) {
+    // 最小化时 outer_position 是 -32000 残影、尺寸是 160×28 徽章 —— 写进去就是坏几何
+    // （load 时会被回退默认值 → 用户的位置丢失）。最小化状态直接不写，保留 config 里上一次的真值。
+    if is_iconic(w) {
+        return;
+    }
     let mut c = Config::load();
     overlay_main_bounds(w, &mut c);
     let _ = c.save();
+}
+
+/// 窗口当前是否最小化（rect 为 -32000 残影的判别入口）
+fn is_iconic(w: &WebviewWindow) -> bool {
+    hwnd_of(w)
+        .map(|h| unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(h) != 0 })
+        .unwrap_or(false)
 }
 
 /// 屏幕物理像素尺寸
@@ -297,7 +309,10 @@ async fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
     // 页面持有的是旧值：以活窗口为准盖回去，防止拖动/移动被旧数据覆盖
     overlay_card_positions(&app, &mut cfg);
     if let Some(w) = app.get_webview_window("main") {
-        overlay_main_bounds(&w, &mut cfg);
+        // 最小化中的残影几何不写（同 persist_bounds）
+        if !is_iconic(&w) {
+            overlay_main_bounds(&w, &mut cfg);
+        }
     }
     cfg.save()?;
     sync_cards(&app, &cfg);
@@ -674,15 +689,14 @@ fn win_max(window: WebviewWindow) {
     }
 }
 
-/// 关闭按钮：按 config 决定「隐藏到托盘」或退出；落一次窗口位置。
+/// 关闭按钮：按 config 决定「关闭到托盘（= 主窗休眠，释放 webview）」或退出；落一次窗口位置。
 #[tauri::command]
 fn win_close(window: WebviewWindow) {
-    persist_bounds(&window);
     if Config::load().settings.close_to_tray {
-        let _ = window.hide();
+        sleep_main(&window.app_handle().clone());
     } else {
-        let app = window.app_handle().clone();
-        quit(&app);
+        persist_bounds(&window);
+        quit(&window.app_handle().clone());
     }
 }
 
@@ -865,7 +879,10 @@ async fn update_install(app: AppHandle) -> Result<(), String> {
 fn quit(app: &AppHandle) {
     let mut cfg = Config::load();
     if let Some(w) = app.get_webview_window("main") {
-        overlay_main_bounds(&w, &mut cfg);
+        // 最小化中的残影几何不写（同 persist_bounds）
+        if !is_iconic(&w) {
+            overlay_main_bounds(&w, &mut cfg);
+        }
     }
     overlay_card_positions(app, &mut cfg);
     let _ = cfg.save();
@@ -1681,10 +1698,106 @@ fn sync_cards(app: &AppHandle, cfg: &Config) {
 /// 把主窗口叫回来。托盘左键单击与菜单「显示主窗口」共用这一条，
 /// 免得两处各写一遍 show/unminimize/set_focus。
 fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = ensure_main(app) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+}
+
+/// 主窗 chrome：位置/尺寸（config 真值）+ 系统不圆角 + 精确尺寸 HICON。
+/// 冷启动与托盘唤回（按需重建）共用 —— 原来这段只写死在 setup 的启动路径里。
+fn apply_main_chrome(w: &WebviewWindow, bounds: [f32; 4]) {
+    use tauri::{LogicalPosition, LogicalSize};
+    let _ = w.set_position(tauri::Position::Logical(LogicalPosition::new(
+        bounds[0] as f64,
+        bounds[1] as f64,
+    )));
+    let _ = w.set_size(tauri::Size::Logical(LogicalSize::new(
+        bounds[2] as f64,
+        bounds[3] as f64,
+    )));
+    if let Ok(h) = w.window_handle() {
+        if let raw_window_handle::RawWindowHandle::Win32(h) = h.as_raw() {
+            let pref: u32 = 1; // DWMWCP_DONOTROUND：圆角交给 CSS（主窗真透明 + --radius-win 18px），系统 8px 会切掉 CSS 圆角
+            unsafe {
+                windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                    h.hwnd.get() as *mut core::ffi::c_void,
+                    33,
+                    &pref as *const _ as *const core::ffi::c_void,
+                    4,
+                );
+                // 窗口图标：Tauri 只给系统一个 16×16 的小图标（实测 ICON_SMALL=16×16），
+                // 而任务栏在 100% DPI 下按 24px 绘制 → explorer 把 16px 拉伸到 24 → 发虚。
+                // 这里改成按目标尺寸给单帧 ico 造的精确 HICON，让 explorer 1:1 画。
+                set_exact_window_icons(h.hwnd.get() as windows_sys::Win32::Foundation::HWND);
+            }
+        }
+    }
+}
+
+/// 主窗按需创建：不存在就按 tauri.conf.json 的声明（`"create": false`）现建，
+/// 位置/尺寸吃 config.toml。建窗顺序与冷启动一致：先隐藏建好 → chrome（含 24px HICON）
+/// → show —— 图标必须在首次显示前设好，否则任务栏按钮会先用 Tauri 的 16px 图标建好、之后不刷新。
+fn ensure_main(app: &AppHandle) -> Option<WebviewWindow> {
+    if let Some(w) = app.get_webview_window("main") {
+        return Some(w);
+    }
+    let cfg = Config::load();
+    let wc = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")?
+        .clone();
+    let builder = match WebviewWindowBuilder::from_config(app, &wc) {
+        Ok(b) => b,
+        Err(e) => {
+            mlog(&format!("ensure_main: from_config ERR {e}"));
+            return None;
+        }
+    };
+    let win = match builder.build() {
+        Ok(w) => w,
+        Err(e) => {
+            mlog(&format!("ensure_main: build ERR {e}"));
+            return None;
+        }
+    };
+    apply_main_chrome(&win, cfg.main_window);
+    if let Err(e) = win.show() {
+        mlog(&format!("ensure_main: show ERR {e}"));
+    }
+    Some(win)
+}
+
+/// 主窗生命周期日志（%TEMP%\minicard-mainwin.log）：只记关键事件与错误。
+/// 主窗「用时建、闲时销毁」是新机制，出支持问题先看这里（以前 .ok()? 会把失败吞掉）。
+fn mlog(s: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("minicard-mainwin.log"))
+    {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{t} {s}");
+    }
+}
+
+/// 主窗休眠：落盘位置 → 真销毁 webview（「关闭到托盘」+「最小化闲置」都走这里）。
+/// 以前隐藏/最小化都保活 —— 一个不显示的主窗常驻 153MB 工作集 / 108MB 提交（实测）。
+/// 唤回统一走 show_main → ensure_main 重建；托盘图标是唯一回家路，不受影响。
+fn sleep_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        persist_bounds(&w);
+        if let Err(e) = w.destroy() {
+            mlog(&format!("sleep_main: destroy ERR {e}"));
+        }
     }
 }
 
@@ -1787,7 +1900,7 @@ fn main() {
         std::sync::Arc::new(std::sync::RwLock::new(None));
     let weather_seed = weather_snap.clone();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -1809,13 +1922,15 @@ fn main() {
             if window.label() != "main" {
                 return;
             }
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
                 if Config::load().settings.close_to_tray {
-                    api.prevent_close();
+                    // 「关闭到托盘」= 主窗休眠：落盘位置后让这次 close 真走到销毁。
+                    // 以前是 prevent_close + hide 保活 —— 隐藏期间整个 webview 常驻
+                    // （实测 153MB 工作集 / 108MB 提交）。唤回走托盘 → show_main → ensure_main 按需重建。
+                    mlog("main CloseRequested -> sleep");
                     if let Some(w) = window.app_handle().get_webview_window("main") {
                         persist_bounds(&w);
                     }
-                    let _ = window.hide();
                 } else {
                     quit(&window.app_handle().clone());
                 }
@@ -1851,41 +1966,40 @@ fn main() {
             guide::prepare(); // 先备好拖动辅助线窗口（隐藏）
             let handle = app.handle().clone();
             let cfg = Config::load();
-            if let Some(w) = app.get_webview_window("main") {
-                use tauri::{LogicalPosition, LogicalSize};
-                let _ = w.set_position(tauri::Position::Logical(LogicalPosition::new(
-                    cfg.main_window[0] as f64,
-                    cfg.main_window[1] as f64,
-                )));
-                let _ = w.set_size(tauri::Size::Logical(LogicalSize::new(
-                    cfg.main_window[2] as f64,
-                    cfg.main_window[3] as f64,
-                )));
-                if let Ok(h) = w.window_handle() {
-                    if let raw_window_handle::RawWindowHandle::Win32(h) = h.as_raw() {
-                        let pref: u32 = 1; // DWMWCP_DONOTROUND：圆角交给 CSS（主窗真透明 + --radius-win 18px），系统 8px 会切掉 CSS 圆角
-                        unsafe {
-                            windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute(
-                                h.hwnd.get() as *mut core::ffi::c_void,
-                                33,
-                                &pref as *const _ as *const core::ffi::c_void,
-                                4,
-                            );
-                            // 窗口图标：Tauri 只给系统一个 16×16 的小图标（实测 ICON_SMALL=16×16），
-                            // 而任务栏在 100% DPI 下按 24px 绘制 → explorer 把 16px 拉伸到 24 → 发虚。
-                            // 这里改成按目标尺寸给单帧 ico 造的精确 HICON，让 explorer 1:1 画。
-                            let hwnd = h.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-                            set_exact_window_icons(hwnd);
+            // 主窗按需创建（tauri.conf.json 声明 `"create": false`）：启动这拍直接走 show_main，
+            // 与托盘唤回同一条路 —— 建窗、chrome（不圆角 + 24px HICON）、位置/尺寸全在 ensure_main 里。
+            // 「图标必须在首次显示前设好」这条顺序约束也收在 ensure_main 内部。
+            show_main(&handle);
+            build_tray(app)?;
+
+            // 主窗「最小化 = 闲置」看门狗：win_min 命令、任务栏最小化、Win+D 显示桌面三条路
+            // 都只表现为 IsIconic，没有统一事件可听 —— 30s 轮询，连续两拍仍最小化（≈60s）
+            // 就休眠释放 webview（托盘唤回时重建）。期间用户恢复则计数清零，不打扰。
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    let mut idle = 0u32;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        let iconic = h
+                            .get_webview_window("main")
+                            .and_then(|w| hwnd_of(&w))
+                            .map(|hw| unsafe {
+                                windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(hw) != 0
+                            })
+                            .unwrap_or(false);
+                        if iconic {
+                            idle += 1;
+                            if idle >= 2 {
+                                sleep_main(&h);
+                                idle = 0;
+                            }
+                        } else {
+                            idle = 0;
                         }
                     }
-                }
+                });
             }
-            // 主窗口在配置里是 visible=false：图标（24px HICON）设好之后再显示，
-            // 否则任务栏按钮会在窗口首次显示时就用 Tauri 的 16px 图标建好，之后改图标不会刷新按钮。
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-            }
-            build_tray(app)?;
 
             // 桌面层档位 + 巡检线程：卡片永远待在壁纸上、普通窗口下（见 apply_desktop_zorder 注释）
             Z_MODE.store(z_mode_of(cfg.settings.z_order), Ordering::Relaxed);
@@ -1950,8 +2064,20 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running mini-card");
+        .build(tauri::generate_context!())
+        .expect("error while building mini-card");
+
+    app.run(|_app, event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            // 主窗改成「销毁式休眠」后，「所有窗口都没了」成为可达状态
+            //（关到托盘 + 一张卡都未开 = 销毁主窗即最后一个窗口）：
+            // 框架会把 code=None 的自然退出请求送到这里 —— 按「关闭到托盘」语义拒绝。
+            // 托盘点「退出」走 app.exit(0)，带 code=Some，不受影响。
+            if code.is_none() && Config::load().settings.close_to_tray {
+                api.prevent_exit();
+            }
+        }
+    });
 }
 
 #[cfg(test)]
