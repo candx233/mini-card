@@ -1,6 +1,6 @@
 [package]
 name = "mini-card"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "mini-card main shell (Tauri 2 migration)"
 license = "GPL-3.0-only"
