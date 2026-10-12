@@ -456,8 +456,17 @@
     font-size: 0.875rem; line-height: 1.25; color: var(--fg);
   }
   .cal-d.other { opacity: 0.32; }
-  .cal-d i { font-style: normal; width: 1.375rem; height: 1.375rem; border-radius: 0.4375rem; display: grid; place-items: center; }   /* 圆角 0.4375rem(7px，≈块宽 31%)：对齐用户手机参考图（选中块 r/size≈31% 的连续圆角）。2026-10-11 删 padding-top 光学补偿：旧值系换 MiSans 前标定、换字后字形墨迹下移，旧补偿反让块内数字低 1px（活卡+台架 DSF=1 实测：删除后墨迹行 83..93 与同排一致、块内上下留 5.5/5.5 居中） */
-  .cal-d.today i { background: var(--accent); color: var(--fg); font-weight: 600; }   /* 2026-10-10 用户「还是用之前的颜色」：淡色半透明回退为原强调色 */
+  .cal-d i { font-style: normal; width: 1.375rem; height: 1.375rem; border-radius: 0.4375rem; display: grid; place-items: center; }
+  /* 今日块改由整卡 SVG 覆盖层绘制（见 syncCalChip）：
+     实色背景在 Chromium 里按设备像素吸附（布局 16.42 → 画在 16.0），而数字走真亚像素
+     定位 → 块与数字最多差 ±0.44px 且随列/行相位变；SVG 画布内容按几何坐标绘制，
+     能精确落在布局位（实测 |Δ|≤0.01px）。
+     圆角 7px(≈块宽 31%)：对齐用户手机参考图（选中块 r/size≈31% 的连续圆角）。
+     2026-10-11 删 padding-top 光学补偿：旧值系换 MiSans 前标定，换字后反让块内数字低 1px。 */
+  /* 层序：z-index:-1 让块落在 .cal-body（自身 z-index:2 → 独立层叠上下文）的内容之下、
+     卡片白纱之上 —— 块要「垫在数字下面」而不是盖住数字。 */
+  .cal-chip-svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; z-index: -1; pointer-events: none; }
+  .cal-d.today i { color: var(--fg); font-weight: 600; }   /* 背景交给 .cal-chip-svg（2026-10-10 用户「还是用之前的颜色」：原强调色） */
   .card-cal button { pointer-events: auto; cursor: pointer; }
 
   /* ─── 待办卡（OD 卡片稿 卡 9：240×120 · 勾选在卡内 / 编辑在参数面板） ───
@@ -572,7 +581,7 @@
   window.addEventListener('resize', applyScale);
   // 磁盘卡的窗口高是 host 侧改的（Rust sync_disk_height），尺寸一变压根字号与磨砂切片都要重算。
   // resize 事件不保证在 set_size 生效之后才来，所以 host 改完尺寸会显式 eval 这个钩子兜一次。
-  window.__onResize = function () { applyScale(); drawWall(); };
+  window.__onResize = function () { applyScale(); drawWall(); if (kind === 'Calendar') syncCalChip(); };
   // 玻璃厚度：设置页滑块 0-100 → surface 白色 alpha 0~0.30（30 ≈ 设计稿的 0.08）。
   // 以前这个值只喂给 SetWindowCompositionAttribute，那条路在 Win11 22H2+ 已失效 → 现在直接落到 CSS 上。
   function setGlass(v) {
@@ -1245,8 +1254,36 @@
         '</span></div>' +
       '<div class="cal-wd"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>' +
       '<div class="cal-grid">' + cells + '</div>' +
+      // 今日块画布：整卡大小，rect 由 syncCalChip 按 today 的布局盒写入（亚像素）
+      // rx 由 JS 按根字号换算（SVG 几何属性对 rem 支持不稳，写死 px 更保险）
+      '<svg class="cal-chip-svg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        '<rect rx="7" ry="7" fill="var(--accent)" width="0" height="0"/>' +
+      '</svg>' +
     '</div>';
   }
+
+  // 今日蓝块：整卡 SVG 覆盖层（亚像素定位；浏览器对实色背景做像素吸附，画不准）
+  function syncCalChip() {
+    if (kind !== 'Calendar') return;
+    var i = bodyEl.querySelector('.cal-d.today i');
+    var svg = document.querySelector('.cal-chip-svg');
+    if (!i || !svg) return;
+    // 用 SVG 自己的 rect 作原点：绝对定位的坐标系是「最近定位祖先的 padding box」，
+    // 直接拿 card.getBoundingClientRect() 会带上 padding 偏移（实测 +12/+10）。
+    var sr = svg.getBoundingClientRect();
+    var ir = i.getBoundingClientRect();
+    var rect = svg.firstChild;
+    rect.setAttribute('x', (ir.x - sr.x).toFixed(3));
+    rect.setAttribute('y', (ir.y - sr.y).toFixed(3));
+    rect.setAttribute('width', ir.width.toFixed(3));
+    rect.setAttribute('height', ir.height.toFixed(3));
+    // 圆角跟随 <i> 的 computed border-radius（卡片换尺寸档时根字号变，必须一起缩）
+    var rad = parseFloat(getComputedStyle(i).borderTopLeftRadius) || 0;
+    rect.setAttribute('rx', rad.toFixed(3));
+    rect.setAttribute('ry', rad.toFixed(3));
+  }
+  window.__syncCalChip = syncCalChip;   // 诊断钩子
+
 
   /* ── 待办卡（OD 卡 9：勾选在卡内，增删改在参数面板；数据 = config.toml 的 card.todo） ── */
   var TDO = null;   // null = 还没拿到 config（显示等待）；[] = 空态
@@ -1343,6 +1380,7 @@
         kind === 'Clock' ? renderClock() : renderWeather();
     }
     bodyEl.innerHTML = html;
+    if (kind === 'Calendar') syncCalChip();   // 块位置按布局盒（亚像素）写入 SVG 层
     // 音乐卡：封面 dataURL（Rust 缓存）同步注入两层——.mc-cover 那层在 1px 边框底下（防蓝圈），.mc-art 是主图层
     if (kind === 'Music' && msnap && msnap.cover) {
       var cvb = bodyEl.querySelector('.mc-cover');
