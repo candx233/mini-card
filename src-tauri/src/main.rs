@@ -26,7 +26,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 /// 单实例锁：与 egui 版同一个锁名，迁移期两个版本互斥。
 fn ensure_single_instance() {
-    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
     let name: Vec<u16> = "Local\\mini-card-instance"
@@ -39,9 +39,17 @@ fn ensure_single_instance() {
     loop {
         unsafe {
             let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-            if h.is_null() || GetLastError() != 183 {
-                return; // 拿到锁
+            if h.is_null() {
+                return; // 创建失败：照旧放行
             }
+            if GetLastError() != 183 {
+                return; // 新建成功 = 拿到锁（句柄故意不关：进程活着期间锁就在）
+            }
+            // ⚠️ 已存在时必须把这一次拿到的句柄关掉（2026-10-13 实测踩坑，症状是
+            // 「自更新完成后程序没了、要用户再双击一次」）：命名对象是「最后一个句柄关闭
+            // 才销毁」——循环里每次 CreateMutexW 都留一个自家句柄的话，旧进程退出后
+            // 对象照样活着（被自己吊着），这里就永远等不到「新建成功」，20s 后 exit(0)。
+            let _ = CloseHandle(h);
         }
         if !after_update || std::time::Instant::now() >= deadline {
             std::process::exit(0);
