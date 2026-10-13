@@ -1078,6 +1078,7 @@
     // （只画在 .mc-art 里的话，边框下透出底色蓝渐变 = 用户 2026-10-09 报的「一圈蓝色」）
     cv.style.backgroundImage = url;
     art.style.backgroundImage = url;
+    art.dataset.src = (msnap && msnap.cover) || '';   // 记下「已画的是哪张」，晚到的封面据此换图
     art.style.opacity = '1';
   }
   function coverFlip(dir) {
@@ -1118,9 +1119,11 @@
       btn.setAttribute('aria-label', playing ? '暂停' : '播放');
       btn.innerHTML = playing ? I_PAUSE : I_PLAY;
     }
-    // 晚到的封面（同曲、key 未变）：补图 + 轻淡入 —— QQ 音乐刚启动时缩略图比元数据晚到（2026-10-09 用户报）
+    // 封面：晚到 / 换新都在这里补 + 轻淡入 —— 原来只看「空没空」，切歌那一拍缓存了旧图就再不换
+    // （2026-10-13：Rust 侧换曲后有 3s 观察窗重读；这里按 dataset 记「已画的是哪张」比对）
     var art = bodyEl.querySelector('.mc-art');
-    if (art && m.cover && !art.style.backgroundImage) {
+    if (art && m.cover && art.dataset.src !== m.cover) {
+      art.dataset.src = m.cover;
       var cvc = bodyEl.querySelector('.mc-cover');
       if (cvc) cvc.style.backgroundImage = 'url("' + m.cover + '")';   // 边框底层同步（防蓝圈）
       art.style.transition = 'opacity 0.25s ease';
@@ -1388,7 +1391,10 @@
       var cvb = bodyEl.querySelector('.mc-cover');
       var artb = bodyEl.querySelector('.mc-art');
       if (cvb) cvb.style.backgroundImage = 'url("' + msnap.cover + '")';
-      if (artb) artb.style.backgroundImage = 'url("' + msnap.cover + '")';
+      if (artb) {
+        artb.style.backgroundImage = 'url("' + msnap.cover + '")';
+        artb.dataset.src = msnap.cover;   // 整段重建后也要记「已画的是哪张」
+      }
     }
     if (kind === 'Music') musicMarquee();   // 长文本滚动（整段重建后也要复查；示例态短文本自然 no-op）
     lastRenderAt = Date.now();

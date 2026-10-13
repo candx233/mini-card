@@ -37,9 +37,22 @@ pub struct MusicSnap {
 }
 
 static SNAP: Mutex<Option<MusicSnap>> = Mutex::new(None);
-/// 封面缓存键 + 缓存值（换曲才重读）
-static COVER_KEY: Mutex<Option<String>> = Mutex::new(None);
-static COVER: Mutex<String> = Mutex::new(String::new());
+/// 封面缓存：键 + dataURL + 换曲观察窗（2026-10-13）。
+/// 切歌那一拍读到的缩略图常常还是上一首的（实测约半数切歌撞上），只读一次会把旧图缓存住；
+/// 观察窗内每拍重读，读到不同图就换上，窗口过完仍没读到本首的图才清成占位。
+struct CoverState {
+    key: Option<String>,
+    data: String,
+    settle_until: Option<Instant>,
+    /// 本曲是否读到过图（窗口结束时判「这歌确实没封面」用）
+    got: bool,
+}
+static COVER: Mutex<CoverState> = Mutex::new(CoverState {
+    key: None,
+    data: String::new(),
+    settle_until: None,
+    got: false,
+});
 
 fn status_name(s: PlayStatus) -> &'static str {
     if s == PlayStatus::Playing {
@@ -395,31 +408,40 @@ fn read_snap(mgr: &SessionManager) -> Option<MusicSnap> {
         }
     };
 
-    // 封面：键（app|title|artist）变了重读；**读空也要重试**——
-    // QQ 音乐等刚启动时缩略图比元数据晚到 1~2 秒，只按 key 变化读一次会一直空到下一首
-    // （2026-10-09 用户实测：刚打开 QQ音乐没有封面、切歌才出）。
-    let changed = {
-        let mut k = COVER_KEY.lock().unwrap();
-        if k.as_deref() != Some(key.as_str()) {
-            *k = Some(key);
-            true
-        } else {
-            false
+    // 封面：换曲读一次 + 观察窗内每拍重读（缩略图常比元数据晚到、或读到上一首的图）；
+    // **读空也要重试**——QQ 音乐等刚启动时缩略图比元数据晚到 1~2 秒（2026-10-09）。
+    let cover = {
+        let now = Instant::now();
+        let mut st = COVER.lock().unwrap();
+        let changed_now = st.key.as_deref() != Some(key.as_str());
+        if changed_now {
+            st.key = Some(key.clone());
+            st.settle_until = Some(now + std::time::Duration::from_millis(3000));
+            st.got = false;
         }
-    };
-    let need_read = changed || COVER.lock().unwrap().is_empty();
-    if need_read {
-        let mut cov = String::new();
-        if let Ok(thumb) = props.Thumbnail() {
-            if let Ok(bytes) = read_thumb(&thumb) {
-                if !bytes.is_empty() {
-                    cov = format!("data:image/png;base64,{}", crate::base64_encode(&bytes));
+        let settling = st.settle_until.map(|t| now < t).unwrap_or(false);
+        if !settling && !st.got && !st.data.is_empty() {
+            // 观察窗过完仍没读到本曲的图（这歌确实没封面）→ 清成占位，别把上一首的图一直挂着
+            st.data.clear();
+        }
+        if changed_now || st.data.is_empty() || settling {
+            let mut cov = String::new();
+            if let Ok(thumb) = props.Thumbnail() {
+                if let Ok(bytes) = read_thumb(&thumb) {
+                    if !bytes.is_empty() {
+                        cov = format!("data:image/png;base64,{}", crate::base64_encode(&bytes));
+                    }
                 }
             }
+            if !cov.is_empty() {
+                if cov != st.data {
+                    st.data = cov;
+                }
+                st.got = true;
+            }
         }
-        *COVER.lock().unwrap() = cov;
-    }
-    let cover = COVER.lock().unwrap().clone();
+        st.data.clone()
+    };
 
     Some(MusicSnap {
         present: true,
