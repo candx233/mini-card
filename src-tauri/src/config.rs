@@ -120,6 +120,110 @@ impl Default for TodoItem {
     }
 }
 
+/// Dock 条目（0.1.2）：一条玻璃启动栏上的一个应用 / 文件夹 / 网址。
+/// 规格正本 `docs/dock-plan.md` §3；图标缓存在 `%APPDATA%\mini-card\icons\`（源文件变了才重提）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockItem {
+    pub id: String,
+    /// 显示名（默认取 exe/lnk 主文件名）
+    pub name: String,
+    /// .exe / .lnk / 文件夹路径，或 http(s) 网址
+    pub path: String,
+    /// 启动参数（可空）
+    pub args: String,
+    /// "" = 自动提取；否则为用户自定义图标文件
+    pub icon: String,
+    /// 分组竖线（P5，先留着字段）
+    pub divider_before: bool,
+}
+
+impl Default for DockItem {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            path: String::new(),
+            args: String::new(),
+            icon: String::new(),
+            divider_before: false,
+        }
+    }
+}
+
+/// Dock 配置（单例）。
+/// `cx`/`y` 是逻辑像素下的窗口位置：`cx` = 窗口**中心 x**（宽随图标数变化，按中心回推左上角，
+/// 免得整条漂移），`y` = 上边缘。-1 = 未设置 → 建窗时按「主屏底部居中、距底边 8px」自动落位并写回。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dock {
+    pub enabled: bool,
+    pub cx: f32,
+    pub y: f32,
+    /// 图标边长：32 / 40 / 48 / 56（默认 48）
+    pub size: u8,
+    /// 放大强度 0-100（0 = 关闭），默认 55（中心图标 ≈ 1.55x）
+    pub mag: u8,
+    /// 层级：默认置顶（Top）；可切桌面层（Desktop）
+    pub z: ZOrder,
+    /// 隐藏系统桌面图标（HKCU\...\Explorer\Advanced\HideIcons）
+    pub hide_desktop_icons: bool,
+    /// 边缘自动隐藏（P6，先只留字段，行为不实现）
+    pub auto_hide: bool,
+    pub items: Vec<DockItem>,
+}
+
+impl Default for Dock {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cx: -1.0,
+            y: -1.0,
+            size: 48,
+            mag: 55,
+            z: ZOrder::Top,
+            hide_desktop_icons: false,
+            auto_hide: false,
+            items: Vec::new(),
+        }
+    }
+}
+
+impl Dock {
+    /// 图标尺寸合法档位（与主界面滑块 step 8 一致；中点向上取档：36→40、44→48）
+    #[allow(dead_code)] // C 段 dock_update 的 Rust 闸门会用到
+    pub fn snap_size(&self, v: u8) -> u8 {
+        let mut best = 48u8;
+        let mut best_d = u8::MAX;
+        for t in [32u8, 40, 48, 56] {
+            let d = (t as i16 - v as i16).unsigned_abs() as u8;
+            if d <= best_d {
+                // <= ：中点（36/44/52）落上一档
+                best_d = d;
+                best = t;
+            }
+        }
+        best
+    }
+
+    /// 玻璃条宽（逻辑 px）= n × (图标 + 间距 12) + 左右内边距 24。
+    /// 7 个 48px 图标 → 444（dock-plan §1 的 `n*60+24`）。
+    pub fn bar_width(&self) -> f32 {
+        let n = self.items.len() as f32;
+        (n * (self.size as f32 + 12.0) + 24.0).max(24.0)
+    }
+
+    /// 玻璃条高 = 图标 + 上下留白各 8（48 档 → 64）
+    pub fn bar_height(&self) -> f32 {
+        self.size as f32 + 16.0
+    }
+
+    /// 窗口尺寸：高 = 玻璃条 + 28px 放大余量（48 档 → 92）
+    pub fn window_size(&self) -> [f32; 2] {
+        [self.bar_width(), self.bar_height() + 28.0]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CardInstance {
@@ -231,6 +335,8 @@ impl Default for Settings {
 pub struct Config {
     pub cards: Vec<CardInstance>,
     pub settings: Settings,
+    /// Dock（玻璃启动栏，0.1.2）：单例，enabled=false 时窗口不建
+    pub dock: Dock,
     /// 主页面 [x, y, w, h]
     pub main_window: [f32; 4],
     /// 尺寸迁移版本：< SIZE_VERSION 时把老卡片尺寸落到该类型的固定尺寸（只做一次）
@@ -278,6 +384,7 @@ impl Default for Config {
                 },
             ],
             settings: Settings::default(),
+            dock: Dock::default(),
             main_window: [520.0, 250.0, 928.0, 628.0],
             size_version: SIZE_VERSION,
         }
@@ -454,6 +561,26 @@ size = [320.0, 190.0]
                     "{:?} 迁移结果必须是固定尺寸（老尺寸 {:?}）", k, old
                 );
             }
+        }
+    }
+
+    /// Dock 几何：与 dock-plan §1 的定数一致（48 档：条高 64、窗口高 92；7 图标条宽 444）
+    #[test]
+    fn dock_geometry_matches_spec() {
+        let d = Dock::default();
+        assert_eq!(d.size, 48, "默认图标 48");
+        assert_eq!(d.bar_height(), 64.0, "48 档玻璃条高 64 = 48 + 上下留白 8×2");
+        let mut d7 = Dock::default();
+        d7.items = (0..7)
+            .map(|i| DockItem { id: format!("i{i}"), ..DockItem::default() })
+            .collect();
+        assert_eq!(d7.bar_width(), 444.0, "7 个 48px 图标条宽 = 7×60+24");
+        let [w, h] = d7.window_size();
+        assert_eq!((w, h), (444.0, 92.0), "窗口高 = 玻璃条 64 + 放大余量 28");
+        assert_eq!(Dock::default().window_size()[1], 92.0);
+        // 尺寸档吸附（滑块 step 8，Rust 侧是最终闸门；中点向上取档）
+        for (v, want) in [(0u8, 32u8), (31, 32), (33, 32), (35, 32), (36, 40), (44, 48), (48, 48), (52, 56), (55, 56), (200, 56)] {
+            assert_eq!(d.snap_size(v), want, "图标档位吸附: {v} -> {want}");
         }
     }
 }

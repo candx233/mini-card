@@ -6,7 +6,7 @@ description = "mini-card main shell (Tauri 2 migration)"
 license = "GPL-3.0-only"
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1.6"

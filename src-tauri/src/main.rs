@@ -8,6 +8,7 @@
 mod config;
 mod data;
 mod display;
+mod dock;
 mod guide;
 mod media;
 mod update;
@@ -140,6 +141,17 @@ fn overlay_card_positions(app: &AppHandle, cfg: &mut Config) {
     }
 }
 
+/// 活着的 Dock 窗位置盖进 cfg（存的是「中心 x + 上边缘 y」）
+fn overlay_dock_pos(app: &AppHandle, cfg: &mut Config) {
+    if let Some(w) = app.get_webview_window(dock_label()) {
+        if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
+            let s = w.scale_factor().unwrap_or(1.0);
+            cfg.dock.cx = ((pos.x as f64 + size.width as f64 / 2.0) / s) as f32;
+            cfg.dock.y = (pos.y as f64 / s) as f32;
+        }
+    }
+}
+
 fn persist_bounds(w: &WebviewWindow) {
     // 最小化时 outer_position 是 -32000 残影、尺寸是 160×28 徽章 —— 写进去就是坏几何
     // （load 时会被回退默认值 → 用户的位置丢失）。最小化状态直接不写，保留 config 里上一次的真值。
@@ -248,15 +260,20 @@ fn wallpaper_data_url_cached() -> Option<String> {
 ///   · `pos` = 卡在显示器内的相对位置（同尺，CSS px，与卡片页同一坐标系）。
 /// Windows「填充」= 每台显示器各自 cover 壁纸，所以按显示器算才是对的。
 fn card_glass_payload(app: &AppHandle, id: &str) -> Option<serde_json::Value> {
-    let w = app.get_webview_window(&card_label(id))?;
+    window_glass_payload(app, &card_label(id))
+}
+
+/// 磨砂层全量数据（按窗口 label 取）—— 卡片与 Dock 共用
+fn window_glass_payload(app: &AppHandle, label: &str) -> Option<serde_json::Value> {
+    let w = app.get_webview_window(label)?;
     let s = w.scale_factor().unwrap_or(1.0);
     let wpos = w.outer_position().ok();
     let mon = hwnd_of(&w).and_then(display::window_monitor);
     let (mon_size, rel) = match (mon, wpos) {
         (Some((hmon, m)), Some(p)) => {
-            // 记下「这张卡最近一次全量推送时的显示器」：拖动换屏时要重推全量（见 push_glass_pos）
+            // 记下「这个窗口最近一次全量推送时的显示器」：换屏时要重推全量（见 push_glass_pos）
             if let Ok(mut map) = last_mon().lock() {
-                map.insert(id.to_string(), hmon);
+                map.insert(label.to_string(), hmon);
             }
             (
                 [(m.2 - m.0) as f64 / s, (m.3 - m.1) as f64 / s],
@@ -316,6 +333,7 @@ async fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
     let mut cfg = cfg;
     // 页面持有的是旧值：以活窗口为准盖回去，防止拖动/移动被旧数据覆盖
     overlay_card_positions(&app, &mut cfg);
+    overlay_dock_pos(&app, &mut cfg);
     if let Some(w) = app.get_webview_window("main") {
         // 最小化中的残影几何不写（同 persist_bounds）
         if !is_iconic(&w) {
@@ -324,6 +342,7 @@ async fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
     }
     cfg.save()?;
     sync_cards(&app, &cfg);
+    sync_dock(&app, &cfg);
     // 层级档切了就对所有活卡重放（设置页那个选项以前只存 config、不生效）
     let mode = z_mode_of(cfg.settings.z_order);
     if mode != Z_MODE.load(Ordering::Relaxed) {
@@ -335,7 +354,7 @@ async fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
     let b = cfg.settings.glass_blur;
     let dark = !matches!(cfg.settings.theme, config::Theme::Light);
     for (label, w) in app.webview_windows() {
-        if label.starts_with("card-") {
+        if label.starts_with("card-") || label == dock_label() {
             let _ = w.eval(&format!(
                 "window.__setGlass && window.__setGlass({a}); window.__setBlur && window.__setBlur({b}); \
                  window.__setTheme && window.__setTheme({});",
@@ -636,6 +655,16 @@ fn toggle_cards(app: &AppHandle) {
             }
         }
     }
+    // Dock 跟着一起显隐（dock-plan §4：热键一按，卡片 + Dock 一起消失）
+    if cfg.dock.enabled {
+        if let Some(w) = app.get_webview_window(dock_label()) {
+            if visible {
+                let _ = w.hide();
+            } else {
+                let _ = w.show();
+            }
+        }
+    }
     vis.0.store(!visible, Ordering::SeqCst);
 }
 
@@ -893,6 +922,7 @@ fn quit(app: &AppHandle) {
         }
     }
     overlay_card_positions(app, &mut cfg);
+    overlay_dock_pos(app, &mut cfg);
     let _ = cfg.save();
     app.exit(0);
 }
@@ -935,8 +965,8 @@ unsafe extern "system" fn card_wnd_proc(
         //    微软文档：WS_EX_NOACTIVATE 只挡「前台激活」，点击引起的输入队列激活
         //    必须靠处理 WM_MOUSEACTIVATE 才行。用 4（…ANDEAT）会把点击吃掉。
         0x0021 => {
-            if desktop_mode() {
-                return 3; // WM_MOUSEACTIVATE → MA_NOACTIVATE
+            if window_lock_active(hwnd) || is_dock_hwnd(hwnd) {
+                return 3; // WM_MOUSEACTIVATE → MA_NOACTIVATE（Dock 永不激活：点图标不该抢焦点）
             }
         }
         // C：z 序总闸。任何来源的抬升（别家 BringWindowToTop、显示桌面恢复、Explorer
@@ -944,7 +974,7 @@ unsafe extern "system" fn card_wnd_proc(
         //    的调用（1px 抖动 / set_size）不动它，所以不会跟 tao 打架。
         0x0046 => {
             // WM_WINDOWPOSCHANGING
-            if desktop_mode() && !z_suspended() {
+            if window_lock_active(hwnd) && !z_suspended() {
                 let wp = &mut *(lparam as *mut WINDOWPOS);
                 if wp.flags & SWP_NOZORDER == 0 {
                     let a = anchor_hwnd();
@@ -962,7 +992,7 @@ unsafe extern "system" fn card_wnd_proc(
         // A：tao 每次 flag 同步都用 to_window_styles() 整份重写 exstyle → 这里补回来
         0x007C => {
             // WM_STYLECHANGING
-            if desktop_mode() && !z_suspended() && wparam as i32 == GWL_EXSTYLE {
+            if window_lock_active(hwnd) && !z_suspended() && wparam as i32 == GWL_EXSTYLE {
                 let ss = &mut *(lparam as *mut STYLESTRUCT);
                 ss.styleNew |= WS_EX_NOACTIVATE;
             }
@@ -971,9 +1001,11 @@ unsafe extern "system" fn card_wnd_proc(
         // WM_MOVING 是系统拖动循环里「位置还没落地」的那一枪 → 改 RECT 就能无抖动地磁吸；
         // WM_EXITSIZEMOVE 收尾（清线 + 隐藏辅助线窗口 + 把卡钉回桌面层）。
         0x0216 => {
-            // WM_MOVING
-            let r = &mut *(lparam as *mut windows_sys::Win32::Foundation::RECT);
-            guide::moving(hwnd, r);
+            // WM_MOVING（Dock 不登记 guide 白名单 → 不画对齐线）
+            if !is_dock_hwnd(hwnd) {
+                let r = &mut *(lparam as *mut windows_sys::Win32::Foundation::RECT);
+                guide::moving(hwnd, r);
+            }
         }
         // 拖动开始/结束（WM_ENTERSIZEMOVE=0x0231 / WM_EXITSIZEMOVE=0x0232）
         // ⚠️ 2026-09-28 修：这里原先写的是 0x0024（= WM_GETMINMAXINFO，不是 WM_EXITSIZEMOVE！）
@@ -983,7 +1015,7 @@ unsafe extern "system" fn card_wnd_proc(
         }
         0x0232 => {
             guide::end_move(hwnd);
-            if desktop_mode() {
+            if window_lock_active(hwnd) {
                 apply_desktop_zorder(hwnd);
             }
         }
@@ -1106,6 +1138,32 @@ fn z_mode_of(z: ZOrder) -> u8 {
 
 fn desktop_mode() -> bool {
     Z_MODE.load(Ordering::Relaxed) == 0
+}
+
+/* ───────────── Dock（玻璃启动栏，0.1.2）───────────── */
+
+/// Dock 窗口 label（单例）
+fn dock_label() -> &'static str {
+    "dock"
+}
+
+/// Dock 窗口句柄（0 = 未建）：子类里要按「这是不是 Dock 窗」走不同的锁分支
+static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
+/// Dock 的桌面层锁是否激活（dock.z == Desktop 时 true；卡片看的是全局 Z_MODE）
+static DOCK_DESKTOP_LOCK: AtomicBool = AtomicBool::new(false);
+
+fn is_dock_hwnd(hwnd: *mut core::ffi::c_void) -> bool {
+    let cur = DOCK_HWND.load(Ordering::Relaxed);
+    cur != 0 && cur == hwnd as isize
+}
+
+/// 该窗口的桌面层锁是否激活：卡片看全局档位，Dock 看自己的档位（dock.z）
+fn window_lock_active(hwnd: *mut core::ffi::c_void) -> bool {
+    if is_dock_hwnd(hwnd) {
+        DOCK_DESKTOP_LOCK.load(Ordering::Relaxed)
+    } else {
+        desktop_mode()
+    }
 }
 
 /// 放行中？（只有「定位」高亮那 1.8s）
@@ -1398,7 +1456,7 @@ fn rescue_offscreen(app: &AppHandle) {
     }
 }
 
-/// 磨砂切片全量重推给所有卡片（显示器变化善后用；卡片页 onload 自己也会拉一次）。
+/// 磨砂切片全量重推给所有卡片 + Dock（显示器变化善后用；卡片页/Dock 页 onload 自己也会拉一次）。
 fn refresh_glass_all(app: &AppHandle) {
     let cfg = Config::load();
     for card in cfg.cards.iter().filter(|c| c.enabled) {
@@ -1409,6 +1467,11 @@ fn refresh_glass_all(app: &AppHandle) {
             let _ = w.eval(&format!(
                 "window.__setWall && window.__setWall({payload});"
             ));
+        }
+    }
+    if cfg.dock.enabled {
+        if let Some(w) = app.get_webview_window(dock_label()) {
+            push_dock_glass(app, &w);
         }
     }
 }
@@ -1483,12 +1546,19 @@ fn hwnd_of(w: &WebviewWindow) -> Option<*mut core::ffi::c_void> {
     Some(h.hwnd.get() as *mut core::ffi::c_void)
 }
 
-/// 卡片 chrome 三合一：
+/// 卡片 chrome = 登记拖动对齐白名单 + 共用玻璃 chrome
+fn apply_card_chrome(w: &WebviewWindow, size: [f32; 2], s: &config::Settings) {
+    if let Some(hwnd) = hwnd_of(w) {
+        guide::register(hwnd); // 拖动对齐的目标白名单：只认登记过的卡窗（主界面同名类、Dock 都不进）
+    }
+    apply_glass_chrome(w, size, s);
+}
+
+/// 卡片与 Dock 共用的玻璃窗 chrome 三合一：
 /// ① DWM 系统圆角；② 剥 WS_CAPTION + 子类化 WM_NCCALCSIZE 消小框，再把尺寸压回设计值；
 /// ③ 玻璃 = DWM 系统背景材质（acrylic/mica，真磨砂；本机实测 WCA 那条老路没效果）。
-fn apply_card_chrome(w: &WebviewWindow, size: [f32; 2], s: &config::Settings) {
+fn apply_glass_chrome(w: &WebviewWindow, size: [f32; 2], s: &config::Settings) {
     let Some(hwnd) = hwnd_of(w) else { return };
-    guide::register(hwnd); // 拖动对齐的目标白名单：只认登记过的卡窗（主界面同名类，别混进去）
     unsafe {
         // ① 圆角：卡片自己画 16px 圆角（.card 已改成 inset:0 铺满窗口），窗口保持方角，
         //    否则 DWM 的 8px 圆角会把卡片的 16px 圆角切掉一圈。
@@ -1633,19 +1703,7 @@ fn create_card(app: &AppHandle, cfg: &Config, card: &CardInstance) {
 
     // WebView2 的表面 bounds 不会跟着 NC 变化重算 → 左侧留 ~6px 未覆盖（WRY_WEBVIEW 白底）
     // = 用户报的「左边白色的一条」。一次 1px 尺寸抖动逼它重算，再 show()。
-    {
-        use tauri::LogicalSize;
-        let _ = win.set_size(tauri::Size::Logical(LogicalSize::new(
-            (sz[0] + 1.0) as f64,
-            (sz[1] + 1.0) as f64,
-        )));
-        std::thread::sleep(std::time::Duration::from_millis(40));
-        let _ = win.set_size(tauri::Size::Logical(LogicalSize::new(
-            sz[0] as f64,
-            sz[1] as f64,
-        )));
-    }
-    let _ = win.show();
+    nudge_and_show(&win, sz);
 
     // 拖动落盘：位置变了才写，写的是自己这张卡。
     // 位置**不吸附**（2026-09-28 用户：先不做吸到格点，位置自由）；对齐提示走 guide.rs：
@@ -1699,6 +1757,238 @@ fn sync_cards(app: &AppHandle, cfg: &Config) {
                 let _ = w.close();
             }
         }
+    }
+}
+
+/* ───────────── Dock（玻璃启动栏，0.1.2）：窗口 / 落盘 / 同步 / 命令 ───────────── */
+
+/// 1px 尺寸抖动逼 WebView2 重算表面 bounds，再 show()（卡片与 Dock 共用，原因见 create_card 注释）
+fn nudge_and_show(w: &WebviewWindow, sz: [f32; 2]) {
+    use tauri::{LogicalSize, Size};
+    let _ = w.set_size(Size::Logical(LogicalSize::new(
+        (sz[0] + 1.0) as f64,
+        (sz[1] + 1.0) as f64,
+    )));
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    let _ = w.set_size(Size::Logical(LogicalSize::new(sz[0] as f64, sz[1] as f64)));
+    let _ = w.show();
+}
+
+/// Dock 落点：cx/y 未设置（<0）时按「主屏底部居中、距底边 8px」算好并写回 config
+fn dock_pos(app: &AppHandle, d: &config::Dock, sz: [f32; 2]) -> (f32, f32) {
+    if d.cx >= 0.0 && d.y >= 0.0 {
+        return (d.cx - sz[0] / 2.0, d.y);
+    }
+    let (sw, sh, s) = match app.primary_monitor() {
+        Ok(Some(m)) => (m.size().width as f64, m.size().height as f64, m.scale_factor()),
+        _ => {
+            let (w, h) = screen_size();
+            (w as f64, h as f64, 1.0)
+        }
+    };
+    let (lw, lh) = (sw / s, sh / s);
+    let x = ((lw - sz[0] as f64) / 2.0) as f32;
+    let y = (lh - 8.0 - sz[1] as f64) as f32;
+    let mut cfg = Config::load();
+    cfg.dock.cx = x + sz[0] / 2.0;
+    cfg.dock.y = y;
+    let _ = cfg.save();
+    (x, y)
+}
+
+/// Dock 的 URL 参数：尺寸档 / 放大强度 / 玻璃两参 / 明暗
+fn dock_url(d: &config::Dock, s: &config::Settings) -> String {
+    format!(
+        "dock.html?size={}&mag={}&glass={}&blur={}&dark={}",
+        d.size,
+        d.mag,
+        s.glass_alpha,
+        s.glass_blur,
+        if matches!(s.theme, config::Theme::Light) { 0 } else { 1 }
+    )
+}
+
+/// 条目默认显示名：路径末段去掉扩展名（面板没填 name 时用）
+fn default_name(path: &str) -> String {
+    let base = dock::win_path(path);
+    let name = base.rsplit('\\').next().unwrap_or(&base).to_string();
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && ext.len() <= 4 => stem.to_string(),
+        _ => name,
+    }
+}
+
+/// Dock 全量 payload（`get_dock` 命令与 `__setDock` 推送同一份形状）：
+/// `{ enabled, size, mag, z, hide_desktop_icons, items: [{id,name,path,args,divider_before,icon}] }`
+/// `icon` = 提取好的 PNG 绝对路径（前端 convertFileSrc 加载）；取不到 = null → 前端落首字母色块。
+fn dock_payload(cfg: &Config) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = cfg
+        .dock
+        .items
+        .iter()
+        .map(|it| {
+            serde_json::json!({
+                "id": it.id,
+                "name": if it.name.is_empty() { default_name(&it.path) } else { it.name.clone() },
+                "path": it.path,
+                "args": it.args,
+                "divider_before": it.divider_before,
+                "icon": dock::ensure_icon(it).map(|p| p.to_string_lossy().to_string()),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "enabled": cfg.dock.enabled,
+        "size": cfg.dock.size,
+        "mag": cfg.dock.mag,
+        "z": if matches!(cfg.dock.z, ZOrder::Desktop) { "desktop" } else { "top" },
+        "hide_desktop_icons": cfg.dock.hide_desktop_icons,
+        "items": items,
+    })
+}
+
+/// 建 Dock 窗（enabled=true 且不存在时）。骨架阶段：玻璃条 + 图标 + 拖动落盘 + 显隐随热键。
+fn create_dock(app: &AppHandle, cfg: &Config) {
+    if app.get_webview_window(dock_label()).is_some() {
+        return;
+    }
+    let d = &cfg.dock;
+    let sz = d.window_size();
+    let (x, y) = dock_pos(app, d, sz);
+    let url = dock_url(d, &cfg.settings);
+    let win = match WebviewWindowBuilder::new(app, dock_label(), WebviewUrl::App(url.into()))
+        .title("MiniCard · Dock")
+        .inner_size(sz[0] as f64, sz[1] as f64)
+        .position(x as f64, y as f64)
+        .decorations(false)
+        .transparent(true)
+        .resizable(false)
+        .skip_taskbar(true)
+        .focused(false)
+        .shadow(false)
+        .always_on_top(matches!(d.z, ZOrder::Top))
+        .visible(false)
+        .build()
+    {
+        Ok(w) => w,
+        Err(e) => {
+            mlog(&format!("create_dock: build ERR {e}"));
+            return;
+        }
+    };
+    apply_glass_chrome(&win, sz, &cfg.settings);
+    // Dock 永不激活（点图标不抢焦点）；桌面层档再叠桌面锚点
+    let _ = win.set_focusable(false);
+    let desk = matches!(d.z, ZOrder::Desktop);
+    DOCK_DESKTOP_LOCK.store(desk, Ordering::Relaxed);
+    if let Some(h) = hwnd_of(&win) {
+        DOCK_HWND.store(h as isize, Ordering::Relaxed);
+        if desk {
+            apply_desktop_zorder(h);
+        }
+    }
+    nudge_and_show(&win, sz);
+
+    // 拖动落盘：写「中心 x + 上边缘 y」（宽随图标数变，按中心回推才不会漂）
+    let last: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+    let app_move = app.clone();
+    let win_ev = win.clone();
+    win.on_window_event(move |e| {
+        if let tauri::WindowEvent::Moved(p) = e {
+            let s = win_ev.scale_factor().unwrap_or(1.0) as f64;
+            let logical = ((p.x as f64 / s) as i32, (p.y as f64 / s) as i32);
+            {
+                let mut last = last.lock().unwrap();
+                if *last == Some(logical) {
+                    return;
+                }
+                *last = Some(logical);
+            }
+            let w = win_ev
+                .outer_size()
+                .map(|z| z.width as f64 / s)
+                .unwrap_or(sz[0] as f64);
+            let mut cfg = Config::load();
+            cfg.dock.cx = (logical.0 as f64 + w / 2.0) as f32;
+            cfg.dock.y = logical.1 as f32;
+            let _ = cfg.save();
+            push_dock_glass(&app_move, &win_ev);
+        }
+    });
+}
+
+/// 推 Dock 的磨砂数据（全量；窗不高频重定位，直接全量最简单）
+fn push_dock_glass(app: &AppHandle, w: &WebviewWindow) {
+    if let Some(payload) = window_glass_payload(app, dock_label()) {
+        let _ = w.eval(&format!("window.__setWall && window.__setWall({payload});"));
+    }
+}
+
+/// config ↔ Dock 窗口双向同步：enabled 保证存在（尺寸档/条目数变了就 set_size + 按 cx 回推左上角），
+/// 关掉就关窗；最新 payload 推给页面。
+fn sync_dock(app: &AppHandle, cfg: &Config) {
+    if cfg.dock.enabled && app.get_webview_window(dock_label()).is_none() {
+        create_dock(app, cfg);
+    }
+    let Some(w) = app.get_webview_window(dock_label()) else {
+        return;
+    };
+    if !cfg.dock.enabled {
+        let _ = w.close();
+        DOCK_HWND.store(0, Ordering::Relaxed);
+        DOCK_DESKTOP_LOCK.store(false, Ordering::Relaxed);
+        return;
+    }
+    // 尺寸（宽随条目数与档位变）
+    let want = cfg.dock.window_size();
+    if let Ok(cur) = w.outer_size() {
+        let s = w.scale_factor().unwrap_or(1.0);
+        let (cw, ch) = (cur.width as f64 / s, cur.height as f64 / s);
+        if (cw - want[0] as f64).abs() > 0.5 || (ch - want[1] as f64).abs() > 0.5 {
+            let _ = w.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                want[0] as f64,
+                want[1] as f64,
+            )));
+            if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
+                let s = w.scale_factor().unwrap_or(1.0);
+                let cx = cfg.dock.cx as f64;
+                if cx >= 0.0 {
+                    let nx = ((cx - size.width as f64 / 2.0 / s) * s) as i32;
+                    let _ = w.set_position(tauri::PhysicalPosition::new(nx, pos.y));
+                }
+            }
+            let _ = w.eval("window.__onResize && window.__onResize()");
+        }
+    }
+    // 层级
+    let desk = matches!(cfg.dock.z, ZOrder::Desktop);
+    DOCK_DESKTOP_LOCK.store(desk, Ordering::Relaxed);
+    let _ = w.set_always_on_top(matches!(cfg.dock.z, ZOrder::Top));
+    if let Some(h) = hwnd_of(&w) {
+        DOCK_HWND.store(h as isize, Ordering::Relaxed);
+        if desk {
+            apply_desktop_zorder(h);
+        }
+    }
+    // 内容 / 参数
+    let payload = dock_payload(cfg);
+    let _ = w.eval(&format!("window.__setDock && window.__setDock({payload});"));
+}
+
+/// Dock 全量配置（含逐条目的图标缓存路径）；图标提取是 IO+GDI 活 → spawn_blocking
+#[tauri::command]
+async fn get_dock() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || dock_payload(&Config::load()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Dock 的磨砂 payload（形状同卡片 get_glass）
+#[tauri::command]
+fn dock_glass(app: AppHandle) -> serde_json::Value {
+    match window_glass_payload(&app, dock_label()) {
+        Some(p) => p,
+        None => serde_json::json!({ "wall": null }),
     }
 }
 
@@ -1948,6 +2238,8 @@ fn main() {
             get_config,
             get_snapshot,
             get_glass,
+            get_dock,
+            dock_glass,
             save_config,
             card_update,
             card_locate,
@@ -2024,6 +2316,9 @@ fn main() {
 
             // 按 config 拉起已启用的卡片
             sync_cards(&handle, &cfg);
+
+            // Dock（enabled 时建窗；骨架阶段：无条目也先把玻璃条画出来）
+            sync_dock(&handle, &cfg);
 
             // 启动即回收一次越屏卡片（上次退出后拔了显示器/改了分辨率/改了缩放的场景）
             rescue_offscreen(&handle);

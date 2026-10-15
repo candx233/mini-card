@@ -26,7 +26,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$HOME/AppData/Roaming/mini-card/icons/**"]
+      }
     }
   },
   "bundle": {

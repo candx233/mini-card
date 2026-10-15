@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MiniCard · Dock</title>
+<style>
+  /* ─── 界面字体：MiSans（子集与许可见 web/fonts/，与 card.html 同源） ─── */
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 400; font-display: block; src: url("fonts/MiSans-Regular.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 500; font-display: block; src: url("fonts/MiSans-Medium.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 600; font-display: block; src: url("fonts/MiSans-Semibold.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 700; font-display: block; src: url("fonts/MiSans-Bold.woff2") format("woff2"); }
+  :root {
+    --surface: oklch(0.966 0.005 258.3 / 0.08);
+    --fg:      oklch(0.966 0.005 258.3);
+    --muted:   oklch(0.85 0.02 261.1);
+    --tshadow: oklch(0 0 0 / 0.45);
+    --border:  oklch(1 0 0 / 0.10);
+    --accent:  oklch(0.685 0.168 256.0);
+    --bg:      oklch(0.210 0.025 255.0);
+    --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent);
+    --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
+    --font-mono: 'MiSans', 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+    /* Dock 规格（docs/dock-plan.md §1；JS 按 URL 参数覆盖） */
+    --icon: 48px;        /* 图标边长 32/40/48/56 */
+    --gap: 12px;         /* 图标间距 */
+    --pad: 12px;         /* 左右内边距 */
+    --bar-h: 64px;       /* 玻璃条高 = 图标 + 上下留白 8×2 */
+    --radius-dock: 20px; /* 比卡片 16 更圆 */
+    --radius-item: 11px; /* 48px 图标的圆角（≈23%，Windows 图标规范同量级） */
+    --margin-top: 28px;  /* 窗口高 = 玻璃条 + 放大余量（窗口上方的透明区） */
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body {
+    color: var(--fg); font-family: var(--font-body); font-size: 13px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased; user-select: none; cursor: default;
+  }
+  /* 整窗就是「玻璃条 + 上方 28px 透明余量」：条贴底边，圆角裁在 .barwrap 上，
+     条目放在 .dock 直下（不裁），放大时向上顶进余量区。 */
+  .dock {
+    position: absolute; left: 0; right: 0; bottom: 0; height: var(--bar-h);
+    border-radius: var(--radius-dock);
+    background: none;
+  }
+  .barwrap { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; z-index: 0; }
+  .wall {                                  /* 磨砂层：壁纸切片 + blur（inset 与位置由 JS 算） */
+    position: absolute; inset: calc(-1 * var(--wall-pad, 120px));
+    background-repeat: no-repeat; background-size: 0 0;
+    filter: blur(30px);
+  }
+  .veil {                                  /* 白纱层：玻璃厚度（--surface 的 alpha）+ 描边 */
+    position: absolute; inset: 0; z-index: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: inherit;
+    pointer-events: none;
+  }
+  .items {
+    position: relative; z-index: 2;
+    height: 100%; display: flex; align-items: flex-end; justify-content: center;
+    gap: var(--gap); padding: 0 var(--pad) 8px;
+  }
+  .item {
+    position: relative; flex: 0 0 auto;
+    width: var(--icon); height: var(--icon);
+    border-radius: var(--radius-item); overflow: hidden;
+    display: grid; place-items: center;
+    background: var(--fg-soft);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    transform-origin: bottom center;
+    transition: transform 0.14s ease-out;
+  }
+  .item img { width: 100%; height: 100%; object-fit: contain; display: block; -webkit-user-drag: none; }
+  .item .glyph {
+    font-family: var(--font-mono); font-weight: 600; font-size: 20px;
+    color: color-mix(in oklch, var(--fg) 88%, transparent);
+    text-shadow: 0 0.833px 1.667px var(--tshadow);
+  }
+  .item.running::after {                   /* 运行中指示点（D 段接真） */
+    content: ""; position: absolute; left: 50%; bottom: 1px; transform: translateX(-50%);
+    width: 4px; height: 4px; border-radius: 999px;
+    background: var(--fg); opacity: 0.85;
+  }
+  .empty-hint {                            /* 无条目时的空态（骨架期可见，方便验收） */
+    position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
+    color: color-mix(in oklch, var(--fg) 62%, transparent);
+    font-size: 12px; white-space: nowrap; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div class="dock" id="dock">
+    <div class="barwrap">
+      <div class="wall" id="wall"></div>
+      <div class="veil"></div>
+    </div>
+    <div class="items" id="items"></div>
+    <div class="empty-hint" id="empty">Dock 上还没有应用</div>
+  </div>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var T = window.__TAURI__;
+
+  /* ── 尺寸档（32/40/48/56）：条高 = 图标 + 16，圆角/间距按稿固定 ── */
+  var SIZE = Number(params.get('size')) || 48;
+  var MAG = Number(params.get('mag'));
+  if (!isFinite(MAG)) MAG = 55;
+  function applySizing() {
+    var s = document.documentElement.style;
+    s.setProperty('--icon', SIZE + 'px');
+    s.setProperty('--bar-h', (SIZE + 16) + 'px');
+    barOffsetY = (window.innerHeight || (SIZE + 16 + 28)) - (SIZE + 16);   // 玻璃条顶边在窗口内的 y
+    drawWall();
+  }
+  window.__onResize = function () { applySizing(); };
+
+  /* ── 玻璃厚度 / 模糊 / 明暗（与 card.html 同口径） ── */
+  function setGlass(v) {
+    var a = Math.max(0, Math.min(100, Number(v) || 0)) / 100 * 0.30;
+    document.documentElement.style.setProperty('--surface', 'oklch(0.966 0.005 258.3 / ' + a.toFixed(3) + ')');
+  }
+  window.__setGlass = setGlass;
+  setGlass(params.get('glass') || 30);
+  window.__setTheme = function (dark) {
+    var r = dark ? null : { fg: 'oklch(0.28 0.02 258)', muted: 'oklch(0.47 0.02 261)', border: 'oklch(0 0 0 / 0.10)' };
+    var s = document.documentElement.style;
+    s.setProperty('--fg', r ? r.fg : 'oklch(0.966 0.005 258.3)');
+    s.setProperty('--muted', r ? r.muted : 'oklch(0.85 0.02 261.1)');
+    s.setProperty('--tshadow', r ? 'oklch(1 0 0 / 0.6)' : 'oklch(0 0 0 / 0.45)');
+    s.setProperty('--border', r ? r.border : 'oklch(1 0 0 / 0.10)');
+  };
+  if (params.get('dark') === '0') window.__setTheme(false);
+
+  /* ── 磨砂层：壁纸切片 + CSS blur（与 card.html 同一套数学；条贴窗口底边 → 加 barOffsetY） ── */
+  var wallEl = document.getElementById('wall');
+  var wallImg = null, wallPos = [0, 0], wallMon = [0, 0], wallGeo = null, wallPad = 120;
+  var barOffsetY = 0;
+  function drawWall() {
+    if (!wallEl || !wallGeo || !wallImg) return;
+    wallEl.style.backgroundImage = 'url("' + wallImg + '")';
+    wallEl.style.backgroundSize = wallGeo.bw.toFixed(1) + 'px ' + wallGeo.bh.toFixed(1) + 'px';
+    // 玻璃条左上角的屏幕坐标 = 窗口坐标 + (0, 窗口高 − 条高)
+    wallEl.style.backgroundPosition =
+      (-(wallGeo.ox + wallPos[0] - wallPad)).toFixed(1) + 'px ' +
+      (-(wallGeo.oy + wallPos[1] + barOffsetY - wallPad)).toFixed(1) + 'px';
+  }
+  function setBlur(v) {
+    if (!wallEl) return;
+    var r = Math.max(0, Math.min(100, Number(v) || 0));
+    wallPad = Math.max(60, r * 3);   // inset 至少 3× 半径，模糊软边落在条外
+    wallEl.style.setProperty('--wall-pad', wallPad + 'px');
+    wallEl.style.filter = 'blur(' + r + 'px)';
+    drawWall();
+  }
+  function setWall(p) {
+    if (!p || !p.wall) return;
+    wallImg = p.wall;
+    var sw = p.mon[0], sh = p.mon[1];
+    wallMon = [sw, sh];
+    if (p.pos) wallPos = p.pos;
+    if (p.blur != null) setBlur(p.blur);
+    var im = new Image();
+    im.onload = function () {
+      var k = Math.max(sw / im.naturalWidth, sh / im.naturalHeight);   // Windows「填充」= cover
+      wallGeo = { bw: im.naturalWidth * k, bh: im.naturalHeight * k,
+                  ox: (im.naturalWidth * k - sw) / 2, oy: (im.naturalHeight * k - sh) / 2 };
+      drawWall();
+    };
+    im.src = p.wall;
+  }
+  window.__setWall = setWall;
+  window.__setBlur = setBlur;
+  window.__getWall = function () { return { mon: wallMon, pos: wallPos, pad: wallPad, geo: wallGeo, barOffsetY: barOffsetY }; };
+
+  /* ── 条目渲染 ── */
+  var itemsEl = document.getElementById('items');
+  var emptyEl = document.getElementById('empty');
+  function iconUrl(path) {
+    if (T && T.core && T.core.convertFileSrc) {
+      try { return T.core.convertFileSrc(path); } catch (e) { /* 落到原路径 */ }
+    }
+    return path;
+  }
+  function initial(name) {
+    var s = (name || '?').trim();
+    return s ? s.charAt(0).toUpperCase() : '?';
+  }
+  function renderItems(items) {
+    items = items || [];
+    itemsEl.innerHTML = '';
+    items.forEach(function (it) {
+      var el = document.createElement('div');
+      el.className = 'item';
+      el.dataset.id = it.id || '';
+      el.title = it.name || '';
+      if (it.icon) {
+        var img = document.createElement('img');
+        img.alt = '';
+        img.draggable = false;
+        img.src = iconUrl(it.icon);
+        el.appendChild(img);
+      } else {
+        var g = document.createElement('span');
+        g.className = 'glyph';
+        g.textContent = initial(it.name);
+        el.appendChild(g);
+      }
+      itemsEl.appendChild(el);
+    });
+    emptyEl.style.display = items.length ? 'none' : 'block';
+  }
+  window.__setDock = function (p) {
+    if (!p) return;
+    if (p.size) { SIZE = Number(p.size) || SIZE; }
+    if (isFinite(Number(p.mag))) { MAG = Number(p.mag); }
+    applySizing();
+    renderItems(p.items);
+  };
+  window.__getDock = function () { return { size: SIZE, mag: MAG, count: itemsEl.children.length }; };
+
+  /* ── 数据接入：首帧拉一次（事件推送走 Rust 的 eval __setDock） ── */
+  var DGY = null;   // 诊断：最近一次 payload
+  if (T && T.core) {
+    T.core.invoke('get_dock').then(function (p) { DGY = p; window.__setDock(p); }).catch(function () {});
+    // 磨砂：首帧先按 URL 的 blur 值糊上，dock_glass 回来再精确定位
+    setBlur(params.get('blur') || 30);
+    T.core.invoke('dock_glass').then(setWall).catch(function () {});
+  }
+  window.__getDGY = function () { return DGY; };
+
+  /* ── 手势：拖空白移动整条（不接点击；条内图标留给 C 段接启动） ── */
+  var holdTimer = null;
+  function startDrag() {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    var wa = T && T.window;
+    if (wa && wa.getCurrentWindow) {
+      try { wa.getCurrentWindow().startDragging(); } catch (err) { console.error(err); }
+    }
+  }
+  var dockEl = document.getElementById('dock');
+  dockEl.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('.item')) return;   // 图标上按下不拖整条
+    if (holdTimer) clearTimeout(holdTimer);
+    holdTimer = setTimeout(startDrag, 150);
+  });
+  dockEl.addEventListener('mousemove', function () {
+    if (!holdTimer) return;
+    startDrag();
+  });
+  function cancelHold() { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } }
+  dockEl.addEventListener('mouseup', cancelHold);
+  dockEl.addEventListener('mouseleave', cancelHold);
+
+  applySizing();
+})();
+</script>
+</body>
+</html>
