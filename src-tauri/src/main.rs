@@ -1808,16 +1808,6 @@ fn dock_url(d: &config::Dock, s: &config::Settings) -> String {
     )
 }
 
-/// 条目默认显示名：路径末段去掉扩展名（面板没填 name 时用）
-fn default_name(path: &str) -> String {
-    let base = dock::win_path(path);
-    let name = base.rsplit('\\').next().unwrap_or(&base).to_string();
-    match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && ext.len() <= 4 => stem.to_string(),
-        _ => name,
-    }
-}
-
 /// Dock 全量 payload（`get_dock` 命令与 `__setDock` 推送同一份形状）：
 /// `{ enabled, size, mag, z, hide_desktop_icons, items: [{id,name,path,args,divider_before,icon}] }`
 /// `icon` = 提取好的 PNG 绝对路径（前端 convertFileSrc 加载）；取不到 = null → 前端落首字母色块。
@@ -1829,7 +1819,7 @@ fn dock_payload(cfg: &Config) -> serde_json::Value {
         .map(|it| {
             serde_json::json!({
                 "id": it.id,
-                "name": if it.name.is_empty() { default_name(&it.path) } else { it.name.clone() },
+                "name": if it.name.is_empty() { dock::display_name(&it.path) } else { it.name.clone() },
                 "path": it.path,
                 "args": it.args,
                 "divider_before": it.divider_before,
@@ -1990,6 +1980,144 @@ fn dock_glass(app: AppHandle) -> serde_json::Value {
         Some(p) => p,
         None => serde_json::json!({ "wall": null }),
     }
+}
+
+/// Dock 配置改动后的统一收尾：同步 Dock 窗 + 把同一份 payload 推给主界面 Dock 页
+fn dock_after_change(app: &AppHandle, cfg: &Config) {
+    sync_dock(app, cfg);
+    let payload = dock_payload(cfg);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.eval(&format!("window.__setDockPage && window.__setDockPage({payload});"));
+    }
+}
+
+/// 加条目（主界面选文件 / 拖放到 Dock 都走这条）：名字按路径推、图标当场提好再落盘，
+/// 免得前端先闪一下字母块。同路径重复直接跳过；图标是 IO+GDI 活 → 整段进 spawn_blocking
+#[tauri::command]
+async fn dock_add(app: AppHandle, paths: Vec<String>) -> Result<serde_json::Value, String> {
+    let cfg = tauri::async_runtime::spawn_blocking(move || -> Result<Config, String> {
+        let mut cfg = Config::load();
+        for raw in paths {
+            let p = raw.trim().to_string();
+            if p.is_empty() || cfg.dock.items.iter().any(|it| it.path.eq_ignore_ascii_case(&p)) {
+                continue;
+            }
+            let mut id = dock::short_id();
+            while cfg.dock.items.iter().any(|it| it.id == id) {
+                id = dock::short_id();
+            }
+            let item = config::DockItem {
+                id,
+                name: dock::display_name(&p),
+                path: p,
+                args: String::new(),
+                icon: String::new(),
+                divider_before: false,
+            };
+            let _ = dock::ensure_icon(&item);
+            cfg.dock.items.push(item);
+        }
+        cfg.save()?;
+        Ok(cfg)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    dock_after_change(&app, &cfg);
+    Ok(dock_payload(&cfg))
+}
+
+/// 删条目
+#[tauri::command]
+async fn dock_remove(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    let mut cfg = Config::load();
+    cfg.dock.items.retain(|it| it.id != id);
+    cfg.save()?;
+    dock_after_change(&app, &cfg);
+    Ok(dock_payload(&cfg))
+}
+
+/// 按给定顺序重排：只认已知 id，没列到的按原相对顺序追加到末尾（少传不会漏条目）
+#[tauri::command]
+async fn dock_reorder(app: AppHandle, ids: Vec<String>) -> Result<serde_json::Value, String> {
+    let mut cfg = Config::load();
+    let mut rest = cfg.dock.items.clone();
+    let mut out: Vec<config::DockItem> = Vec::new();
+    for id in &ids {
+        if let Some(pos) = rest.iter().position(|it| &it.id == id) {
+            out.push(rest.remove(pos));
+        }
+    }
+    out.extend(rest);
+    cfg.dock.items = out;
+    cfg.save()?;
+    dock_after_change(&app, &cfg);
+    Ok(dock_payload(&cfg))
+}
+
+/// Dock 设置项（启用/尺寸/放大/层级/隐藏桌面图标）。
+/// · 条目增删排序走各自命令 → 这里**忽略 payload 里的 items**（页面列表可能是旧的，会吃掉刚加的条目）
+/// · `cx/y/auto_hide` 同理以盘上活值为准（刚拖过窗口的那一下就写在盘上，别被页面的旧值顶掉）
+/// · 尺寸过 `snap_size` 闸门（手改 config 的野值也在 Rust 侧收口）
+#[tauri::command]
+async fn dock_update(app: AppHandle, dock: config::Dock) -> Result<serde_json::Value, String> {
+    let mut cfg = Config::load();
+    let mut d = dock;
+    d.cx = cfg.dock.cx;
+    d.y = cfg.dock.y;
+    d.auto_hide = cfg.dock.auto_hide;
+    d.items = cfg.dock.items.clone();
+    d.size = cfg.dock.snap_size(d.size);
+    d.mag = d.mag.min(100);
+    if d.hide_desktop_icons != cfg.dock.hide_desktop_icons {
+        dock::set_desktop_icons(d.hide_desktop_icons)?;
+    }
+    cfg.dock = d;
+    cfg.save()?;
+    dock_after_change(&app, &cfg);
+    Ok(dock_payload(&cfg))
+}
+
+/// 点图标 → 启动。返回 Ok 前端才播「跳一下」；失败把原因给页面 toast
+#[tauri::command]
+async fn dock_launch(id: String) -> Result<(), String> {
+    let cfg = Config::load();
+    let item = cfg
+        .dock
+        .items
+        .iter()
+        .find(|it| it.id == id)
+        .ok_or("条目不存在")?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || dock::launch(&item))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 右键「打开所在文件夹」
+#[tauri::command]
+async fn dock_reveal(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || dock::reveal(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 桌面图标显隐开关：写注册表 + 通知外壳；同时把真值写回 config 并广播
+#[tauri::command]
+async fn dock_set_desktop_icons(app: AppHandle, on: bool) -> Result<serde_json::Value, String> {
+    dock::set_desktop_icons(on)?;
+    let mut cfg = Config::load();
+    cfg.dock.hide_desktop_icons = on;
+    cfg.save()?;
+    dock_after_change(&app, &cfg);
+    Ok(dock_payload(&cfg))
+}
+
+/// 桌面图标的**真实**状态（桌面右键改过就按注册表来，别显示我们自己的旧值）
+#[tauri::command]
+async fn dock_desktop_icons_state() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(|| dock::desktop_icons_hidden().unwrap_or(false))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 托盘：主窗口藏起来之后的回家路
@@ -2209,6 +2337,8 @@ fn main() {
                 })
                 .build(),
         )
+        // Dock 页「添加应用」用它的原生文件选择器（前端走 plugin:dialog|open 裸 IPC，不引 npm 包）
+        .plugin(tauri_plugin_dialog::init())
         .manage(snap.clone())
         .manage(weather_snap)
         .manage(CardVis(AtomicBool::new(true)))
@@ -2240,6 +2370,14 @@ fn main() {
             get_glass,
             get_dock,
             dock_glass,
+            dock_add,
+            dock_remove,
+            dock_reorder,
+            dock_update,
+            dock_launch,
+            dock_reveal,
+            dock_set_desktop_icons,
+            dock_desktop_icons_state,
             save_config,
             card_update,
             card_locate,
@@ -2266,6 +2404,15 @@ fn main() {
             guide::prepare(); // 先备好拖动辅助线窗口（隐藏）
             let handle = app.handle().clone();
             let cfg = Config::load();
+            // 桌面图标显隐以**注册表**为准（用户可能从桌面右键「查看→显示桌面图标」改回去过）：
+            // 只把真值回写 config，不反向强推 —— 别跟用户抢这一格
+            if let Some(hidden) = dock::desktop_icons_hidden() {
+                if hidden != cfg.dock.hide_desktop_icons {
+                    let mut c = cfg.clone();
+                    c.dock.hide_desktop_icons = hidden;
+                    let _ = c.save();
+                }
+            }
             // 主窗按需创建（tauri.conf.json 声明 `"create": false`）：启动这拍直接走 show_main，
             // 与托盘唤回同一条路 —— 建窗、chrome（不圆角 + 24px HICON）、位置/尺寸全在 ensure_main 里。
             // 「图标必须在首次显示前设好」这条顺序约束也收在 ensure_main 内部。

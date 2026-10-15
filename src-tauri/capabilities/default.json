@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "主窗口 + 卡片窗口 + Dock：默认能力（事件监听/快照推送）+ 拖动",
   "windows": ["main", "card-*", "dock"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:allow-open"]
 }

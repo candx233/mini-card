@@ -346,6 +346,7 @@
   }
   .icon-btn svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; fill: none; }
   .icon-btn:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 30%, transparent); color: var(--fg); }
+  .icon-btn:disabled { opacity: 0.38; pointer-events: none; }
   /* 图钉（设计稿新增）：固定后卡片不再响应拖动 */
   .icon-btn.btn-pin.on { background: color-mix(in oklch, var(--accent) 16%, transparent); border-color: color-mix(in oklch, var(--accent-edge) 55%, transparent); color: var(--fg); }
   .icon-btn.btn-pin.on svg { fill: color-mix(in oklch, var(--accent) 42%, transparent); }
@@ -376,6 +377,23 @@
     display: none; padding: 44px 20px; text-align: center; color: var(--muted); font-size: 13px;
     border: 1px dashed var(--border); border-radius: var(--radius-card);
   }
+
+  /* ─── 页面5：Dock ─── */
+  .dock-preview {
+    position: relative; height: 132px; border-radius: var(--radius-card);
+    background: color-mix(in oklch, var(--bg-deep) 46%, transparent);
+    border: 1px solid var(--border); overflow: hidden;
+  }
+  .dock-preview .prev-wrap { border-radius: 0; }   /* Dock 窗上方是透明余量，不裁圆角 */
+  .dicon img { width: 24px; height: 24px; object-fit: contain; display: block; }
+  .dicon .glyph { font-family: var(--font-mono); font-size: 15px; font-weight: 600; color: var(--fg); }
+  .dock-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 12px; padding: 10px 12px; border-radius: var(--radius);
+    background: color-mix(in oklch, var(--fg) 6%, transparent);
+    border: 1px solid var(--border);
+  }
+  .dock-row .input { flex: 1 1 auto; min-width: 0; }
 
   /* ─── 页面3：外观 ─── */
   .group {
@@ -551,6 +569,10 @@
         <button class="nav-item" data-page="page-desktop">
           <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
           桌面卡片
+        </button>
+        <button class="nav-item" data-page="page-dock">
+          <svg viewBox="0 0 24 24"><rect x="2.5" y="13" width="19" height="6.5" rx="2"/><rect x="5" y="14.6" width="4" height="4" rx="1"/><rect x="10" y="14.6" width="4" height="4" rx="1"/><rect x="15" y="14.6" width="4" height="4" rx="1"/><path d="M9 6.2v3.6M15 6.2v3.6"/></svg>
+          Dock
         </button>
         <button class="nav-item" data-page="page-appearance">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2"/></svg>
@@ -808,6 +830,79 @@
         <div class="dlist-empty" id="dlist-empty" data-od-id="desktop-empty">桌面暂无卡片，到「卡片库」添加</div>
       </section>
 
+      <!-- 页面 5：Dock（nav 里排在桌面卡片之后，方便桌面相关的东西挨着） -->
+      <section class="page" id="page-dock" data-od-id="page-dock">
+        <div class="row-between page-head">
+          <div>
+            <h2 class="h2">Dock</h2>
+            <p class="lead">桌面底部的一条玻璃应用启动栏</p>
+          </div>
+          <button class="btn btn-primary" id="dock-add" data-od-id="dock-add">＋ 添加应用</button>
+        </div>
+
+        <!-- 预览：真 dock.html iframe，1:1 -->
+        <div class="group" data-od-id="group-dock-preview">
+          <div class="row-between" style="margin-bottom:14px;">
+            <h3>预览</h3>
+            <span class="meta" id="dock-prev-meta">窗口 444×92 · 玻璃条 64 + 放大余量 28</span>
+          </div>
+          <div class="dock-preview" id="dock-preview" data-od-id="dock-preview"></div>
+        </div>
+
+        <!-- 常规 -->
+        <div class="slist" data-od-id="dock-settings">
+          <div class="sitem">
+            <div><h3>启用 Dock</h3><span class="meta">在桌面底部显示玻璃启动栏</span></div>
+            <div class="sctl"><button class="switch" role="switch" aria-checked="false" aria-label="启用 Dock" id="dock-enable"></button></div>
+          </div>
+          <div class="sitem">
+            <div><h3>层级</h3><span class="meta">置顶随时可点；桌面层则只在看桌面时出现</span></div>
+            <div class="sctl">
+              <div class="opts" data-group="dock-z">
+                <button class="opt sel" data-val="top">置顶</button>
+                <button class="opt" data-val="desktop">桌面层</button>
+              </div>
+            </div>
+          </div>
+          <div class="sitem">
+            <div><h3>隐藏系统桌面图标</h3><span class="meta">让 Dock 真正代替桌面那堆快捷方式</span></div>
+            <div class="sctl"><button class="switch" role="switch" aria-checked="false" aria-label="隐藏系统桌面图标" id="dock-hide-icons"></button></div>
+          </div>
+        </div>
+
+        <div class="group" data-od-id="group-dock-shape">
+          <div class="srow-ctl">
+            <div class="slabel"><span>图标大小</span><span class="val" id="val-dock-size">48</span></div>
+            <input type="range" id="rng-dock-size" min="32" max="56" step="8" value="48" aria-label="图标大小" />
+            <p class="snote">32 / 40 / 48 / 56 四档，条高与条宽跟着变</p>
+          </div>
+          <div class="srow-ctl">
+            <div class="slabel"><span>放大强度</span><span class="val" id="val-dock-mag">55</span></div>
+            <input type="range" id="rng-dock-mag" min="0" max="100" value="55" aria-label="放大强度" />
+            <p class="snote">0 = 关闭放大；默认 55 时中心图标约 1.55 倍</p>
+          </div>
+        </div>
+
+        <!-- Dock 上的应用 -->
+        <div class="group" data-od-id="group-dock-items">
+          <div class="row-between" style="margin-bottom:14px;">
+            <h3>Dock 上的应用</h3>
+            <span class="meta">用 ↑ ↓ 调顺序</span>
+          </div>
+          <div class="dlist" id="dock-list" data-od-id="dock-list"></div>
+          <div class="dlist-empty" id="dock-empty" data-od-id="dock-empty">把常用应用拖到 Dock 上，或点「＋ 添加应用」</div>
+          <div class="dock-row" id="dock-url-row" style="display:none;">
+            <input class="input" id="dock-url-input" type="text" placeholder="https://example.com" aria-label="网址" />
+            <button class="btn btn-primary" id="dock-url-ok" style="padding:9px 14px;">添加</button>
+            <button class="btn btn-secondary" id="dock-url-cancel" style="padding:9px 14px;">取消</button>
+          </div>
+          <div class="row-between" style="margin-top:14px; justify-content:flex-start; gap:8px;">
+            <button class="btn btn-secondary" id="dock-add-folder">添加文件夹</button>
+            <button class="btn btn-secondary" id="dock-add-url">添加网址</button>
+          </div>
+        </div>
+      </section>
+
       <!-- 页面 3：外观 -->
       <section class="page" id="page-appearance" data-od-id="page-appearance">
         <div class="page-head">
@@ -971,7 +1066,7 @@
   });
 
   /* 开关（通用兜底；自己接了逻辑的开关在 list 里排除，否则会被点两次 = 等于没点） */
-  var SW_OWN = ['hk-toggle', 'pm-enabled', 'set-autostart', 'upd-auto'];
+  var SW_OWN = ['hk-toggle', 'pm-enabled', 'set-autostart', 'upd-auto', 'dock-enable', 'dock-hide-icons'];
   $$('.switch').forEach(function (sw) {
     if (SW_OWN.indexOf(sw.id) >= 0) return;
     sw.addEventListener('click', function () {
@@ -1789,13 +1884,260 @@
     });
   }
 
+  /* ─── Dock 页（页面 5）───
+     数据源 = `get_dock` 的 payload（DOCK_PAYLOAD，条目里带图标缓存路径，与桌面 Dock 同一份）；
+     设置项改动走 `dock_update`（Rust 侧会忽略 items/cx/y，防止页面旧值盖掉刚加的条目与刚拖的位置）。 */
+  var DOCK_PAYLOAD = null;
+  var dockPrevFrame = null, dockPrevWrap = null;
+  var ARROW_UP = '<svg viewBox="0 0 24 24"><path d="M12 19V6"/><path d="M6 12l6-6 6 6"/></svg>';
+  var ARROW_DOWN = '<svg viewBox="0 0 24 24"><path d="M12 5v13"/><path d="M6 12l6 6 6-6"/></svg>';
+  var TRASH_SVG = '<svg viewBox="0 0 24 24"><path d="M3.6 6.4h16.8"/><path d="M18.6 6.4v12.6a2.2 2.2 0 0 1-2.2 2.2H7.6a2.2 2.2 0 0 1-2.2-2.2V6.4"/><path d="M9 6.4V4.6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.8"/><path d="M10.1 10.9v6.2M13.9 10.9v6.2"/></svg>';
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (ch) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch];
+    });
+  }
+  function fileSrc(p) {
+    try { return window.__TAURI__.core.convertFileSrc(p); } catch (e) { return p; }
+  }
+  function dockItems() { return (DOCK_PAYLOAD && DOCK_PAYLOAD.items) || []; }
+  function dockCfg() { return (CFG && CFG.dock) || {}; }
+  function dockZVal() { return dockCfg().z === 'Desktop' ? 'desktop' : 'top'; }
+  /* 条宽/窗高公式与 Rust `config::Dock` 一致：n*(size+12)+24、高 = size+16+28 */
+  function dockWinSize() {
+    var s = Number(dockCfg().size) || 48;
+    return { size: s, bar: s + 16, w: dockItems().length * (s + 12) + 24, h: s + 16 + 28 };
+  }
+  function setSwitch(el, on) {
+    if (!el) return;
+    el.classList.toggle('on', !!on);
+    el.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+
+  function buildDockPreview() {
+    var stage = $('#dock-preview'); if (!stage) return;
+    var s = dockWinSize().size, d = dockCfg();
+    var dark = (CFG.settings && CFG.settings.theme === 'Light') ? 0 : 1;
+    var glass = (CFG.settings && CFG.settings.glass_alpha) || 30;
+    var blur = (CFG.settings && CFG.settings.glass_blur) || 30;
+    stage.innerHTML = '';
+    var wrap = document.createElement('div');
+    wrap.className = 'prev-wrap';
+    var f = document.createElement('iframe');
+    f.className = 'prev-frame';
+    f.setAttribute('scrolling', 'no');
+    f.setAttribute('title', 'Dock 预览');
+    f.src = 'dock.html?preview=1&size=' + s + '&mag=' + (Number(d.mag) || 0) +
+            '&glass=' + glass + '&blur=' + blur + '&dark=' + dark;
+    wrap.appendChild(f);
+    stage.appendChild(wrap);
+    dockPrevWrap = wrap; dockPrevFrame = f;
+    applyDockPreview();
+  }
+  /* 预览尺寸跟着条宽公式走；条目/尺寸变了直接调 dock.html 的钩子（同源），不重载 iframe */
+  function applyDockPreview() {
+    if (!dockPrevWrap || !dockPrevFrame) return;
+    var stage = $('#dock-preview'); if (!stage) return;
+    var z = dockWinSize();
+    var availW = Math.max(160, stage.clientWidth - 32), availH = Math.max(60, stage.clientHeight - 32);
+    var scale = Math.min(availW / z.w, availH / z.h, 1);
+    dockPrevWrap.style.width = Math.round(z.w * scale) + 'px';
+    dockPrevWrap.style.height = Math.round(z.h * scale) + 'px';
+    dockPrevFrame.style.width = z.w + 'px';
+    dockPrevFrame.style.height = z.h + 'px';
+    dockPrevFrame.style.transform = 'scale(' + scale.toFixed(4) + ')';
+    var meta = $('#dock-prev-meta');
+    if (meta) meta.textContent = '窗口 ' + z.w + '×' + z.h + ' · 玻璃条 ' + z.bar + ' + 放大余量 28';
+    try {
+      var cw = dockPrevFrame.contentWindow;
+      if (cw && cw.__setDock) cw.__setDock({ size: z.size, mag: Number(dockCfg().mag) || 0, items: dockItems() });
+    } catch (e) { /* 预览没就绪就算了，下一拍会补上 */ }
+  }
+
+  function renderDockList() {
+    var list = $('#dock-list'); if (!list) return;
+    var items = dockItems();
+    list.innerHTML = '';
+    items.forEach(function (it, i) {
+      var row = document.createElement('div');
+      row.className = 'drow';
+      row.dataset.dock = it.id;
+      var icon = it.icon
+        ? '<img src="' + esc(fileSrc(it.icon)) + '" alt="">'
+        : '<span class="glyph">' + esc((it.name || '?').trim().charAt(0).toUpperCase() || '?') + '</span>';
+      row.innerHTML =
+        '<div class="dicon" aria-hidden="true">' + icon + '</div>' +
+        '<div class="dinfo"><h3>' + esc(it.name || '') + '</h3><span class="meta">' + esc(it.path) + '</span></div>' +
+        '<div class="dact">' +
+          '<button class="icon-btn d-up" title="上移" aria-label="上移"' + (i === 0 ? ' disabled' : '') + '>' + ARROW_UP + '</button>' +
+          '<button class="icon-btn d-down" title="下移" aria-label="下移"' + (i === items.length - 1 ? ' disabled' : '') + '>' + ARROW_DOWN + '</button>' +
+          '<button class="icon-btn btn-del" title="移除" aria-label="移除">' + TRASH_SVG + '</button>' +
+        '</div>';
+      row.querySelector('.d-up').addEventListener('click', function () { moveDock(i, -1); });
+      row.querySelector('.d-down').addEventListener('click', function () { moveDock(i, 1); });
+      row.querySelector('.btn-del').addEventListener('click', function () {
+        invoke('dock_remove', { id: it.id }).then(afterDockChange).catch(function (e) { toast('移除失败：' + e); });
+      });
+      list.appendChild(row);
+    });
+    var empty = $('#dock-empty');
+    if (empty) empty.style.display = items.length ? 'none' : 'block';
+  }
+
+  function moveDock(i, dir) {
+    var ids = dockItems().map(function (x) { return x.id; });
+    var j = i + dir;
+    if (j < 0 || j >= ids.length) return;
+    var t = ids[i]; ids[i] = ids[j]; ids[j] = t;
+    invoke('dock_reorder', { ids: ids }).then(afterDockChange).catch(function (e) { toast('排序失败：' + e); });
+  }
+
+  /* 任何 Dock 改动之后：拿新 payload + 重读 config（config 里也有 items，别让页面旧值在下次 save 时盖回去） */
+  function afterDockChange(p) {
+    if (p) DOCK_PAYLOAD = p;
+    return invoke('get_config').then(function (c) {
+      CFG = c;
+      if (!CFG.dock) CFG.dock = {};
+      syncDockUI();
+    }).catch(function () { syncDockUI(); });
+  }
+
+  function syncDockUI() {
+    if (!$('#dock-list')) return;
+    var d = dockCfg(), z = dockWinSize();
+    setSwitch($('#dock-enable'), d.enabled);
+    setSwitch($('#dock-hide-icons'), d.hide_desktop_icons);
+    $$('.opt', $('[data-group="dock-z"]')).forEach(function (o) { o.classList.toggle('sel', o.dataset.val === dockZVal()); });
+    var rs = $('#rng-dock-size'), rm = $('#rng-dock-mag');
+    rs.value = z.size; $('#val-dock-size').textContent = z.size; paint(rs);
+    var mag = (d.mag == null ? 55 : d.mag);
+    rm.value = mag; $('#val-dock-mag').textContent = mag; paint(rm);
+    renderDockList();
+    applyDockPreview();
+  }
+
+  function dockUpdate(patch) {
+    var d = dockCfg();
+    var next = {
+      enabled: !!d.enabled,
+      cx: (typeof d.cx === 'number' ? d.cx : -1), y: (typeof d.y === 'number' ? d.y : -1),
+      size: Number(d.size) || 48, mag: (d.mag == null ? 55 : d.mag),
+      z: (d.z === 'Desktop' ? 'Desktop' : 'Top'),
+      hide_desktop_icons: !!d.hide_desktop_icons, auto_hide: !!d.auto_hide, items: []
+    };
+    Object.keys(patch).forEach(function (k) { next[k] = patch[k]; });
+    return invoke('dock_update', { dock: next })
+      .then(function (p) { return afterDockChange(p); })
+      .catch(function (e) { toast('Dock 设置保存失败：' + e); });
+  }
+
+  function addDockPaths(paths) {
+    if (!paths || !paths.length) return;
+    invoke('dock_add', { paths: paths })
+      .then(function (p) { return afterDockChange(p).then(function () { toast('已添加到 Dock'); }); })
+      .catch(function (e) { toast('添加失败：' + e); });
+  }
+
+  function bindDock() {
+    var addBtn = $('#dock-add');
+    if (!addBtn) return;                       // 页面缺失（旧版 HTML）就当没这回事
+    addBtn.addEventListener('click', function () {
+      // 原生文件选择器走插件裸 IPC（前端没引 npm 包）：plugin:dialog|open
+      invoke('plugin:dialog|open', {
+        options: {
+          multiple: true, title: '选择要添加的应用',
+          filters: [{ name: '程序 / 快捷方式', extensions: ['exe', 'lnk', 'bat', 'cmd'] }, { name: '所有文件', extensions: ['*'] }]
+        }
+      }).then(function (sel) {
+        if (!sel) return;
+        addDockPaths(Array.isArray(sel) ? sel : [sel]);
+      }).catch(function (e) { toast('打开文件选择器失败：' + e); });
+    });
+    $('#dock-add-folder').addEventListener('click', function () {
+      invoke('plugin:dialog|open', { options: { directory: true, multiple: false, title: '选择文件夹' } })
+        .then(function (sel) { if (sel) addDockPaths([sel]); })
+        .catch(function (e) { toast('打开文件夹选择器失败：' + e); });
+    });
+    $('#dock-add-url').addEventListener('click', function () {
+      var row = $('#dock-url-row');
+      row.style.display = 'flex';
+      $('#dock-url-input').value = '';
+      $('#dock-url-input').focus();
+    });
+    $('#dock-url-cancel').addEventListener('click', function () { $('#dock-url-row').style.display = 'none'; });
+    $('#dock-url-ok').addEventListener('click', function () {
+      var v = $('#dock-url-input').value.trim();
+      if (!v) return;
+      if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+      $('#dock-url-row').style.display = 'none';
+      addDockPaths([v]);
+    });
+    $('#dock-url-input').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('#dock-url-ok').click(); });
+
+    $('#dock-enable').addEventListener('click', function () {
+      var on = !$('#dock-enable').classList.contains('on');
+      setSwitch($('#dock-enable'), on);
+      dockUpdate({ enabled: on }).then(function () { toast(on ? 'Dock 已启用' : 'Dock 已关闭'); });
+    });
+    $('#dock-hide-icons').addEventListener('click', function () {
+      var on = !$('#dock-hide-icons').classList.contains('on');
+      setSwitch($('#dock-hide-icons'), on);
+      invoke('dock_set_desktop_icons', { on: on })
+        .then(function (p) { return afterDockChange(p).then(function () { toast(on ? '已隐藏系统桌面图标' : '已恢复系统桌面图标'); }); })
+        .catch(function (e) { setSwitch($('#dock-hide-icons'), !on); toast('切换失败：' + e); });
+    });
+    $$('.opt', $('[data-group="dock-z"]')).forEach(function (o) {
+      o.addEventListener('click', function () { dockUpdate({ z: o.dataset.val === 'desktop' ? 'Desktop' : 'Top' }); });
+    });
+
+    // 滑块：拖动只改预览（不打 IPC），松手才落盘 —— 免得每帧重建一次窗口
+    var rs = $('#rng-dock-size'), rm = $('#rng-dock-mag');
+    rs.addEventListener('input', function () {
+      $('#val-dock-size').textContent = rs.value;
+      paint(rs);
+      if (CFG.dock) CFG.dock.size = Number(rs.value);
+      applyDockPreview();
+    });
+    rs.addEventListener('change', function () { dockUpdate({ size: Number(rs.value) }); });
+    rm.addEventListener('input', function () {
+      $('#val-dock-mag').textContent = rm.value;
+      paint(rm);
+      if (CFG.dock) CFG.dock.mag = Number(rm.value);
+      applyDockPreview();
+    });
+    rm.addEventListener('change', function () { dockUpdate({ mag: Number(rm.value) }); });
+
+    // Rust 侧推送（Dock 窗拖动/别的入口改了配置时）
+    window.__setDockPage = function (p) {
+      if (!p) return;
+      DOCK_PAYLOAD = p;
+      syncDockUI();
+    };
+    window.__dockPreviewSync = function () { applyDockPreview(); };
+    // 预览尺寸按 stage 实测宽度算 —— 页面藏着时 clientWidth = 0（建 iframe 那拍就是这种），
+    // 所以「切到本页」「窗口缩放」都要重算一次，否则预览一直卡在兜底的小尺寸上
+    var navBtn = $('.nav-item[data-page="page-dock"]');
+    if (navBtn) navBtn.addEventListener('click', function () { setTimeout(applyDockPreview, 30); });
+    window.addEventListener('resize', function () { applyDockPreview(); });
+    // 桌面图标显隐以注册表为准（用户可能在桌面右键改回去过）
+    invoke('dock_desktop_icons_state').then(function (on) {
+      if (CFG.dock) CFG.dock.hide_desktop_icons = !!on;
+      setSwitch($('#dock-hide-icons'), !!on);
+    }).catch(function () {});
+  }
+
   async function init() {
     try { CFG = await invoke('get_config'); }
     catch (e) { console.error('[bridge] get_config', e); toast('配置加载失败'); return; }
     if (!CFG.settings) CFG.settings = {};
     if (!CFG.cards) CFG.cards = [];
+    if (!CFG.dock) CFG.dock = {};
     renderDesk(); hydrateLib(); bindLib(); bindSettings(); bindTitlebar(); buildPreviews(); bindSheet();
     bindWeather(); bindHotkey(); bindUpdate();
+    // Dock 页：先拿 payload（条目图标），再建预览 + 绑事件
+    try { DOCK_PAYLOAD = await invoke('get_dock'); } catch (e) { DOCK_PAYLOAD = { items: [] }; }
+    buildDockPreview(); bindDock(); syncDockUI();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

@@ -23,6 +23,8 @@ tauri-plugin-global-shortcut = "2.3.2"
 windows = { version = "0.62.2", default-features = false, features = ["Media_Control", "Foundation", "Foundation_Collections", "Storage_Streams", "Win32_System_Com", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem"] }
 # dock 图标缓存（HICON → PNG；见 docs/dock-plan.md）
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Dock 页「添加应用」的原生文件选择器（C 段）
+tauri-plugin-dialog = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

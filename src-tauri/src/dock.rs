@@ -329,6 +329,229 @@ unsafe fn proc_exe(pid: u32) -> String {
     String::from_utf16_lossy(&buf[..sz as usize])
 }
 
+// ─── C 段：条目标识 / 显示名 / 打开所在文件夹 / 桌面图标显隐 ───
+
+/// 8 位短 id（时间 + 计数器混合；不引 uuid 依赖）。dock_add 里会再查一次重
+pub fn short_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed) as u64;
+    let x = t ^ n.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    format!("{:08x}", (x ^ (x >> 32)) as u32)
+}
+
+/// 显示名：`.exe/.lnk` 取主文件名；文件夹取末级目录；URL 取主机名（去 www.）；
+/// 取不出来（空 / 盘根）就原样返回，绝不留空串
+pub fn display_name(path: &str) -> String {
+    let p = path.trim();
+    if p.is_empty() {
+        return String::new();
+    }
+    if is_url(p) {
+        let rest = p.split("://").nth(1).unwrap_or(p);
+        let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let host = host.trim_start_matches("www.");
+        return if host.is_empty() { p.to_string() } else { host.to_string() };
+    }
+    let base = win_path(p);
+    let trimmed = base.trim_end_matches('\\');
+    if trimmed.is_empty() {
+        return base;
+    }
+    let name = trimmed.rsplit('\\').next().unwrap_or(trimmed).to_string();
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && ext.len() <= 4 => stem.to_string(),
+        _ => name,
+    }
+}
+
+/// 「打开所在文件夹」：文件 → `explorer /select` 定位到它；文件夹 → 直接开。
+/// 走 `raw_arg` 是为了让 `/select,"D:\带 空格\a.exe"` 原样进命令行（std 的自动加引号会把整串包起来，explorer 不认）
+pub fn reveal(path: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    let p = win_path(path.trim());
+    if p.is_empty() {
+        return Err("路径为空".into());
+    }
+    if is_url(&p) {
+        return Err("网址没有「所在文件夹」".into());
+    }
+    let raw = if PathBuf::from(&p).is_dir() {
+        format!("\"{p}\"")
+    } else {
+        format!("/select,\"{p}\"")
+    };
+    Command::new("explorer.exe")
+        .raw_arg(raw)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开资源管理器失败：{e}"))
+}
+
+const EXPLORER_ADV: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
+const HIDE_ICONS: &str = "HideIcons";
+
+/// 读注册表真值：`Some(true)` = 桌面图标被隐藏。桌面右键「查看→显示桌面图标」改过之后，
+/// 这里读到的才是实情（界面开关按它显示，别按我们自己的 config）
+pub fn desktop_icons_hidden() -> Option<bool> {
+    use ws::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
+    };
+    unsafe {
+        let mut hkey: HKEY = std::ptr::null_mut();
+        let st = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            wide(EXPLORER_ADV).as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        );
+        if st != 0 {
+            return None;
+        }
+        let name = wide(HIDE_ICONS);
+        let mut ty: u32 = 0;
+        let mut data: u32 = 0;
+        let mut len: u32 = 4;
+        let st = RegQueryValueExW(
+            hkey,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut ty,
+            &mut data as *mut u32 as *mut u8,
+            &mut len,
+        );
+        RegCloseKey(hkey);
+        if st != 0 {
+            return Some(false); // 值不在 = 显示桌面图标（系统默认）
+        }
+        Some(data != 0)
+    }
+}
+
+/// 设桌面图标显隐：写 `HKCU\...\Explorer\Advanced\HideIcons` + 通知外壳刷新。
+/// ⚠️ 两个实测坑：① 只写注册表不生效，必须补发 `WM_COMMAND 0x7402`；
+/// ② 这条消息是**开关语义**（真机上 0x7402 发给 DefView 本体才动，发给父窗 Progman/WorkerW 没反应），
+/// 所以先读当前真值，状态真变了才发一次 —— 否则会把用户现有状态翻个面
+pub fn set_desktop_icons(hide: bool) -> Result<(), String> {
+    use ws::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+        REG_DWORD, REG_OPTION_NON_VOLATILE,
+    };
+    let cur = desktop_icons_hidden().unwrap_or(false);
+    unsafe {
+        let mut hkey: HKEY = std::ptr::null_mut();
+        let mut disp: u32 = 0;
+        let st = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            wide(EXPLORER_ADV).as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut hkey,
+            &mut disp,
+        );
+        if st != 0 {
+            return Err(format!("打开注册表失败（错误码 {st}）"));
+        }
+        let name = wide(HIDE_ICONS);
+        let val: u32 = if hide { 1 } else { 0 };
+        let bytes = val.to_le_bytes();
+        let st = RegSetValueExW(hkey, name.as_ptr(), 0, REG_DWORD, bytes.as_ptr(), 4);
+        RegCloseKey(hkey);
+        if st != 0 {
+            return Err(format!("写入 HideIcons 失败（错误码 {st}）"));
+        }
+    }
+    if cur != hide {
+        refresh_desktop_icons();
+    }
+    Ok(())
+}
+
+/// 通知外壳刷新桌面层：把 `WM_COMMAND 0x7402` 发给 `SHELLDLL_DefView` **本体**
+/// （Progman 下没有就翻 WorkerW：壁纸幻灯片模式会把 DefView 挪走）。
+/// 实测：发给父窗 Progman / WorkerW 不动，发给 DefView 才切换
+fn refresh_desktop_icons() {
+    use ws::UI::WindowsAndMessaging as wam;
+    const WM_COMMAND: usize = 0x0111;
+    const TOGGLE_DESKTOP_ICONS: usize = 0x7402;
+    unsafe {
+        let progman = wam::FindWindowW(wide("Progman").as_ptr(), std::ptr::null());
+        let mut view: ws::Foundation::HWND = std::ptr::null_mut();
+        if !progman.is_null() {
+            view = wam::FindWindowExW(
+                progman,
+                std::ptr::null_mut(),
+                wide("SHELLDLL_DefView").as_ptr(),
+                std::ptr::null(),
+            );
+        }
+        if view.is_null() {
+            for top in top_level_of_class("WorkerW") {
+                let v = wam::FindWindowExW(
+                    top,
+                    std::ptr::null_mut(),
+                    wide("SHELLDLL_DefView").as_ptr(),
+                    std::ptr::null(),
+                );
+                if !v.is_null() {
+                    view = v;
+                    break;
+                }
+            }
+        }
+        if view.is_null() {
+            return;
+        }
+        let mut out: usize = 0;
+        wam::SendMessageTimeoutW(
+            view,
+            WM_COMMAND as u32,
+            TOGGLE_DESKTOP_ICONS,
+            0,
+            wam::SMTO_ABORTIFHUNG,
+            1500,
+            &mut out,
+        );
+    }
+}
+
+/// 顶层窗口里指定类名的句柄（Progman / WorkerW 都要挑，DefView 的位置随系统版本与壁纸模式变）
+fn top_level_of_class(class: &str) -> Vec<ws::Foundation::HWND> {
+    let mut out: Vec<ws::Foundation::HWND> = Vec::new();
+    unsafe {
+        let ptr = &mut out as *mut Vec<ws::Foundation::HWND>;
+        ws::UI::WindowsAndMessaging::EnumWindows(Some(class_enum_cb), ptr as isize);
+    }
+    let want = wide(class);
+    out.into_iter()
+        .filter(|h| {
+            let mut buf = [0u16; 64];
+            let n = unsafe {
+                ws::UI::WindowsAndMessaging::GetClassNameW(*h, buf.as_mut_ptr(), buf.len() as i32)
+            };
+            n > 0 && buf[..n as usize] == want[..n as usize]
+        })
+        .collect()
+}
+
+unsafe extern "system" fn class_enum_cb(
+    hwnd: ws::Foundation::HWND,
+    lparam: ws::Foundation::LPARAM,
+) -> windows_sys::core::BOOL {
+    let out = &mut *(lparam as *mut Vec<ws::Foundation::HWND>);
+    out.push(hwnd);
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

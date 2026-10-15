@@ -21,6 +21,9 @@
     --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent);
     --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
     --font-mono: 'MiSans', 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+    /* 气泡：暗底白字（亮壁纸上也读得清）；亮主题在 __setTheme 里翻过来 */
+    --bubble-bg: color-mix(in oklch, var(--bg) 84%, transparent);
+    --bubble-fg: var(--fg);
     /* Dock 规格（docs/dock-plan.md §1；JS 按 URL 参数覆盖） */
     --icon: 48px;        /* 图标边长 32/40/48/56 */
     --gap: 12px;         /* 图标间距 */
@@ -83,6 +86,30 @@
     width: 4px; height: 4px; border-radius: 999px;
     background: var(--fg); opacity: 0.85;
   }
+  .item.busy { opacity: 0.65; }
+  /* 启动反馈：向上弹一下（稿：translateY(-10px)），一次性 keyframes */
+  @keyframes dock-bounce {
+    0%   { transform: translateY(0) scale(1); }
+    35%  { transform: translateY(-10px) scale(1.06); }
+    60%  { transform: translateY(0) scale(1); }
+    78%  { transform: translateY(-3px) scale(1.02); }
+    100% { transform: translateY(0) scale(1); }
+  }
+  .item.launching { animation: dock-bounce 0.44s cubic-bezier(0.22, 0.68, 0.3, 1) 1; }
+  /* 气泡：悬停显名字 / 启动时显「启动中…」（落在上方 28px 余量里，不挡条） */
+  .bubble {
+    position: absolute; bottom: calc(var(--bar-h) + 6px); left: 50%;
+    transform: translateX(-50%) translateY(2px);
+    max-width: 90%; padding: 2px 8px; border-radius: 8px;
+    background: var(--bubble-bg);
+    border: 1px solid var(--border);
+    color: var(--bubble-fg); font-size: 12px; line-height: 18px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.12s ease-out, transform 0.12s ease-out;
+    z-index: 5;
+  }
+  .bubble.on { opacity: 1; transform: translateX(-50%) translateY(0); }
   .empty-hint {                            /* 无条目时的空态（骨架期可见，方便验收） */
     position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
     color: color-mix(in oklch, var(--fg) 62%, transparent);
@@ -97,6 +124,7 @@
       <div class="veil"></div>
     </div>
     <div class="items" id="items"></div>
+    <div class="bubble" id="bubble"></div>
     <div class="empty-hint" id="empty">Dock 上还没有应用</div>
   </div>
 <script>
@@ -131,6 +159,9 @@
     s.setProperty('--muted', r ? r.muted : 'oklch(0.85 0.02 261.1)');
     s.setProperty('--tshadow', r ? 'oklch(1 0 0 / 0.6)' : 'oklch(0 0 0 / 0.45)');
     s.setProperty('--border', r ? r.border : 'oklch(1 0 0 / 0.10)');
+    // 气泡跟着主题翻：亮主题 = 白底深字（暗主题是 --bg 暗底 + 白字）
+    s.setProperty('--bubble-bg', r ? 'oklch(1 0 0 / 0.88)' : 'color-mix(in oklch, oklch(0.210 0.025 255.0) 84%, transparent)');
+    s.setProperty('--bubble-fg', r ? 'oklch(0.28 0.02 258)' : 'oklch(0.966 0.005 258.3)');
   };
   if (params.get('dark') === '0') window.__setTheme(false);
 
@@ -195,7 +226,9 @@
       var el = document.createElement('div');
       el.className = 'item';
       el.dataset.id = it.id || '';
-      el.title = it.name || '';
+      el.dataset.name = it.name || '';
+      el.setAttribute('aria-label', it.name || '');   // 名字走 HTML 气泡，不用 title（会和气泡重复一坨原生提示）
+      el.removeAttribute('title');
       if (it.icon) {
         var img = document.createElement('img');
         img.alt = '';
@@ -231,7 +264,8 @@
   }
   window.__getDGY = function () { return DGY; };
 
-  /* ── 手势：拖空白移动整条（不接点击；条内图标留给 C 段接启动） ── */
+  /* ── 手势：拖空白移动整条；点图标 = 启动（C1）；右键菜单留 F 段 ── */
+  var PREVIEW = params.get('preview') === '1';   // 主界面 iframe 预览：不接拖动/启动
   var holdTimer = null;
   function startDrag() {
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
@@ -242,7 +276,7 @@
   }
   var dockEl = document.getElementById('dock');
   dockEl.addEventListener('mousedown', function (e) {
-    if (e.button !== 0) return;
+    if (PREVIEW || e.button !== 0) return;
     if (e.target && e.target.closest && e.target.closest('.item')) return;   // 图标上按下不拖整条
     if (holdTimer) clearTimeout(holdTimer);
     holdTimer = setTimeout(startDrag, 150);
@@ -254,6 +288,65 @@
   function cancelHold() { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } }
   dockEl.addEventListener('mouseup', cancelHold);
   dockEl.addEventListener('mouseleave', cancelHold);
+
+  /* ── C1：点图标 → 启动 + 跳一下 + 1.5s「启动中」气泡 ── */
+  var bubbleEl = document.getElementById('bubble');
+  var bubbleTimer = null;
+  function bubble(text, item, ms) {
+    if (!bubbleEl) return;
+    bubbleEl.textContent = text;
+    if (item) {
+      var cx = item.offsetLeft + item.offsetWidth / 2;
+      bubbleEl.style.left = cx + 'px';
+    }
+    bubbleEl.classList.add('on');
+    if (bubbleTimer) clearTimeout(bubbleTimer);
+    if (ms > 0) {
+      bubbleTimer = setTimeout(function () { bubbleEl.classList.remove('on'); }, ms);
+    }
+  }
+  function hideBubble() {
+    if (bubbleEl) bubbleEl.classList.remove('on');
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+  }
+  /* 跳一下：CSS keyframes 一次性 —— 每次重放都靠「先摘类再强制回流」重触发（动画铁律） */
+  function bounceOnce(el) {
+    if (!el) return;
+    el.classList.remove('launching');
+    void el.offsetWidth;
+    el.classList.add('launching');
+    setTimeout(function () { el.classList.remove('launching'); }, 460);
+  }
+  itemsEl.addEventListener('mousedown', function (e) {
+    // 图标上按下要拦住整条的拖动判定
+    if (e.target && e.target.closest && e.target.closest('.item')) e.stopPropagation();
+  });
+  itemsEl.addEventListener('click', function (e) {
+    if (PREVIEW || !e.target || !e.target.closest) return;
+    var el = e.target.closest('.item');
+    if (!el || !T || !T.core) return;
+    var id = el.dataset.id;
+    if (!id) return;
+    el.classList.add('busy');
+    T.core.invoke('dock_launch', { id: id })
+      .then(function () {
+        bounceOnce(el);                       // 起来了才跳
+        bubble('启动中…', el, 1500);
+      })
+      .catch(function (err) {
+        bubble('启动失败：' + (err && err.message ? err.message : err), el, 2200);
+      })
+      .then(function () { el.classList.remove('busy'); });
+  });
+  itemsEl.addEventListener('mouseover', function (e) {
+    if (PREVIEW || !e.target || !e.target.closest) return;
+    var el = e.target.closest('.item');
+    if (el && el.dataset.name) bubble(el.dataset.name, el, 0);
+  });
+  itemsEl.addEventListener('mouseout', function (e) {
+    if (!e.target || !e.target.closest) return;
+    if (e.target.closest('.item')) hideBubble();
+  });
 
   applySizing();
 })();
