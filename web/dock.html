@@ -67,7 +67,7 @@
   .item {
     position: relative; flex: 0 0 auto;
     width: var(--icon); height: var(--icon);
-    border-radius: var(--radius-item); overflow: hidden;
+    border-radius: var(--radius-item);
     display: grid; place-items: center;
     background: var(--fg-soft);
     border: 1px solid var(--border);
@@ -75,14 +75,15 @@
     transform-origin: bottom center;
     transition: transform 0.14s ease-out;
   }
-  .item img { width: 100%; height: 100%; object-fit: contain; display: block; -webkit-user-drag: none; }
+  /* 图标自己裁圆角（条目框 overflow 必须可见，运行指示点要落在图标外面、贴到条上） */
+  .item img { width: 100%; height: 100%; object-fit: contain; display: block; -webkit-user-drag: none; border-radius: var(--radius-item); }
   .item .glyph {
     font-family: var(--font-mono); font-weight: 600; font-size: 20px;
     color: color-mix(in oklch, var(--fg) 88%, transparent);
     text-shadow: 0 0.833px 1.667px var(--tshadow);
   }
-  .item.running::after {                   /* 运行中指示点（D 段接真） */
-    content: ""; position: absolute; left: 50%; bottom: 1px; transform: translateX(-50%);
+  .item.running::after {                   /* 运行中指示点（稿：4×4、bottom -5px、留 4px 余量别贴条底边） */
+    content: ""; position: absolute; left: 50%; bottom: -5px; transform: translateX(-50%);
     width: 4px; height: 4px; border-radius: 999px;
     background: var(--fg); opacity: 0.85;
   }
@@ -244,6 +245,7 @@
       itemsEl.appendChild(el);
     });
     emptyEl.style.display = items.length ? 'none' : 'block';
+    applyRunning();     // 重建后按记忆补回指示点（不然每轮 __setDock 都把点擦掉）
   }
   window.__setDock = function (p) {
     if (!p) return;
@@ -253,6 +255,19 @@
     renderItems(p.items);
   };
   window.__getDock = function () { return { size: SIZE, mag: MAG, count: itemsEl.children.length }; };
+
+  /* ── D1 运行中指示点：Rust 每 2s 推一次 id 表；重建 DOM 后要按记忆补回（动画铁律） ── */
+  var RUNNING = {};
+  function applyRunning() {
+    Array.prototype.forEach.call(itemsEl.children, function (el) {
+      el.classList.toggle('running', !!RUNNING[el.dataset.id]);
+    });
+  }
+  window.__setRunning = function (map) {
+    RUNNING = map || {};
+    applyRunning();
+  };
+  window.__getRunning = function () { return RUNNING; };
 
   /* ── 数据接入：首帧拉一次（事件推送走 Rust 的 eval __setDock） ── */
   var DGY = null;   // 诊断：最近一次 payload
@@ -328,13 +343,15 @@
     var id = el.dataset.id;
     if (!id) return;
     el.classList.add('busy');
-    T.core.invoke('dock_launch', { id: id })
-      .then(function () {
-        bounceOnce(el);                       // 起来了才跳
-        bubble('启动中…', el, 1500);
+    T.core.invoke('dock_click', { id: id })
+      .then(function (what) {
+        if (what === 'launched') { bounceOnce(el); bubble('启动中…', el, 1500); }
+        else if (what === 'minimized') { bubble('已最小化', el, 1200); }
+        else if (what === 'activated') { bubble('已切到前台', el, 1200); }
+        else { bubble('已在任务栏闪动', el, 1500); }
       })
       .catch(function (err) {
-        bubble('启动失败：' + (err && err.message ? err.message : err), el, 2200);
+        bubble('失败：' + (err && err.message ? err.message : err), el, 2200);
       })
       .then(function () { el.classList.remove('busy'); });
   });

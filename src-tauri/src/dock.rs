@@ -266,52 +266,6 @@ pub fn launch(item: &DockItem) -> Result<(), String> {
     }
 }
 
-/// 有可见顶层窗口的进程 exe 路径（小写、去重、排序）—— 运行指示点的数据源
-#[allow(dead_code)] // D 段运行态轮询线程接线
-pub fn running_map() -> Vec<String> {
-    let mut rows: Vec<String> = Vec::new();
-    unsafe {
-        let ptr = &mut rows as *mut Vec<String>;
-        ws::UI::WindowsAndMessaging::EnumWindows(Some(enum_cb), ptr as isize);
-    }
-    rows.sort();
-    rows.dedup();
-    rows
-}
-
-#[allow(dead_code)]
-unsafe extern "system" fn enum_cb(
-    hwnd: ws::Foundation::HWND,
-    lparam: ws::Foundation::LPARAM,
-) -> windows_sys::core::BOOL {
-    use ws::UI::WindowsAndMessaging as wam;
-    let rows = &mut *(lparam as *mut Vec<String>);
-    if wam::IsWindowVisible(hwnd) == 0 {
-        return 1;
-    }
-    let ex = wam::GetWindowLongW(hwnd, wam::GWL_EXSTYLE) as u32;
-    if ex & wam::WS_EX_TOOLWINDOW != 0 {
-        return 1;
-    }
-    let mut cloaked: u32 = 0;
-    let hr = ws::Graphics::Dwm::DwmGetWindowAttribute(
-        hwnd,
-        ws::Graphics::Dwm::DWMWA_CLOAKED as u32,
-        &mut cloaked as *mut u32 as *mut c_void,
-        4,
-    );
-    if hr >= 0 && cloaked != 0 {
-        return 1;
-    }
-    let mut pid = 0u32;
-    wam::GetWindowThreadProcessId(hwnd, &mut pid);
-    let exe = proc_exe(pid);
-    if !exe.is_empty() {
-        rows.push(exe.to_lowercase());
-    }
-    1
-}
-
 #[allow(dead_code)]
 unsafe fn proc_exe(pid: u32) -> String {
     use ws::System::Threading as th;
@@ -552,6 +506,255 @@ unsafe extern "system" fn class_enum_cb(
     1
 }
 
+// ─── D 段：运行态（EnumWindows）+ 激活/最小化 ───
+
+/// 当前线程初始化过 COM 吗（ShellLink 是进程内组件，没初始化会 CO_E_NOTINITIALIZED；COM 是**按线程**的）
+fn ensure_com() {
+    use std::cell::Cell;
+    thread_local! { static DONE: Cell<bool> = const { Cell::new(false) }; }
+    DONE.with(|d| {
+        if !d.get() {
+            use w::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); // 已经是别的模式就算了（不影响读 lnk）
+            }
+            d.set(true);
+        }
+    });
+}
+
+/// `.lnk` → 目标路径（IShellLinkW；拿不到 = None）。带进程内缓存，非 lnk 直接 None
+pub fn lnk_target(path: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let p = win_path(path.trim());
+    if !p.to_lowercase().ends_with(".lnk") {
+        return None;
+    }
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = p.to_lowercase();
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return v.clone();
+    }
+    ensure_com();
+    let resolved = unsafe {
+        use windows::core::{Interface, PCWSTR};
+        use w::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
+        use w::UI::Shell::{IShellLinkW, ShellLink, SLGP_RAWPATH};
+        let link: Option<IShellLinkW> = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok();
+        link.and_then(|l| {
+            let pf: Option<IPersistFile> = l.cast().ok();
+            pf.and_then(|pf| {
+                pf.Load(PCWSTR(wide(&p).as_ptr()), STGM_READ).ok()?;
+                let mut buf = [0u16; 1024];
+                l.GetPath(&mut buf, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32).ok()?;
+                let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                if n == 0 {
+                    None
+                } else {
+                    Some(String::from_utf16_lossy(&buf[..n]))
+                }
+            })
+        })
+    };
+    cache.lock().unwrap().insert(key, resolved.clone());
+    resolved
+}
+
+/// 运行态比对用的键：`.lnk` 先解析到目标 exe，再统一成反斜杠 + 小写。
+/// （`normalize_path` 是纯路径归一，不动 lnk —— 图标缓存名依赖它的稳定性）
+pub fn match_key(path: &str) -> String {
+    let p = path.trim();
+    if p.is_empty() {
+        return String::new();
+    }
+    if is_url(p) {
+        return p.to_lowercase();
+    }
+    let target = lnk_target(p).unwrap_or_else(|| p.to_string());
+    normalize_path(&target)
+}
+
+/// 运行态比对：普通应用按**完整路径**比；**系统应用别名**按 exe 文件名比。
+/// 为什么需要后者：Win11 记事本这类「app alias」在 System32 里只有个转发器，
+/// 真实进程是 `C:\Program Files\WindowsApps\…\Notepad.exe`（实测：条目 System32\notepad.exe
+/// ↔ 进程 WindowsApps\Microsoft.WindowsNotepad_11.2607…\Notepad.exe），只比全路径会
+/// 「明明开着却永远显示未运行、点了再开一个」。放宽只针对**条目侧**是系统别名的情况，
+/// 普通目录下的同名 exe 一律不算（别把 D:\tools\b\app.exe 当成自己的）
+fn same_app(item_key: &str, exe: &str) -> bool {
+    fn base(p: &str) -> &str {
+        p.rsplit('\\').next().unwrap_or(p)
+    }
+    if item_key == exe {
+        return true;
+    }
+    let sys_like = |p: &str| p.starts_with("c:\\windows\\system32\\") || p.contains("\\windowsapps\\");
+    if !sys_like(item_key) {
+        return false;
+    }
+    base(item_key) == base(exe)
+}
+
+/// 该条目现在算「运行中」吗（拿一份 running 集合问，省得每条都重扫窗口）
+pub fn item_running(item_key: &str, running: &std::collections::HashSet<String>) -> bool {
+    !item_key.is_empty()
+        && running
+            .iter()
+            .any(|exe| exe != item_key && same_app(item_key, exe) || exe == item_key)
+}
+
+/// 可见顶层窗口 → (hwnd, exe 小写)。D1 的「运行中」与 D2 的「找目标窗口」共用同一份枚举
+fn visible_windows() -> Vec<(isize, String)> {
+    let mut rows: Vec<(isize, String)> = Vec::new();
+    unsafe {
+        let ptr = &mut rows as *mut Vec<(isize, String)>;
+        ws::UI::WindowsAndMessaging::EnumWindows(Some(enum_win_cb), ptr as isize);
+    }
+    rows
+}
+
+unsafe extern "system" fn enum_win_cb(
+    hwnd: ws::Foundation::HWND,
+    lparam: ws::Foundation::LPARAM,
+) -> windows_sys::core::BOOL {
+    use ws::UI::WindowsAndMessaging as wam;
+    let rows = &mut *(lparam as *mut Vec<(isize, String)>);
+    if wam::IsWindowVisible(hwnd) == 0 {
+        return 1;
+    }
+    let ex = wam::GetWindowLongW(hwnd, wam::GWL_EXSTYLE) as u32;
+    if ex & wam::WS_EX_TOOLWINDOW != 0 {
+        return 1;
+    }
+    let mut cloaked: u32 = 0;
+    let hr = ws::Graphics::Dwm::DwmGetWindowAttribute(
+        hwnd,
+        ws::Graphics::Dwm::DWMWA_CLOAKED as u32,
+        &mut cloaked as *mut u32 as *mut c_void,
+        4,
+    );
+    if hr >= 0 && cloaked != 0 {
+        return 1;
+    }
+    let mut pid = 0u32;
+    wam::GetWindowThreadProcessId(hwnd, &mut pid);
+    let exe = proc_exe(pid);
+    if !exe.is_empty() {
+        rows.push((hwnd as isize, exe.to_lowercase()));
+    }
+    1
+}
+
+/// 运行中应用集合（exe 小写路径）—— D1 轮询的数据源
+pub fn running_set() -> std::collections::HashSet<String> {
+    visible_windows().into_iter().map(|(_, exe)| exe).collect()
+}
+
+/// 目标应用的可见顶层窗口，**前台那个排最前**（匹配规则见 `same_app`）；
+/// 带标题、有实际面积、非 IME 之类的辅助窗才算候选
+fn windows_of(item_key: &str) -> Vec<isize> {
+    use ws::UI::WindowsAndMessaging as wam;
+    let fg = unsafe { wam::GetForegroundWindow() } as isize;
+    let mut hits: Vec<isize> = visible_windows()
+        .into_iter()
+        .filter(|(h, exe)| same_app(item_key, exe) && is_main_window(*h))
+        .map(|(h, _)| h)
+        .collect();
+    hits.sort_by_key(|h| if *h == fg { 0 } else { 1 });
+    hits
+}
+
+/// 像「主窗」吗：有标题 + 面积够（`无标题 - Notepad` 这类打包应用的多顶层窗都算，
+/// IME / GDI+ 钩子那类 0×0 无名窗被挡在外面）
+fn is_main_window(h: isize) -> bool {
+    use ws::UI::WindowsAndMessaging as wam;
+    unsafe {
+        let hwnd = h as ws::Foundation::HWND;
+        if wam::GetWindowTextLengthW(hwnd) <= 0 {
+            return false;
+        }
+        let mut r = ws::Foundation::RECT::default();
+        if wam::GetWindowRect(hwnd, &mut r) == 0 {
+            return false;
+        }
+        (r.right - r.left) >= 160 && (r.bottom - r.top) >= 120
+    }
+}
+
+/// 点已运行的图标：**有窗口在前台 → 全部最小化**（与任务栏一致：Win11 记事本这种一个应用
+/// 多顶层窗的情况，一次收干净）；否则恢复 + 抢前台，抢不到就闪任务栏。
+/// 返回 `minimized` / `activated` / `flash`
+pub fn activate_or_minimize(item_key: &str) -> Result<&'static str, String> {
+    use ws::System::Threading as th;
+    use ws::UI::WindowsAndMessaging as wam;
+    let wins = windows_of(item_key);
+    let Some(&first) = wins.first() else {
+        return Err("没找到该应用的窗口".into());
+    };
+    unsafe {
+        let fg = wam::GetForegroundWindow();
+        if wins.iter().any(|x| *x as ws::Foundation::HWND == fg) {
+            for h in &wins {
+                wam::ShowWindow(*h as ws::Foundation::HWND, wam::SW_MINIMIZE);
+            }
+            return Ok("minimized");
+        }
+        let h = first as ws::Foundation::HWND;
+        if wam::IsIconic(h) != 0 {
+            wam::ShowWindow(h, wam::SW_RESTORE);
+        } else {
+            wam::ShowWindow(h, wam::SW_SHOW);
+        }
+        let fg_tid = wam::GetWindowThreadProcessId(fg, std::ptr::null_mut());
+        let me = th::GetCurrentThreadId();
+        let mut at = 0;
+        let sf1 = wam::SetForegroundWindow(h);
+        if sf1 != 0 {
+            return Ok("activated");
+        }
+        // 抢前台被拒（Windows 只放行「刚有输入的那个进程」之外的前台切换）
+        // ① 临时把输入队列挂到前台线程上再抢
+        if fg_tid != 0 && fg_tid != me {
+            th::AttachThreadInput(me, fg_tid, 1);
+            at = wam::SetForegroundWindow(h);
+            th::AttachThreadInput(me, fg_tid, 0);
+            if at != 0 {
+                return Ok("activated");
+            }
+        }
+        // ② 合成一次 ALT：把「最后输入事件」抢到本进程，前台锁就放行了（经典手法）
+        {
+            use ws::UI::Input::KeyboardAndMouse as kbd;
+            const VK_MENU: u8 = 0x12;
+            kbd::keybd_event(VK_MENU, 0, 0, 0);                          // ALT 按下
+            kbd::keybd_event(VK_MENU, 0, kbd::KEYEVENTF_KEYUP, 0);       // ALT 抬起
+        }
+        let sf2 = wam::SetForegroundWindow(h);
+        if sf2 != 0 {
+            return Ok("activated");
+        }
+        // ③ SwitchToThisWindow（未公开但任务栏那套一直在用）
+        wam::SwitchToThisWindow(h, 1);
+        if wam::GetForegroundWindow() == h {
+            return Ok("activated");
+        }
+        crate::mlog(&format!(
+            "dock activate 全败：sf1={sf1} at={at} sf2={sf2} fg_tid={fg_tid} me={me}"
+        ));
+        // 兜底：闪任务栏（至少让用户看到它在哪）
+        let fwi = wam::FLASHWINFO {
+            cbSize: std::mem::size_of::<wam::FLASHWINFO>() as u32,
+            hwnd: h,
+            dwFlags: wam::FLASHW_ALL | wam::FLASHW_TIMERNOFG,
+            uCount: 3,
+            dwTimeout: 0,
+        };
+        wam::FlashWindowEx(&fwi);
+        Ok("flash")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +768,32 @@ mod tests {
         assert!(!is_url("C:\\x.exe"));
         assert_eq!(fnv1a_hex("a"), fnv1a_hex("a"));
         assert_ne!(fnv1a_hex("a"), fnv1a_hex("b"));
+    }
+
+    #[test]
+    fn app_match_rules() {
+        // 普通应用：全路径相等才算运行中
+        assert!(same_app("c:\\a\\b.exe", "c:\\a\\b.exe"));
+        assert!(!same_app("c:\\a\\b.exe", "d:\\a\\b.exe"));
+        // 系统应用别名（Win11 记事本：System32 转发器 vs WindowsApps 真身）按文件名认
+        assert!(same_app(
+            "c:\\windows\\system32\\notepad.exe",
+            "c:\\program files\\windowsapps\\microsoft.windowsnotepad_x\\notepad\\notepad.exe"
+        ));
+        assert!(same_app(
+            "c:\\program files\\windowsapps\\x\\app.exe",
+            "c:\\program files\\windowsapps\\y\\app.exe"
+        ));
+        // 但普通目录下同名不算（别把别的 chrome 当自己）
+        assert!(!same_app("d:\\tools\\a\\app.exe", "d:\\tools\\b\\app.exe"));
+    }
+
+    #[test]
+    fn item_running_uses_match_rules() {
+        let mut set = std::collections::HashSet::new();
+        set.insert("c:\\program files\\windowsapps\\x\\notepad\\notepad.exe".to_string());
+        assert!(item_running("c:\\windows\\system32\\notepad.exe", &set));
+        assert!(!item_running("c:\\other\\notepad.exe", &set));
+        assert!(!item_running("", &set));
     }
 }

@@ -2077,7 +2077,33 @@ async fn dock_update(app: AppHandle, dock: config::Dock) -> Result<serde_json::V
     Ok(dock_payload(&cfg))
 }
 
-/// 点图标 → 启动。返回 Ok 前端才播「跳一下」；失败把原因给页面 toast
+/// 点图标（D 段起的主入口）：**未运行 → 启动**；**已运行 → 前台/最小化**。
+/// 「运行中」以 Rust 侧 EnumWindows 真值为准（不信前端那份 2s 前的状态），
+/// 返回 `launched` / `activated` / `minimized` / `flash` 给前端决定弹不弹跳
+#[tauri::command]
+async fn dock_click(id: String) -> Result<String, String> {
+    let cfg = Config::load();
+    let item = cfg
+        .dock
+        .items
+        .iter()
+        .find(|it| it.id == id)
+        .ok_or("条目不存在")?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let key = dock::match_key(&item.path);
+        if !key.is_empty() && !dock::is_url(&item.path) && dock::item_running(&key, &dock::running_set()) {
+            dock::activate_or_minimize(&key)
+        } else {
+            dock::launch(&item).map(|_| "launched")
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(|s| s.to_string())
+}
+
+/// 点图标 → 启动（保留这条原始能力：脚本 / 以后拖放「启动」用得上）
 #[tauri::command]
 async fn dock_launch(id: String) -> Result<(), String> {
     let cfg = Config::load();
@@ -2200,7 +2226,7 @@ fn ensure_main(app: &AppHandle) -> Option<WebviewWindow> {
 
 /// 主窗生命周期日志（%TEMP%\minicard-mainwin.log）：只记关键事件与错误。
 /// 主窗「用时建、闲时销毁」是新机制，出支持问题先看这里（以前 .ok()? 会把失败吞掉）。
-fn mlog(s: &str) {
+pub(crate) fn mlog(s: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -2374,6 +2400,7 @@ fn main() {
             dock_remove,
             dock_reorder,
             dock_update,
+            dock_click,
             dock_launch,
             dock_reveal,
             dock_set_desktop_icons,
@@ -2466,6 +2493,36 @@ fn main() {
 
             // Dock（enabled 时建窗；骨架阶段：无条目也先把玻璃条画出来）
             sync_dock(&handle, &cfg);
+
+            // D1 Dock 运行态：2s 一轮 EnumWindows，把「运行中」的条目 id 推给 Dock 页（指示点）。
+            // 窗不在（Dock 关着 / 被热键藏了）就空转 —— 别白跑一遍进程枚举
+            {
+                let h = handle.clone();
+                std::thread::Builder::new()
+                    .name("mini-card-dock-state".into())
+                    .spawn(move || loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if h.get_webview_window(dock_label()).is_none() {
+                            continue;
+                        }
+                        let running = dock::running_set();
+                        let cfg = Config::load();
+                        let mut map = serde_json::Map::new();
+                        for it in &cfg.dock.items {
+                            let key = dock::match_key(&it.path);
+                            if !dock::is_url(&it.path) && dock::item_running(&key, &running) {
+                                map.insert(it.id.clone(), serde_json::Value::Bool(true));
+                            }
+                        }
+                        if let Some(w) = h.get_webview_window(dock_label()) {
+                            let payload = serde_json::Value::Object(map);
+                            let _ = w.eval(&format!(
+                                "window.__setRunning && window.__setRunning({payload});"
+                            ));
+                        }
+                    })
+                    .expect("spawn dock state watcher");
+            }
 
             // 启动即回收一次越屏卡片（上次退出后拔了显示器/改了分辨率/改了缩放的场景）
             rescue_offscreen(&handle);
