@@ -141,13 +141,15 @@ fn overlay_card_positions(app: &AppHandle, cfg: &mut Config) {
     }
 }
 
-/// 活着的 Dock 窗位置盖进 cfg（存的是「中心 x + 上边缘 y」）
+/// 活着的 Dock 窗位置盖进 cfg（存的是「中心 x + 上边缘 y」——y 的口径是**虚拟 92 框的上边缘**，
+/// 与条在屏幕上的位置一一对应：条顶 = y + 28。余量态下窗口上边缘 = y，常态 = y + 28）
 fn overlay_dock_pos(app: &AppHandle, cfg: &mut Config) {
     if let Some(w) = app.get_webview_window(dock_label()) {
         if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
             let s = w.scale_factor().unwrap_or(1.0);
             cfg.dock.cx = ((pos.x as f64 + size.width as f64 / 2.0) / s) as f32;
-            cfg.dock.y = (pos.y as f64 / s) as f32;
+            let grow = if DOCK_GROWN.load(Ordering::Relaxed) { 0.0 } else { DOCK_MARGIN as f64 };
+            cfg.dock.y = (pos.y as f64 / s - grow) as f32;
         }
     }
 }
@@ -661,6 +663,11 @@ fn toggle_cards(app: &AppHandle) {
             if visible {
                 let _ = w.hide();
             } else {
+                // 重新显出来时回到「常态」（只有条高）：热键按下时鼠标多半不在条上，
+                // 带着余量态回来会在条上方凭空多一块隐形挡鼠标区
+                if DOCK_GROWN.swap(false, Ordering::Relaxed) {
+                    dock_apply_geom(&w, &cfg.dock);
+                }
                 let _ = w.show();
             }
         }
@@ -1151,6 +1158,21 @@ fn dock_label() -> &'static str {
 static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Dock 的桌面层锁是否激活（dock.z == Desktop 时 true；卡片看的是全局 Z_MODE）
 static DOCK_DESKTOP_LOCK: AtomicBool = AtomicBool::new(false);
+/// 放大余量（逻辑 px）：**常态不计入窗口** —— 窗口平时只有玻璃条那么高，上方没有隐形挡鼠标的 28px；
+/// 鼠标压到条上时才临时长高这么多给放大图标腾渲染空间（E3）。
+/// ⚠️ 别退回「窗口固定 92 + 子类里 WM_NCHITTEST 返 HTTRANSPARENT」这条老方案：实测
+/// ① 鼠标在 WebView2 子窗上方时顶层窗根本收不到 WM_NCHITTEST（系统只问最深处的子窗）；
+/// ② HTTRANSPARENT 只对**同线程**窗口生效，穿透不到别的进程 → 余量区照样吃点击。
+/// 两枪都记在 docs/dock-spike.md 坑 13。
+const DOCK_MARGIN: f32 = 28.0;
+/// Dock 窗当前是否处于「长高态」（= 余量态）
+static DOCK_GROWN: AtomicBool = AtomicBool::new(false);
+/// 最近一次由**代码**摆的窗口矩形（物理 px）：Moved 事件里据此跳过自摆位移，
+/// 否则余量态来回切会把 config 里的 y 每切一次写歪 28px
+static DOCK_SELF_RECT: Mutex<[i32; 4]> = Mutex::new([0, 0, 0, 0]);
+/// Dock 的「指针关注区」= 虚拟 92 框（逻辑 px：x, y, w, h）：指针进这一带才把真光标坐标推给页面。
+/// 由 `dock_set_pointer_box` 在几何变化处维护；看门狗线程读它决定推不推。
+static DOCK_POINTER_BOX: Mutex<[f32; 4]> = Mutex::new([0.0, 0.0, 0.0, 0.0]);
 
 fn is_dock_hwnd(hwnd: *mut core::ffi::c_void) -> bool {
     let cur = DOCK_HWND.load(Ordering::Relaxed);
@@ -1796,6 +1818,76 @@ fn dock_pos(app: &AppHandle, d: &config::Dock, sz: [f32; 2]) -> (f32, f32) {
     (x, y)
 }
 
+/// 指针关注区（虚拟 92 框，逻辑 px）：Dock 的玻璃条 + 上方 28 放大余量。
+/// 指针进这一带 → 指针看门狗开始把**真光标**坐标推给页面（页面据此决定余量态与放大）。
+fn dock_pointer_box(d: &config::Dock) -> [f32; 4] {
+    let w = d.bar_width();
+    [d.cx - w / 2.0, d.y, w, d.bar_height() + DOCK_MARGIN]
+}
+
+fn dock_set_pointer_box(d: &config::Dock) {
+    *DOCK_POINTER_BOX.lock().unwrap() = dock_pointer_box(d);
+}
+
+/// Dock 窗口的**实际**几何（逻辑 px）：条永远贴窗口底边 → 长高态把上边缘往上挪 28px（视觉不动）。
+/// `d.cx/d.y` 的口径不变（中心 x + 虚拟 92 框的上边缘）。
+fn dock_window_rect(d: &config::Dock, grown: bool) -> (f32, f32, f32, f32) {
+    let w = d.bar_width();
+    let x = d.cx - w / 2.0;
+    if grown {
+        (x, d.y, w, d.bar_height() + DOCK_MARGIN)
+    } else {
+        (x, d.y + DOCK_MARGIN, w, d.bar_height())
+    }
+}
+
+/// 用一次（原子）SetWindowPos 把 Dock 摆到当前余量态该在的位置/尺寸：
+/// 位置+尺寸一起给，别用 tauri 的 set_size/set_position 两连发（中间那一下会先长高再挪位，看得见抖）
+fn dock_apply_geom(w: &WebviewWindow, d: &config::Dock) {
+    dock_set_pointer_box(d);
+    let Some(hwnd) = hwnd_of(w) else { return };
+    let grown = DOCK_GROWN.load(Ordering::Relaxed);
+    let (x, y, cw, ch) = dock_window_rect(d, grown);
+    let s = w.scale_factor().unwrap_or(1.0) as f32;
+    let (px, py, pw, ph) = (
+        (x * s).round() as i32,
+        (y * s).round() as i32,
+        (cw * s).round() as i32,
+        (ch * s).round() as i32,
+    );
+    *DOCK_SELF_RECT.lock().unwrap() = [px, py, pw, ph];   // Moved 处理器据此跳过自摆位移
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+        };
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            px,
+            py,
+            pw,
+            ph,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        );
+    }
+    let _ = w.eval("window.__onResize && window.__onResize()");
+}
+
+/// E3：鼠标压到玻璃条上（grown=true）/ 离开条与放大图标（false）→ 开关余量态。
+/// 常态窗口只有玻璃条那么高，所以「上方 28px 透明区吃点击」这个问题在结构上就不存在；
+/// 长高只为给放大图标腾渲染空间（见 DOCK_MARGIN 注释里的两条实测结论）。
+#[tauri::command]
+async fn dock_hover(app: AppHandle, grown: bool) -> Result<(), String> {
+    if DOCK_GROWN.swap(grown, Ordering::Relaxed) == grown {
+        return Ok(()); // 状态没变，别白摆一次窗口
+    }
+    let cfg = Config::load();
+    if let Some(w) = app.get_webview_window(dock_label()) {
+        dock_apply_geom(&w, &cfg.dock);
+    }
+    Ok(())
+}
+
 /// Dock 的 URL 参数：尺寸档 / 放大强度 / 玻璃两参 / 明暗
 fn dock_url(d: &config::Dock, s: &config::Settings) -> String {
     format!(
@@ -1843,13 +1935,21 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
         return;
     }
     let d = &cfg.dock;
-    let sz = d.window_size();
-    let (x, y) = dock_pos(app, d, sz);
+    let sz = d.window_size();                    // 虚拟 92 框（cx/y 的口径不变）
+    let (x, vy) = dock_pos(app, d, sz);           // 顺带把未设置的 cx/y 写回 config
+    let mut dcur = d.clone();
+    dcur.cx = x + sz[0] / 2.0;
+    dcur.y = vy;
+    DOCK_GROWN.store(false, Ordering::Relaxed);
+    *DOCK_SELF_RECT.lock().unwrap() = [0, 0, 0, 0];
+    dock_set_pointer_box(&dcur);
+    // 常态只有玻璃条那么高（长度 64 而不是 92）：上方没有隐形挡鼠标的余量区
+    let (wx, wy, ww, wh) = dock_window_rect(&dcur, false);
     let url = dock_url(d, &cfg.settings);
     let win = match WebviewWindowBuilder::new(app, dock_label(), WebviewUrl::App(url.into()))
         .title("MiniCard · Dock")
-        .inner_size(sz[0] as f64, sz[1] as f64)
-        .position(x as f64, y as f64)
+        .inner_size(ww as f64, wh as f64)
+        .position(wx as f64, wy as f64)
         .decorations(false)
         .transparent(true)
         .resizable(false)
@@ -1866,7 +1966,7 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
             return;
         }
     };
-    apply_glass_chrome(&win, sz, &cfg.settings);
+    apply_glass_chrome(&win, [ww, wh], &cfg.settings);
     // Dock 永不激活（点图标不抢焦点）；桌面层档再叠桌面锚点
     let _ = win.set_focusable(false);
     let desk = matches!(d.z, ZOrder::Desktop);
@@ -1877,15 +1977,23 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
             apply_desktop_zorder(h);
         }
     }
-    nudge_and_show(&win, sz);
+    nudge_and_show(&win, [ww, wh]);
 
-    // 拖动落盘：写「中心 x + 上边缘 y」（宽随图标数变，按中心回推才不会漂）
+    // 拖动落盘：写「中心 x + 上边缘 y」（宽随图标数变，按中心回推才不会漂）。
+    // ⚠️ 余量态来回切是**我们**动的窗口 → 按 DOCK_SELF_RECT 跳过，否则 y 每切一次写歪 28px
     let last: Mutex<Option<(i32, i32)>> = Mutex::new(None);
     let app_move = app.clone();
     let win_ev = win.clone();
     win.on_window_event(move |e| {
         if let tauri::WindowEvent::Moved(p) = e {
             let s = win_ev.scale_factor().unwrap_or(1.0) as f64;
+            {
+                let self_rect = *DOCK_SELF_RECT.lock().unwrap();
+                let h = win_ev.outer_size().map(|z| z.height as i32).unwrap_or(0);
+                if self_rect != [0, 0, 0, 0] && p.x == self_rect[0] && p.y == self_rect[1] && h == self_rect[3] {
+                    return;
+                }
+            }
             let logical = ((p.x as f64 / s) as i32, (p.y as f64 / s) as i32);
             {
                 let mut last = last.lock().unwrap();
@@ -1900,7 +2008,9 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
                 .unwrap_or(sz[0] as f64);
             let mut cfg = Config::load();
             cfg.dock.cx = (logical.0 as f64 + w / 2.0) as f32;
-            cfg.dock.y = logical.1 as f32;
+            // 存的是「虚拟 92 框的上边缘」：常态（只有条高）窗口上边缘比它低 28px
+            let grow = if DOCK_GROWN.load(Ordering::Relaxed) { 0.0 } else { DOCK_MARGIN };
+            cfg.dock.y = logical.1 as f32 - grow;
             let _ = cfg.save();
             push_dock_glass(&app_move, &win_ev);
         }
@@ -1927,27 +2037,22 @@ fn sync_dock(app: &AppHandle, cfg: &Config) {
         let _ = w.close();
         DOCK_HWND.store(0, Ordering::Relaxed);
         DOCK_DESKTOP_LOCK.store(false, Ordering::Relaxed);
+        *DOCK_POINTER_BOX.lock().unwrap() = [0.0, 0.0, 0.0, 0.0];
         return;
     }
-    // 尺寸（宽随条目数与档位变）
-    let want = cfg.dock.window_size();
-    if let Ok(cur) = w.outer_size() {
-        let s = w.scale_factor().unwrap_or(1.0);
-        let (cw, ch) = (cur.width as f64 / s, cur.height as f64 / s);
-        if (cw - want[0] as f64).abs() > 0.5 || (ch - want[1] as f64).abs() > 0.5 {
-            let _ = w.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-                want[0] as f64,
-                want[1] as f64,
-            )));
-            if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
-                let s = w.scale_factor().unwrap_or(1.0);
-                let cx = cfg.dock.cx as f64;
-                if cx >= 0.0 {
-                    let nx = ((cx - size.width as f64 / 2.0 / s) * s) as i32;
-                    let _ = w.set_position(tauri::PhysicalPosition::new(nx, pos.y));
-                }
-            }
-            let _ = w.eval("window.__onResize && window.__onResize()");
+    dock_set_pointer_box(&cfg.dock);
+    // 尺寸 / 位置：宽随条目数与档位变，高随「余量态」变（常态 = 只有玻璃条那么高 + 上边缘下移 28）
+    let want = dock_window_rect(&cfg.dock, DOCK_GROWN.load(Ordering::Relaxed));
+    if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
+        let s = w.scale_factor().unwrap_or(1.0) as f32;
+        let (cx, cy) = (pos.x as f32 / s, pos.y as f32 / s);
+        let (cw, ch) = (size.width as f32 / s, size.height as f32 / s);
+        if (cx - want.0).abs() > 0.5
+            || (cy - want.1).abs() > 0.5
+            || (cw - want.2).abs() > 0.5
+            || (ch - want.3).abs() > 0.5
+        {
+            dock_apply_geom(&w, &cfg.dock);
         }
     }
     // 层级
@@ -2402,6 +2507,7 @@ fn main() {
             dock_update,
             dock_click,
             dock_launch,
+            dock_hover,
             dock_reveal,
             dock_set_desktop_icons,
             dock_desktop_icons_state,
@@ -2524,6 +2630,60 @@ fn main() {
                     .expect("spawn dock state watcher");
             }
 
+            // E3 Dock 指针看门狗：指针位置**只认系统真值**（GetCursorPos），由这里推给页面；
+            // 页面再不接自己的 mousemove —— 实测 WebView2 会在窗口几何变化前后补发坐标不实的
+            // 合成 mousemove（光标在余量带里却收到 (62,90) 那种点），会让「长高/缩回」来回抖。
+            // 指针在 Dock 那一带（虚拟 92 框）里：25ms 一轮推窗内坐标；不在：转 80ms 空转，
+            // 只在「离开」那一枪推个 null 让页面归位。窗不在 / 被热键藏了就整段空转。
+            {
+                let h = handle.clone();
+                std::thread::Builder::new()
+                    .name("mini-card-dock-pointer".into())
+                    .spawn(move || {
+                        let mut was_in = false;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                if was_in { 25 } else { 80 },
+                            ));
+                            let Some(w) = h.get_webview_window(dock_label()) else {
+                                was_in = false;
+                                continue;
+                            };
+                            if !w.is_visible().unwrap_or(false) {
+                                was_in = false;
+                                continue;
+                            }
+                            let Ok(pos) = w.outer_position() else {
+                                continue;
+                            };
+                            let s = w.scale_factor().unwrap_or(1.0) as f32;
+                            let (wl, wt_) = (pos.x as f32 / s, pos.y as f32 / s);
+                            let boxr = *DOCK_POINTER_BOX.lock().unwrap();
+                            let (cx, cy) = unsafe {
+                                let mut p = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                                windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p);
+                                (p.x as f32 / s, p.y as f32 / s)
+                            };
+                            let in_zone = boxr[2] > 0.0
+                                && cx >= boxr[0] - 2.0
+                                && cx <= boxr[0] + boxr[2] + 2.0
+                                && cy >= boxr[1] - 2.0
+                                && cy <= boxr[1] + boxr[3] + 2.0;
+                            if in_zone {
+                                let _ = w.eval(&format!(
+                                    "window.__setPointer && window.__setPointer({:.1}, {:.1});",
+                                    cx - wl,
+                                    cy - wt_
+                                ));
+                            } else if was_in {
+                                let _ = w.eval("window.__setPointer && window.__setPointer(null, null);");
+                            }
+                            was_in = in_zone;
+                        }
+                    })
+                    .expect("spawn dock pointer watcher");
+            }
+
             // 启动即回收一次越屏卡片（上次退出后拔了显示器/改了分辨率/改了缩放的场景）
             rescue_offscreen(&handle);
 
@@ -2602,5 +2762,47 @@ mod tests {
         assert!(!is_shell_class_name("ExplorerWClass"));
         assert!(!is_shell_class_name("Tauri Window"));
         assert!(!is_shell_class_name(""));
+    }
+
+    /// E3 余量按需存在：常态窗口 = 只有玻璃条高（上方没有隐形挡鼠标区），长高态才加 28px；
+    /// 两种状态下**玻璃条在屏幕上的位置必须逐像素一致**（条贴窗口底边 + 上边缘跟着挪）。
+    #[test]
+    fn dock_margin_is_on_demand_and_bar_stays_put() {
+        let mut d = super::config::Dock::default();
+        d.cx = 720.0;
+        d.y = 1000.0; // 虚拟 92 框的上边缘 → 条顶 = 1028
+        d.size = 48;
+        assert_eq!(d.bar_height(), 64.0);
+        assert_eq!(d.bar_width(), 24.0, "空 Dock 只剩左右内边距");
+
+        let idle = super::dock_window_rect(&d, false);
+        let grown = super::dock_window_rect(&d, true);
+        // 常态：高 = 条高，上边缘 = y + 28
+        assert_eq!((idle.1, idle.3), (1028.0, 64.0));
+        // 长高态：高 = 92，上边缘 = y（长高的那 28 全在条上方）
+        assert_eq!((grown.1, grown.3), (1000.0, 92.0));
+        // 两者底边（= 条底边）与中心 x 必须一致
+        assert_eq!(idle.1 + idle.3, grown.1 + grown.3);
+        assert_eq!(idle.0 + idle.2 / 2.0, grown.0 + grown.2 / 2.0);
+        assert_eq!(grown.0 + grown.2 / 2.0, d.cx);
+
+        // 档位跟着走：56 档条高 72、放大上限 1 + 36/56
+        d.size = 56;
+        let g56 = super::dock_window_rect(&d, true);
+        assert_eq!(g56.3, 72.0 + super::DOCK_MARGIN);
+        // 图标数改宽度后仍以 cx 为中心
+        d.items = (0..5)
+            .map(|i| super::config::DockItem {
+                id: format!("i{i}"),
+                ..Default::default()
+            })
+            .collect();
+        let g5 = super::dock_window_rect(&d, false);
+        assert_eq!(g5.2, 5.0 * (56.0 + 12.0) + 24.0);
+        assert_eq!(g5.0 + g5.2 / 2.0, d.cx);
+        // 指针关注区 = 虚拟 92 框（条 + 28 余量），与窗口实际几何无关
+        let bx = super::dock_pointer_box(&d);
+        assert_eq!((bx[1], bx[3]), (d.y, 72.0 + super::DOCK_MARGIN));
+        assert_eq!(bx[0] + bx[2] / 2.0, d.cx);
     }
 }
