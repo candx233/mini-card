@@ -2114,6 +2114,12 @@
       DOCK_PAYLOAD = p;
       syncDockUI();
     };
+    // 右键空白「Dock 设置」/ 其它入口要切到本页时走它（幂等：已经在就只是重算预览）
+    window.__gotoDockPage = function () {
+      var b = $('.nav-item[data-page="page-dock"]');
+      if (b) b.click();
+      applyDockPreview();
+    };
     window.__dockPreviewSync = function () { applyDockPreview(); };
     // 预览尺寸按 stage 实测宽度算 —— 页面藏着时 clientWidth = 0（建 iframe 那拍就是这种），
     // 所以「切到本页」「窗口缩放」都要重算一次，否则预览一直卡在兜底的小尺寸上

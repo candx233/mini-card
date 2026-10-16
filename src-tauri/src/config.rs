@@ -222,6 +222,26 @@ impl Dock {
     pub fn window_size(&self) -> [f32; 2] {
         [self.bar_width(), self.bar_height() + 28.0]
     }
+
+    /// 第 i 个图标在**窗内**的中心 x（逻辑 px）：左内边距 12 + 半个图标 + i × (图标 + 间距 12)。
+    /// 与 dock.html 的 `.items { padding: 0 12px 8px; gap: 12px }` 同一套数 —— 拖入落点判位用它。
+    pub fn item_center_x(&self, i: usize) -> f32 {
+        12.0 + self.size as f32 / 2.0 + i as f32 * (self.size as f32 + 12.0)
+    }
+
+    /// 拖入落点（窗内 x，逻辑 px）→ 插入位次：落在第 i 个图标中心右侧 → 插到 i+1。
+    /// 判据 = 「插在这一位的左边还是右边」，与两稿的「落点在两图标之间则插到该处」一致。
+    pub fn insert_index_for_x(&self, x: f32) -> usize {
+        let mut idx = 0usize;
+        for i in 0..self.items.len() {
+            if x > self.item_center_x(i) {
+                idx = i + 1;
+            } else {
+                break;
+            }
+        }
+        idx
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -582,5 +602,30 @@ size = [320.0, 190.0]
         for (v, want) in [(0u8, 32u8), (31, 32), (33, 32), (35, 32), (36, 40), (44, 48), (48, 48), (52, 56), (55, 56), (200, 56)] {
             assert_eq!(d.snap_size(v), want, "图标档位吸附: {v} -> {want}");
         }
+    }
+
+    /// 拖入落点判位（F1）：窗内 x → 插入位次。48 档图标中心 = 36 / 96 / 156 …
+    #[test]
+    fn dock_insert_index_from_drop_x() {
+        let mut d = Dock::default();
+        d.items = (0..4)
+            .map(|i| DockItem { id: format!("i{i}"), ..DockItem::default() })
+            .collect();
+        assert_eq!(d.item_center_x(0), 36.0);
+        assert_eq!(d.item_center_x(1), 96.0);
+        // 落点在各图标中心的左侧 → 插在它前面；右侧 → 插在它后面
+        assert_eq!(d.insert_index_for_x(0.0), 0, "最左 → 第 0 位");
+        assert_eq!(d.insert_index_for_x(36.0), 0, "正好压在第 0 个中心 → 取左（不越到 1）");
+        assert_eq!(d.insert_index_for_x(36.5), 1, "越过第 0 个中心 → 第 1 位");
+        assert_eq!(d.insert_index_for_x(96.0), 1, "压在第 1 个中心 → 第 1 位");
+        assert_eq!(d.insert_index_for_x(120.0), 2, "第 1 与第 2 之间 → 第 2 位");
+        assert_eq!(d.insert_index_for_x(9999.0), 4, "最右 → 追加到末尾");
+        // 空 Dock：任何落点都是第 0 位
+        assert_eq!(Dock::default().insert_index_for_x(123.0), 0);
+        // 档位跟着走：56 档中心 = 12 + 28 = 40
+        let mut d56 = Dock::default();
+        d56.size = 56;
+        assert_eq!(d56.item_center_x(0), 40.0);
+        assert_eq!(d56.item_center_x(1), 108.0);
     }
 }

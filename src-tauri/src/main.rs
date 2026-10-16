@@ -15,7 +15,7 @@ mod update;
 mod weather;
 
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use config::{CardInstance, CardKind, Config, ZOrder};
@@ -148,7 +148,8 @@ fn overlay_dock_pos(app: &AppHandle, cfg: &mut Config) {
         if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
             let s = w.scale_factor().unwrap_or(1.0);
             cfg.dock.cx = ((pos.x as f64 + size.width as f64 / 2.0) / s) as f32;
-            let grow = if DOCK_GROWN.load(Ordering::Relaxed) { 0.0 } else { DOCK_MARGIN as f64 };
+            // config 存的 y = 虚拟 92 框上边缘 = 条顶边往上 28 → 按当前余量反推窗口上边缘
+            let grow = (DOCK_MARGIN - dock_extra()) as f64;
             cfg.dock.y = (pos.y as f64 / s - grow) as f32;
         }
     }
@@ -665,6 +666,7 @@ fn toggle_cards(app: &AppHandle) {
             } else {
                 // 重新显出来时回到「常态」（只有条高）：热键按下时鼠标多半不在条上，
                 // 带着余量态回来会在条上方凭空多一块隐形挡鼠标区
+                DOCK_MENU_EXTRA.store(0, Ordering::Relaxed);
                 if DOCK_GROWN.swap(false, Ordering::Relaxed) {
                     dock_apply_geom(&w, &cfg.dock);
                 }
@@ -1165,8 +1167,11 @@ static DOCK_DESKTOP_LOCK: AtomicBool = AtomicBool::new(false);
 /// ② HTTRANSPARENT 只对**同线程**窗口生效，穿透不到别的进程 → 余量区照样吃点击。
 /// 两枪都记在 docs/dock-spike.md 坑 13。
 const DOCK_MARGIN: f32 = 28.0;
-/// Dock 窗当前是否处于「长高态」（= 余量态）
+/// Dock 窗当前是否处于「长高态」（= 悬停余量态，页面按指针在不在条上推过来）
 static DOCK_GROWN: AtomicBool = AtomicBool::new(false);
+/// 右键菜单要求的窗口加高量（逻辑 px，0 = 没开菜单）：菜单要长在条上方，比 28px 余量还高，
+/// 所以窗口高度取「悬停余量 28」与「菜单需要的高度」的较大者（F2）。
+static DOCK_MENU_EXTRA: AtomicI32 = AtomicI32::new(0);
 /// 最近一次由**代码**摆的窗口矩形（物理 px）：Moved 事件里据此跳过自摆位移，
 /// 否则余量态来回切会把 config 里的 y 每切一次写歪 28px
 static DOCK_SELF_RECT: Mutex<[i32; 4]> = Mutex::new([0, 0, 0, 0]);
@@ -1818,27 +1823,49 @@ fn dock_pos(app: &AppHandle, d: &config::Dock, sz: [f32; 2]) -> (f32, f32) {
     (x, y)
 }
 
-/// 指针关注区（虚拟 92 框，逻辑 px）：Dock 的玻璃条 + 上方 28 放大余量。
+/// 指针关注区（逻辑 px）：Dock 的玻璃条 + 上方余量（悬停 28，开菜单时 = 菜单伸出条外的那段）。
 /// 指针进这一带 → 指针看门狗开始把**真光标**坐标推给页面（页面据此决定余量态与放大）。
 fn dock_pointer_box(d: &config::Dock) -> [f32; 4] {
     let w = d.bar_width();
-    [d.cx - w / 2.0, d.y, w, d.bar_height() + DOCK_MARGIN]
+    let extra = dock_extra().max(DOCK_MARGIN);
+    [d.cx - w / 2.0, d.y + DOCK_MARGIN - extra, w, d.bar_height() + extra]
 }
 
 fn dock_set_pointer_box(d: &config::Dock) {
     *DOCK_POINTER_BOX.lock().unwrap() = dock_pointer_box(d);
+    *DOCK_LAST.lock().unwrap() = Some(d.clone());
 }
 
-/// Dock 窗口的**实际**几何（逻辑 px）：条永远贴窗口底边 → 长高态把上边缘往上挪 28px（视觉不动）。
-/// `d.cx/d.y` 的口径不变（中心 x + 虚拟 92 框的上边缘）。
-fn dock_window_rect(d: &config::Dock, grown: bool) -> (f32, f32, f32, f32) {
+/// 拖放落点判位用的「最近一份 Dock 配置」：拖动时 Over 事件很密，
+/// 每个事件都 `Config::load()` 读盘解析 TOML 会把事件循环拖住 → 这里放一份同步时的快照。
+static DOCK_LAST: Mutex<Option<config::Dock>> = Mutex::new(None);
+
+/// 拖放事件给的物理坐标（相对窗内）→ 插入位次：除以 scale 换成逻辑 x 再按图标中心判左右。
+fn dock_drop_index(w: &WebviewWindow, pos: tauri::PhysicalPosition<f64>) -> usize {
+    let s = w.scale_factor().unwrap_or(1.0);
+    let x = (pos.x / s) as f32;
+    let d = DOCK_LAST
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| Config::load().dock);
+    d.insert_index_for_x(x)
+}
+
+/// 当前该给 Dock 留多少「条以上的高度」（逻辑 px）：悬停余量 28 与右键菜单高度取大者。
+/// 0 = 常态（窗口只有玻璃条那么高，上方那 28px 不归我们）。
+fn dock_extra() -> f32 {
+    let hover = if DOCK_GROWN.load(Ordering::Relaxed) { DOCK_MARGIN } else { 0.0 };
+    hover.max(DOCK_MENU_EXTRA.load(Ordering::Relaxed) as f32)
+}
+
+/// Dock 窗口的**实际**几何（逻辑 px）：条永远贴窗口底边 → 上方余量把上边缘往上挪（视觉不动）。
+/// `d.cx/d.y` 的口径不变（中心 x + 虚拟 92 框的上边缘 = 条顶边往上 28）。
+fn dock_window_rect(d: &config::Dock, extra: f32) -> (f32, f32, f32, f32) {
     let w = d.bar_width();
     let x = d.cx - w / 2.0;
-    if grown {
-        (x, d.y, w, d.bar_height() + DOCK_MARGIN)
-    } else {
-        (x, d.y + DOCK_MARGIN, w, d.bar_height())
-    }
+    let bar_top = d.y + DOCK_MARGIN;
+    (x, bar_top - extra, w, d.bar_height() + extra)
 }
 
 /// 用一次（原子）SetWindowPos 把 Dock 摆到当前余量态该在的位置/尺寸：
@@ -1846,8 +1873,8 @@ fn dock_window_rect(d: &config::Dock, grown: bool) -> (f32, f32, f32, f32) {
 fn dock_apply_geom(w: &WebviewWindow, d: &config::Dock) {
     dock_set_pointer_box(d);
     let Some(hwnd) = hwnd_of(w) else { return };
-    let grown = DOCK_GROWN.load(Ordering::Relaxed);
-    let (x, y, cw, ch) = dock_window_rect(d, grown);
+    let extra = dock_extra();
+    let (x, y, cw, ch) = dock_window_rect(d, extra);
     let s = w.scale_factor().unwrap_or(1.0) as f32;
     let (px, py, pw, ph) = (
         (x * s).round() as i32,
@@ -1876,16 +1903,47 @@ fn dock_apply_geom(w: &WebviewWindow, d: &config::Dock) {
 /// E3：鼠标压到玻璃条上（grown=true）/ 离开条与放大图标（false）→ 开关余量态。
 /// 常态窗口只有玻璃条那么高，所以「上方 28px 透明区吃点击」这个问题在结构上就不存在；
 /// 长高只为给放大图标腾渲染空间（见 DOCK_MARGIN 注释里的两条实测结论）。
+/// ⚠️ 开菜单时窗口高度以菜单为准（DOCK_MENU_EXTRA）—— 这里只改悬停那一半，别把菜单顶掉。
 #[tauri::command]
 async fn dock_hover(app: AppHandle, grown: bool) -> Result<(), String> {
-    if DOCK_GROWN.swap(grown, Ordering::Relaxed) == grown {
-        return Ok(()); // 状态没变，别白摆一次窗口
+    let prev = dock_extra();
+    DOCK_GROWN.store(grown, Ordering::Relaxed);
+    let now = dock_extra();
+    if (now - prev).abs() < 0.5 {
+        return Ok(()); // 有效余量没变（含「菜单撑着」的情形），别白摆一次窗口
     }
     let cfg = Config::load();
     if let Some(w) = app.get_webview_window(dock_label()) {
         dock_apply_geom(&w, &cfg.dock);
     }
     Ok(())
+}
+
+/// F2：右键菜单开/关 —— 菜单长在玻璃条上方，页面量好自己的高度报过来（`extra` = 需要的条以上高度，逻辑 px）。
+/// 窗口高度取「悬停 28」与「菜单高度」的较大者，所以先开菜单再划走鼠标不会把菜单压扁。
+#[tauri::command]
+async fn dock_menu(app: AppHandle, open: bool, extra: f32) -> Result<(), String> {
+    let want = if open { extra.clamp(0.0, 480.0).round() as i32 } else { 0 };
+    let prev = dock_extra();
+    DOCK_MENU_EXTRA.store(want, Ordering::Relaxed);
+    let now = dock_extra();
+    if (now - prev).abs() < 0.5 {
+        return Ok(());
+    }
+    let cfg = Config::load();
+    if let Some(w) = app.get_webview_window(dock_label()) {
+        dock_apply_geom(&w, &cfg.dock);
+    }
+    Ok(())
+}
+
+/// F1：拖放过程把「会插到第几位」推给页面画插入标线（`index = null` 收起）。
+fn push_dock_drop(w: &WebviewWindow, index: Option<usize>) {
+    let js = match index {
+        Some(i) => format!("window.__setDrop && window.__setDrop({{ index: {i} }});"),
+        None => "window.__setDrop && window.__setDrop(null);".to_string(),
+    };
+    let _ = w.eval(&js);
 }
 
 /// Dock 的 URL 参数：尺寸档 / 放大强度 / 玻璃两参 / 明暗
@@ -1941,10 +1999,11 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
     dcur.cx = x + sz[0] / 2.0;
     dcur.y = vy;
     DOCK_GROWN.store(false, Ordering::Relaxed);
+    DOCK_MENU_EXTRA.store(0, Ordering::Relaxed);
     *DOCK_SELF_RECT.lock().unwrap() = [0, 0, 0, 0];
     dock_set_pointer_box(&dcur);
     // 常态只有玻璃条那么高（长度 64 而不是 92）：上方没有隐形挡鼠标的余量区
-    let (wx, wy, ww, wh) = dock_window_rect(&dcur, false);
+    let (wx, wy, ww, wh) = dock_window_rect(&dcur, 0.0);
     let url = dock_url(d, &cfg.settings);
     let win = match WebviewWindowBuilder::new(app, dock_label(), WebviewUrl::App(url.into()))
         .title("MiniCard · Dock")
@@ -1984,8 +2043,36 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
     let last: Mutex<Option<(i32, i32)>> = Mutex::new(None);
     let app_move = app.clone();
     let win_ev = win.clone();
-    win.on_window_event(move |e| {
-        if let tauri::WindowEvent::Moved(p) = e {
+    win.on_window_event(move |e| match e {
+        tauri::WindowEvent::DragDrop(d) => match d {
+            // F1：拖 exe/lnk 到条上 —— Enter/Over 只推「会插到第几位」给页面画插入标线，
+            // Drop 才真插（插到落点对应的位次，落点由 Event 给的物理坐标 ÷ scale 换算成窗内逻辑 x）
+            tauri::DragDropEvent::Enter { position, .. } => {
+                push_dock_drop(&win_ev, Some(dock_drop_index(&win_ev, *position)));
+            }
+            tauri::DragDropEvent::Over { position } => {
+                push_dock_drop(&win_ev, Some(dock_drop_index(&win_ev, *position)));
+            }
+            tauri::DragDropEvent::Drop { paths, position } => {
+                let idx = dock_drop_index(&win_ev, *position);
+                push_dock_drop(&win_ev, None);
+                let paths: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                mlog(&format!("dock drop: idx={idx} paths={paths:?}"));
+                let app_drop = app_move.clone();
+                // 事件回调在事件循环线程上：加条目要提图标（IO+GDI）+ 写盘 → 甩到异步里做
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = dock_add(app_drop, paths, Some(idx)).await {
+                        mlog(&format!("dock drop ERR {e}"));
+                    }
+                });
+            }
+            tauri::DragDropEvent::Leave => push_dock_drop(&win_ev, None),
+            _ => {}
+        },
+        tauri::WindowEvent::Moved(p) => {
             let s = win_ev.scale_factor().unwrap_or(1.0) as f64;
             {
                 let self_rect = *DOCK_SELF_RECT.lock().unwrap();
@@ -2008,12 +2095,13 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
                 .unwrap_or(sz[0] as f64);
             let mut cfg = Config::load();
             cfg.dock.cx = (logical.0 as f64 + w / 2.0) as f32;
-            // 存的是「虚拟 92 框的上边缘」：常态（只有条高）窗口上边缘比它低 28px
-            let grow = if DOCK_GROWN.load(Ordering::Relaxed) { 0.0 } else { DOCK_MARGIN };
+            // 存的是「虚拟 92 框的上边缘」= 条顶边往上 28：窗口上边缘比它低 (28 - 当前余量)
+            let grow = DOCK_MARGIN - dock_extra();
             cfg.dock.y = logical.1 as f32 - grow;
             let _ = cfg.save();
             push_dock_glass(&app_move, &win_ev);
         }
+        _ => {}
     });
 }
 
@@ -2037,12 +2125,14 @@ fn sync_dock(app: &AppHandle, cfg: &Config) {
         let _ = w.close();
         DOCK_HWND.store(0, Ordering::Relaxed);
         DOCK_DESKTOP_LOCK.store(false, Ordering::Relaxed);
+        DOCK_MENU_EXTRA.store(0, Ordering::Relaxed);
         *DOCK_POINTER_BOX.lock().unwrap() = [0.0, 0.0, 0.0, 0.0];
+        *DOCK_LAST.lock().unwrap() = None;
         return;
     }
     dock_set_pointer_box(&cfg.dock);
     // 尺寸 / 位置：宽随条目数与档位变，高随「余量态」变（常态 = 只有玻璃条那么高 + 上边缘下移 28）
-    let want = dock_window_rect(&cfg.dock, DOCK_GROWN.load(Ordering::Relaxed));
+    let want = dock_window_rect(&cfg.dock, dock_extra());
     if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
         let s = w.scale_factor().unwrap_or(1.0) as f32;
         let (cx, cy) = (pos.x as f32 / s, pos.y as f32 / s);
@@ -2070,12 +2160,29 @@ fn sync_dock(app: &AppHandle, cfg: &Config) {
     let _ = w.eval(&format!("window.__setDock && window.__setDock({payload});"));
 }
 
-/// Dock 全量配置（含逐条目的图标缓存路径）；图标提取是 IO+GDI 活 → spawn_blocking
+/// Dock 全量配置（含逐条目的图标缓存路径 + **运行态**）；图标提取是 IO+GDI 活 → spawn_blocking。
+/// 运行态只在这条路上加（`sync_dock` 那份 payload 不带）：主界面预览要跟真条一样显示运行指示点，
+/// 而真条的指示点本来就有 2s 一轮的推送线程，不需要每次同步都扫一遍窗口。
 #[tauri::command]
 async fn get_dock() -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || dock_payload(&Config::load()))
-        .await
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = Config::load();
+        let mut p = dock_payload(&cfg);
+        let run = dock::running_set();
+        if let Some(items) = p.get_mut("items").and_then(|v| v.as_array_mut()) {
+            for it in items.iter_mut() {
+                let path = it.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let key = dock::match_key(&path);
+                let on = !key.is_empty() && !dock::is_url(&path) && dock::item_running(&key, &run);
+                if let Some(o) = it.as_object_mut() {
+                    o.insert("running".into(), serde_json::Value::Bool(on));
+                }
+            }
+        }
+        p
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Dock 的磨砂 payload（形状同卡片 get_glass）
@@ -2097,11 +2204,18 @@ fn dock_after_change(app: &AppHandle, cfg: &Config) {
 }
 
 /// 加条目（主界面选文件 / 拖放到 Dock 都走这条）：名字按路径推、图标当场提好再落盘，
-/// 免得前端先闪一下字母块。同路径重复直接跳过；图标是 IO+GDI 活 → 整段进 spawn_blocking
+/// 免得前端先闪一下字母块。同路径重复直接跳过；图标是 IO+GDI 活 → 整段进 spawn_blocking。
+/// `index` = 插到第几位（F1 拖入用；不传 = 追加到末尾）。
 #[tauri::command]
-async fn dock_add(app: AppHandle, paths: Vec<String>) -> Result<serde_json::Value, String> {
+async fn dock_add(
+    app: AppHandle,
+    paths: Vec<String>,
+    index: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let at = index.unwrap_or(usize::MAX);
     let cfg = tauri::async_runtime::spawn_blocking(move || -> Result<Config, String> {
         let mut cfg = Config::load();
+        let mut n = 0usize;
         for raw in paths {
             let p = raw.trim().to_string();
             if p.is_empty() || cfg.dock.items.iter().any(|it| it.path.eq_ignore_ascii_case(&p)) {
@@ -2120,7 +2234,10 @@ async fn dock_add(app: AppHandle, paths: Vec<String>) -> Result<serde_json::Valu
                 divider_before: false,
             };
             let _ = dock::ensure_icon(&item);
-            cfg.dock.items.push(item);
+            // 位次：落点那一位（多个路径按顺序依次插进去），末尾追加时 at 取了 usize::MAX
+            let pos = at.saturating_add(n).min(cfg.dock.items.len());
+            cfg.dock.items.insert(pos, item);
+            n += 1;
         }
         cfg.save()?;
         Ok(cfg)
@@ -2230,6 +2347,27 @@ async fn dock_reveal(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || dock::reveal(&path))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// 切到主界面 Dock 页（幂等：已经在 Dock 页就不动）。
+/// 主窗是「用时建、闲时销毁」的 —— 刚按需重建那拍页面还没跑起来，eval 会被丢掉，
+/// 所以调用方按 150ms 重发几次，直到页面自己跑起来接住这一枪。
+const GOTO_DOCK_PAGE_JS: &str = "(function(){var p=document.getElementById('page-dock');\
+if(p&&!p.classList.contains('active')&&window.__gotoDockPage){window.__gotoDockPage();}})()";
+
+/// F2：右键空白「Dock 设置」→ 唤回主窗并切到 Dock 页
+#[tauri::command]
+async fn dock_open_settings(app: AppHandle) -> Result<(), String> {
+    show_main(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.eval(GOTO_DOCK_PAGE_JS);
+            }
+        }
+    });
+    Ok(())
 }
 
 /// 桌面图标显隐开关：写注册表 + 通知外壳；同时把真值写回 config 并广播
@@ -2508,7 +2646,9 @@ fn main() {
             dock_click,
             dock_launch,
             dock_hover,
+            dock_menu,
             dock_reveal,
+            dock_open_settings,
             dock_set_desktop_icons,
             dock_desktop_icons_state,
             save_config,
@@ -2764,8 +2904,8 @@ mod tests {
         assert!(!is_shell_class_name(""));
     }
 
-    /// E3 余量按需存在：常态窗口 = 只有玻璃条高（上方没有隐形挡鼠标区），长高态才加 28px；
-    /// 两种状态下**玻璃条在屏幕上的位置必须逐像素一致**（条贴窗口底边 + 上边缘跟着挪）。
+    /// E3 余量按需存在（F2 起余量还可能是菜单撑的）：常态窗口 = 只有玻璃条高（上方没有隐形挡鼠标区），
+    /// 长高态才加 28px / 菜单高；两种状态下**玻璃条在屏幕上的位置必须逐像素一致**（条贴窗口底边 + 上边缘跟着挪）。
     #[test]
     fn dock_margin_is_on_demand_and_bar_stays_put() {
         let mut d = super::config::Dock::default();
@@ -2774,9 +2914,12 @@ mod tests {
         d.size = 48;
         assert_eq!(d.bar_height(), 64.0);
         assert_eq!(d.bar_width(), 24.0, "空 Dock 只剩左右内边距");
+        // 全局余量态归零（同一个进程里别的用例可能动过）
+        super::DOCK_GROWN.store(false, std::sync::atomic::Ordering::Relaxed);
+        super::DOCK_MENU_EXTRA.store(0, std::sync::atomic::Ordering::Relaxed);
 
-        let idle = super::dock_window_rect(&d, false);
-        let grown = super::dock_window_rect(&d, true);
+        let idle = super::dock_window_rect(&d, 0.0);
+        let grown = super::dock_window_rect(&d, super::DOCK_MARGIN);
         // 常态：高 = 条高，上边缘 = y + 28
         assert_eq!((idle.1, idle.3), (1028.0, 64.0));
         // 长高态：高 = 92，上边缘 = y（长高的那 28 全在条上方）
@@ -2786,9 +2929,15 @@ mod tests {
         assert_eq!(idle.0 + idle.2 / 2.0, grown.0 + grown.2 / 2.0);
         assert_eq!(grown.0 + grown.2 / 2.0, d.cx);
 
+        // 右键菜单：加高量由页面按菜单实测高度报来（比 28 余量高），底边同样钉住
+        let menu = super::dock_window_rect(&d, 28.0 + 3.0 * 32.0 + 16.0);
+        assert_eq!(menu.3, 64.0 + 140.0);
+        assert_eq!(menu.1 + menu.3, idle.1 + idle.3, "菜单态条底边不动");
+        assert_eq!(menu.1 + menu.3 - 64.0 - 28.0, 1000.0, "条顶边仍 = y + 28");
+
         // 档位跟着走：56 档条高 72、放大上限 1 + 36/56
         d.size = 56;
-        let g56 = super::dock_window_rect(&d, true);
+        let g56 = super::dock_window_rect(&d, super::DOCK_MARGIN);
         assert_eq!(g56.3, 72.0 + super::DOCK_MARGIN);
         // 图标数改宽度后仍以 cx 为中心
         d.items = (0..5)
@@ -2797,7 +2946,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let g5 = super::dock_window_rect(&d, false);
+        let g5 = super::dock_window_rect(&d, 0.0);
         assert_eq!(g5.2, 5.0 * (56.0 + 12.0) + 24.0);
         assert_eq!(g5.0 + g5.2 / 2.0, d.cx);
         // 指针关注区 = 虚拟 92 框（条 + 28 余量），与窗口实际几何无关

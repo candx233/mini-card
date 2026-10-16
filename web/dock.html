@@ -17,6 +17,8 @@
     --tshadow: oklch(0 0 0 / 0.45);
     --border:  oklch(1 0 0 / 0.10);
     --accent:  oklch(0.685 0.168 256.0);
+    --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent);
+    --danger:  oklch(0.630 0.190 25.0);
     --bg:      oklch(0.210 0.025 255.0);
     --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent);
     --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
@@ -118,6 +120,36 @@
     color: color-mix(in oklch, var(--fg) 62%, transparent);
     font-size: 12px; white-space: nowrap; pointer-events: none;
   }
+  /* ─── F1 拖入插入标线：拖 exe/lnk 到条上时标出「会插到第几位」─── */
+  .dropmark {
+    position: absolute; z-index: 6; bottom: 8px; width: 2px; height: var(--icon);
+    margin-left: -1px; border-radius: 1px;
+    background: var(--accent);
+    box-shadow: 0 0 6px color-mix(in oklch, var(--accent) 55%, transparent);
+    pointer-events: none;
+  }
+  .dropmark[hidden] { display: none; }
+  /* ─── F2 右键菜单：长在玻璃条上方（窗口按菜单高度临时长高，见 dock_menu）───
+     形态按项目菜单语言（同 docs/tray-menu-plan.md §三）：行高 32 / 圆角 12 / 项内左右 10；
+     底色用气泡那对变量（暗主题深底白字、亮主题白底深字，跟悬停名字气泡同一套） */
+  .menu {
+    position: absolute; z-index: 20; bottom: calc(var(--bar-h) + 6px); left: 0;
+    min-width: 168px; padding: 6px; border-radius: 12px;
+    background: var(--bubble-bg); border: 1px solid var(--border);
+    box-shadow: 0 6px 18px color-mix(in oklch, oklch(0 0 0) 34%, transparent);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .menu[hidden] { display: none; }
+  .menu .mi {
+    appearance: none; -webkit-appearance: none; border: 0; background: none;
+    font-family: inherit; font-size: 13.5px; line-height: 20px; color: var(--bubble-fg);
+    text-align: left; height: 32px; padding: 0 10px; border-radius: 8px;
+    display: flex; align-items: center; white-space: nowrap; cursor: default;
+  }
+  .menu .mi:hover { background: var(--accent-soft); }
+  .menu .mi:active { background: color-mix(in oklch, var(--accent) 22%, transparent); }
+  .menu .mi[disabled] { opacity: 0.42; }
+  .menu .mi.danger:hover { background: color-mix(in oklch, var(--danger) 14%, transparent); }
 </style>
 </head>
 <body>
@@ -127,6 +159,8 @@
       <div class="veil"></div>
     </div>
     <div class="items" id="items"></div>
+    <div class="dropmark" id="dropmark" hidden></div>
+    <div class="menu" id="menu" role="menu" hidden></div>
     <div class="bubble" id="bubble"></div>
     <div class="empty-hint" id="empty">Dock 上还没有应用</div>
   </div>
@@ -225,12 +259,19 @@
   }
   function renderItems(items) {
     items = items || [];
+    // 运行态：payload 里带 `running`（get_dock 那条路）→ 先按它铺一遍；
+    // 之后真条还有 2s 一轮的 __setRunning 推送来精修（预览 iframe 就靠这份轮询）
+    if (items.length && Object.prototype.hasOwnProperty.call(items[0], 'running')) {
+      RUNNING = {};
+      items.forEach(function (it) { if (it.running) RUNNING[it.id] = true; });
+    }
     itemsEl.innerHTML = '';
     items.forEach(function (it) {
       var el = document.createElement('div');
       el.className = 'item';
       el.dataset.id = it.id || '';
       el.dataset.name = it.name || '';
+      el.dataset.path = it.path || '';
       el.setAttribute('aria-label', it.name || '');   // 名字走 HTML 气泡，不用 title（会和气泡重复一坨原生提示）
       el.removeAttribute('title');
       if (it.icon) {
@@ -313,7 +354,8 @@
     var a = 1 - Math.exp(-dt / 0.045);        // 45ms 时间常数：跟手，松手缓出
     var busy = false;
     for (var i = 0; i < cs.length; i++) {
-      var tgt = IN_WIN ? kOf(Math.abs(MX - cs[i])) : 1;
+      // 菜单开着时图标一概回落到 1.0（菜单就长在图标上方，放大只会互相压）
+      var tgt = (IN_WIN && !MENU_OPEN) ? kOf(Math.abs(MX - cs[i])) : 1;
       if (Math.abs(tgt - CURS[i]) < 0.002) { CURS[i] = tgt; continue; }
       CURS[i] += (tgt - CURS[i]) * a;
       busy = true;
@@ -354,10 +396,18 @@
     PT_N++;
     var out = (x === null || y === null || x < 0 || x > (window.innerWidth || 0) || y < -1e3);
     if (out) {                       // 光标不在 Dock 那一带
+      closeMenu();
       IN_WIN = false; MX = -1e9; startRaf(); setGrown(false);
       return;
     }
     var inBar = y >= barTopY() - 1;
+    if (MENU_OPEN) {                 // 菜单开着：图标不放大；指针走出「菜单 ∪ 条」就关菜单
+      IN_WIN = false; MX = -1e9; startRaf();
+      var r = menuEl.getBoundingClientRect();
+      var inMenu = x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+      if (!inMenu && !inBar) { closeMenu(); leaveDock(); }
+      return;
+    }
     // 常态下光标停在条**上方**的余量带里：不放大（窗口只有条高，放大会被顶边裁掉一截），
     // 等它真的压到条上（inBar）再长高 + 放大
     if (inBar || GROWN) { IN_WIN = true; MX = x; }
@@ -481,6 +531,7 @@
   });
   itemsEl.addEventListener('click', function (e) {
     if (PREVIEW || !T || !T.core) return;
+    if (SUPPRESS_CLICK) { SUPPRESS_CLICK = false; return; }   // 这一击只用来收菜单
     var el = e.target && e.target.closest ? e.target.closest('.item') : null;
     if (!el) el = itemAtPoint(e.clientX, e.clientY);   // 放大图标往上顶出布局盒：按视觉矩形兜底
     if (!el) return;
@@ -508,6 +559,136 @@
     if (!e.target || !e.target.closest) return;
     if (e.target.closest('.item')) hideBubble();
   });
+
+  /* ── F1 拖入标线：Rust 的 DragDrop 事件推 `__setDrop({index})`（Enter/Over 推，Drop/Leave 推 null）──
+     位置 = 第 index 个槽（两个图标之间），与 Rust 侧 `insert_index_for_x` 同一套几何：
+     图标 i 中心 = 12 + size/2 + i×(size+12)，槽在它左边缘外半个间距处 */
+  var dropEl = document.getElementById('dropmark');
+  window.__setDrop = function (p) {
+    if (!dropEl) return;
+    if (!p || typeof p.index !== 'number') { dropEl.hidden = true; return; }
+    var n = itemsEl.children.length;
+    var i = Math.max(0, Math.min(n, p.index | 0));
+    var pitch = SIZE + 12;
+    dropEl.dataset.i = String(i);
+    dropEl.style.left = (12 + i * pitch - 6) + 'px';   // margin-left:-1px 让 2px 线居中落在槽上
+    dropEl.hidden = false;
+  };
+  window.__getDrop = function () {
+    return dropEl && !dropEl.hidden ? { index: Number(dropEl.dataset.i || -1), left: dropEl.offsetLeft } : null;
+  };
+
+  /* ── F2 右键菜单 ──
+     菜单长在玻璃条**上方** —— 窗口只有条那么高，所以开菜单时把「需要的高度」报给 Rust
+     （`dock_menu(open, extra)` → 窗口临时长高，条不动）。关闭路径：点项 / 点条上别处 /
+     指针走出「菜单 ∪ 条」（页面只认 Rust 推来的真光标，见 __setPointer）。
+     为什么不做失焦关闭：Dock 窗是 NOACTIVATE + 不可聚焦的，它根本收不到 blur（点桌面也不关）。 */
+  var menuEl = document.getElementById('menu');
+  var MENU_OPEN = false, MENU_ITEM = null;
+  function isUrlPath(p) { return /^https?:\/\//i.test(p || ''); }
+  function menuExtra(open, h) {
+    if (PREVIEW || !T || !T.core) return;
+    T.core.invoke('dock_menu', { open: !!open, extra: Number(h) || 0 }).catch(function () {});
+  }
+  function closeMenu() {
+    if (!MENU_OPEN) return;
+    MENU_OPEN = false; MENU_ITEM = null;
+    menuEl.hidden = true; menuEl.innerHTML = '';
+    menuExtra(false, 0);
+  }
+  function openMenu(itemEl, clientX) {
+    var rows = itemEl
+      ? [{ act: 'reveal', label: '打开所在文件夹' }, { act: 'remove', label: '从 Dock 移除' }, { act: 'cancel', label: '取消' }]
+      : [{ act: 'add', label: '添加应用' }, { act: 'settings', label: 'Dock 设置' }];
+    MENU_ITEM = itemEl || null;
+    menuEl.innerHTML = '';
+    rows.forEach(function (r) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'mi' + (r.act === 'remove' ? ' danger' : '');   // 左空格 = 第二类名
+      b.textContent = r.label;
+      b.dataset.act = r.act;
+      if (r.act === 'reveal' && itemEl && isUrlPath(itemEl.dataset.path)) b.disabled = true;  // 网址没有「所在文件夹」
+      menuEl.appendChild(b);
+    });
+    menuEl.hidden = false;
+    var winW = window.innerWidth || 0;
+    var mw = menuEl.offsetWidth, mh = menuEl.offsetHeight;
+    var ax = itemEl ? (itemEl.offsetLeft + itemEl.offsetWidth / 2) : clientX;   // 锚点：图标中心 / 空白处指针
+    menuEl.style.left = Math.round(Math.max(8, Math.min(winW - 8 - mw, ax - mw / 2))) + 'px';
+    MENU_OPEN = true;
+    IN_WIN = false; MX = -1e9; startRaf();                                       // 菜单开着不放大
+    // 长高量 = 菜单高 + 贴条 6 + 顶部留白 10（给投影一点余地）
+    menuExtra(true, mh + 16);
+  }
+  window.__getMenu = function () {
+    if (!MENU_OPEN) return { open: false, innerH: window.innerHeight, barTop: barTopY() };
+    var r = menuEl.getBoundingClientRect();
+    var first = menuEl.children[0];
+    var cs = first ? window.getComputedStyle(first) : null;
+    return {
+      open: true, blank: !MENU_ITEM, id: MENU_ITEM ? (MENU_ITEM.dataset.id || '') : null,
+      rows: Array.prototype.map.call(menuEl.children, function (b) { return b.textContent; }),
+      rect: [+r.left.toFixed(1), +r.top.toFixed(1), +r.width.toFixed(1), +r.height.toFixed(1)],
+      rowH: first ? first.offsetHeight : 0, rowPad: cs ? cs.paddingLeft : '',
+      radius: window.getComputedStyle(menuEl).borderRadius,
+      gapAboveBar: +(barTopY() - r.bottom).toFixed(1),
+      innerH: window.innerHeight, barTop: barTopY(),
+    };
+  };
+  document.addEventListener('contextmenu', function (e) {
+    if (PREVIEW) { e.preventDefault(); return; }
+    e.preventDefault();
+    if (e.target && e.target.closest && e.target.closest('.menu')) return;   // 菜单自己身上右键 → 保持不动
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    var el = e.target && e.target.closest ? e.target.closest('.item') : null;
+    if (!el) el = itemAtPoint(e.clientX, e.clientY);   // 放大图标顶出布局盒 → 按视觉矩形兜底
+    openMenu(el, e.clientX);
+  });
+  /* 菜单开着时，窗内（条上）的任意按下都先当「关菜单」——第一次点只收菜单，不激活图标（跟系统菜单一致） */
+  var SUPPRESS_CLICK = false;
+  document.addEventListener('mousedown', function (e) {
+    if (!MENU_OPEN) return;
+    if (e.target && e.target.closest && e.target.closest('.menu')) return;
+    closeMenu();
+    SUPPRESS_CLICK = true;
+  });
+  menuEl.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('.mi') : null;
+    if (!b || b.disabled) return;
+    var act = b.dataset.act, it = MENU_ITEM;
+    closeMenu();
+    if (act === 'cancel') return;
+    if (!T || !T.core) return;
+    if (act === 'reveal' && it) {
+      T.core.invoke('dock_reveal', { path: it.dataset.path }).catch(function (err) { bubble('打开失败：' + err, it, 2000); });
+    } else if (act === 'remove' && it) {
+      T.core.invoke('dock_remove', { id: it.dataset.id }).catch(function (err) { bubble('移除失败：' + err, it, 2000); });
+    } else if (act === 'add') {
+      T.core.invoke('plugin:dialog|open', {
+        options: {
+          multiple: true, title: '选择要添加的应用',
+          filters: [{ name: '程序 / 快捷方式', extensions: ['exe', 'lnk', 'bat', 'cmd'] }, { name: '所有文件', extensions: ['*'] }]
+        }
+      }).then(function (sel) {
+        if (!sel) return;
+        return T.core.invoke('dock_add', { paths: Array.isArray(sel) ? sel : [sel] });
+      }).catch(function (err) { bubble('添加失败：' + err, itemsEl.children[0], 2000); });
+    } else if (act === 'settings') {
+      T.core.invoke('dock_open_settings').catch(function () {});
+    }
+  });
+
+  /* ── F3 主界面预览（preview=1）：轮询 get_dock 与真条同源 ──
+     主界面推 __setDock 是主路；这里补一条 1.5s 轮询 —— 预览是独立 iframe、看不见真条的
+     __setRunning / 拖入结果，轮询能让「运行指示点 / 条目变化」自己跟上（两路都幂等）。 */
+  if (PREVIEW) {
+    setInterval(function () {
+      if (!T || !T.core) return;
+      if (document.visibilityState === 'hidden') return;   // 主界面切走了/最小化了就别轮询
+      T.core.invoke('get_dock').then(function (p) { if (p) window.__setDock(p); }).catch(function () {});
+    }, 1500);
+  }
 
   applySizing();
 })();
