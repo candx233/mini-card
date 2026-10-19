@@ -148,8 +148,8 @@ fn overlay_dock_pos(app: &AppHandle, cfg: &mut Config) {
         if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
             let s = w.scale_factor().unwrap_or(1.0);
             cfg.dock.cx = ((pos.x as f64 + size.width as f64 / 2.0) / s) as f32;
-            // config 存的 y = 虚拟 92 框上边缘 = 条顶边往上 28 → 按当前余量反推窗口上边缘
-            let grow = (DOCK_MARGIN - dock_extra()) as f64;
+            // config 存的 y = 虚拟 92 框上边缘 = 条顶边往上 28；窗口上边缘比它高 (预留 − 28)，恒定
+            let grow = (DOCK_MARGIN - dock_top_reserve()) as f64;
             cfg.dock.y = (pos.y as f64 / s - grow) as f32;
         }
     }
@@ -1167,7 +1167,11 @@ static DOCK_DESKTOP_LOCK: AtomicBool = AtomicBool::new(false);
 /// ② HTTRANSPARENT 只对**同线程**窗口生效，穿透不到别的进程 → 余量区照样吃点击。
 /// 两枪都记在 docs/dock-spike.md 坑 13。
 const DOCK_MARGIN: f32 = 28.0;
-/// Dock 窗当前是否处于「长高态」（= 悬停余量态，页面按指针在不在条上推过来）
+/// 菜单预留高（逻辑 px）：自绘右键菜单长在条上方，窗口**永久**预留这么高 ——
+/// 菜单开合**不再改窗口几何**（F+2：改几何必在合成器上留一帧错位，实测见 docs/dock-spike.md 坑 18）。
+/// 3 项菜单 114 + 贴条 6 + 投影/顶部留白 ≈ 136。
+const DOCK_MENU_RESERVE: f32 = 136.0;
+/// Dock 窗当前是否处于「余量态」（页面按指针在不在条上推过来）—— 只切**窗口区域**，不动几何
 static DOCK_GROWN: AtomicBool = AtomicBool::new(false);
 /// 右键菜单要求的窗口加高量（逻辑 px，0 = 没开菜单）：菜单要长在条上方，比 28px 余量还高，
 /// 所以窗口高度取「悬停余量 28」与「菜单需要的高度」的较大者（F2）。
@@ -1823,12 +1827,11 @@ fn dock_pos(app: &AppHandle, d: &config::Dock, sz: [f32; 2]) -> (f32, f32) {
     (x, y)
 }
 
-/// 指针关注区（逻辑 px）：Dock 的玻璃条 + 上方余量（悬停 28，开菜单时 = 菜单伸出条外的那段）。
-/// 指针进这一带 → 指针看门狗开始把**真光标**坐标推给页面（页面据此决定余量态与放大）。
+/// 指针关注区（逻辑 px）= **整个固定窗口**：指针进这一带 → 指针看门狗开始把真光标坐标推给
+/// 页面（页面据此决定余量态与放大）。窗口本身含玻璃条、悬停余量与菜单预留三段。
 fn dock_pointer_box(d: &config::Dock) -> [f32; 4] {
-    let w = d.bar_width();
-    let extra = dock_extra().max(DOCK_MARGIN);
-    [d.cx - w / 2.0, d.y + DOCK_MARGIN - extra, w, d.bar_height() + extra]
+    let (x, y, w, h) = dock_window_rect(d);
+    [x, y, w, h]
 }
 
 fn dock_set_pointer_box(d: &config::Dock) {
@@ -1843,12 +1846,13 @@ static DOCK_LAST: Mutex<Option<config::Dock>> = Mutex::new(None);
 /// 拖放事件给的物理坐标（相对窗内）→ 插入位次：除以 scale 换成逻辑 x 再按图标中心判左右。
 fn dock_drop_index(w: &WebviewWindow, pos: tauri::PhysicalPosition<f64>) -> usize {
     let s = w.scale_factor().unwrap_or(1.0);
-    let x = (pos.x / s) as f32;
     let d = DOCK_LAST
         .lock()
         .unwrap()
         .clone()
         .unwrap_or_else(|| Config::load().dock);
+    // 事件坐标是**窗内**的；条在常态下左边贴着侧向量（见 dock_bar_origin）→ 换成条内坐标
+    let x = (pos.x / s) as f32 - dock_bar_origin(&d).0;
     d.insert_index_for_x(x)
 }
 
@@ -1859,13 +1863,107 @@ fn dock_extra() -> f32 {
     hover.max(DOCK_MENU_EXTRA.load(Ordering::Relaxed) as f32)
 }
 
-/// Dock 窗口的**实际**几何（逻辑 px）：条永远贴窗口底边 → 上方余量把上边缘往上挪（视觉不动）。
+/// 顶部预留 = max(悬停余量, 菜单预留)：Dock 窗**固定**这么高，余量靠窗口区域按需放开。
+fn dock_top_reserve() -> f32 {
+    DOCK_MARGIN.max(DOCK_MENU_RESERVE)
+}
+
+/// 侧向预留（逻辑 px）：F+3 的「位移 + 条宽外扩」让悬停时的玻璃比常态宽，窗口两侧要留出来，
+/// 免得外扩的玻璃/图标被窗口边缘裁掉。算法与 `dock.html` 的逐帧布局**同一套**（扫指针位置取上界）。
+fn dock_side_reserve(d: &config::Dock) -> f32 {
+    let n = d.items.len();
+    if n == 0 {
+        return 6.0;
+    }
+    let size = d.size as f32;
+    let gap = 12.0f32;
+    let bar = d.bar_width();
+    let content = n as f32 * size + (n as f32 - 1.0) * gap;
+    let pad = (bar - content) / 2.0;                 // 实测恒 18
+    let kmax = 1.0 + 36.0 / size;                    // 与页面同一条放大上限
+    let mag = d.mag as f32;
+    let rest = |i: usize| pad + size / 2.0 + i as f32 * (size + gap);
+    let mut worst = 0.0f32;
+    let mut probe = 0.0f32;
+    while probe <= bar + 0.001 {
+        let ks: Vec<f32> = (0..n)
+            .map(|i| {
+                let dd = (probe - rest(i)).abs() / (size * 1.3);
+                (1.0 + mag / 100.0 * (-(dd * dd)).exp()).min(kmax)
+            })
+            .collect();
+        let j = (0..n)
+            .min_by(|a, b| {
+                (probe - rest(*a)).abs().partial_cmp(&(probe - rest(*b)).abs()).unwrap()
+            })
+            .unwrap();
+        let mut pos = vec![0.0f32; n];
+        pos[j] = rest(j);
+        for i in (j + 1)..n {
+            pos[i] = pos[i - 1] + size * ks[i - 1] / 2.0 + gap + size * ks[i] / 2.0;
+        }
+        for i in (0..j).rev() {
+            pos[i] = pos[i + 1] - size * ks[i + 1] / 2.0 - gap - size * ks[i] / 2.0;
+        }
+        let row_l = pos[0] - size * ks[0] / 2.0;
+        let row_r = pos[n - 1] + size * ks[n - 1] / 2.0;
+        worst = worst.max(pad - row_l).max(row_r + pad - bar);
+        probe += 2.0;
+    }
+    worst.ceil() + 2.0
+}
+
+/// Dock 窗口的**固定**矩形（逻辑 px）：条永远贴窗口底边、上方常备 `dock_top_reserve()`、
+/// 两侧各备侧向量 —— **悬停/开菜单都不再改它**（改几何会在合成器上留一帧错位，见坑 18）。
 /// `d.cx/d.y` 的口径不变（中心 x + 虚拟 92 框的上边缘 = 条顶边往上 28）。
-fn dock_window_rect(d: &config::Dock, extra: f32) -> (f32, f32, f32, f32) {
-    let w = d.bar_width();
-    let x = d.cx - w / 2.0;
+fn dock_window_rect(d: &config::Dock) -> (f32, f32, f32, f32) {
+    let side = dock_side_reserve(d);
+    let w = d.bar_width() + 2.0 * side;
     let bar_top = d.y + DOCK_MARGIN;
-    (x, bar_top - extra, w, d.bar_height() + extra)
+    (d.cx - w / 2.0, bar_top - dock_top_reserve(), w, d.bar_height() + dock_top_reserve())
+}
+
+/// 玻璃条左上角在**窗口内**的常态位置（逻辑 px）——悬停时条会向两侧外扩，这是「常态」值。
+#[allow(dead_code)] // 页面布局用同一套数；Rust 侧供单测/诊断
+fn dock_bar_origin(d: &config::Dock) -> (f32, f32) {
+    (dock_side_reserve(d), dock_top_reserve())
+}
+
+/// 当前档位该放的窗口区域（逻辑 px，**窗口局部坐标**）：区域外的点系统根本不认为属于本窗
+/// → 点击落到下面**任意进程**的窗口（2026-10-16 实测 PASS：`docs/verify/mc_dock_region_passthru.py`）。
+/// 常态化只放玻璃条（上方 136 预留既不可见也不吃点击）；悬停/开菜单才放开那一段。
+fn dock_region_rect(d: &config::Dock) -> (f32, f32, f32, f32) {
+    let extra = dock_extra();
+    let side = dock_side_reserve(d);
+    let w = d.bar_width() + 2.0 * side;
+    if extra <= 0.5 {
+        (side, dock_top_reserve(), d.bar_width(), d.bar_height())
+    } else {
+        // +8：给悬停名字气泡与菜单投影留几像素（悬停中多接几像素点击无副作用）；
+        // 再夹到顶部预留内 —— 区域越出窗口的部分不生效（菜单会被裁），这里做最后一道闸门
+        let e = (extra + 8.0).min(dock_top_reserve());
+        (0.0, dock_top_reserve() - e, w, d.bar_height() + e)
+    }
+}
+
+/// 把窗口区域设成当前档位该有的样子。
+/// ⚠️ SetWindowRgn 成功后 region 归系统所有（别再 DeleteObject）；区域外的点不属于本窗 ——
+/// 这就是「余量按需存在」的落地方式，比 HTTRANSPARENT 干净（不受同线程限制）。
+fn dock_apply_region(w: &WebviewWindow, d: &config::Dock) {
+    let Some(hwnd) = hwnd_of(w) else { return };
+    let s = w.scale_factor().unwrap_or(1.0) as f32;
+    let (x, y, cw, ch) = dock_region_rect(d);
+    let (px, py, px2, py2) = (
+        (x * s).round() as i32,
+        (y * s).round() as i32,
+        ((x + cw) * s).round() as i32,
+        ((y + ch) * s).round() as i32,
+    );
+    unsafe {
+        use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+        let r = CreateRectRgn(px, py, px2, py2);
+        SetWindowRgn(hwnd, r, 1);
+    }
 }
 
 /// 用一次（原子）SetWindowPos 把 Dock 摆到当前余量态该在的位置/尺寸：
@@ -1873,8 +1971,7 @@ fn dock_window_rect(d: &config::Dock, extra: f32) -> (f32, f32, f32, f32) {
 fn dock_apply_geom(w: &WebviewWindow, d: &config::Dock) {
     dock_set_pointer_box(d);
     let Some(hwnd) = hwnd_of(w) else { return };
-    let extra = dock_extra();
-    let (x, y, cw, ch) = dock_window_rect(d, extra);
+    let (x, y, cw, ch) = dock_window_rect(d);
     let s = w.scale_factor().unwrap_or(1.0) as f32;
     let (px, py, pw, ph) = (
         (x * s).round() as i32,
@@ -1898,23 +1995,18 @@ fn dock_apply_geom(w: &WebviewWindow, d: &config::Dock) {
         );
     }
     let _ = w.eval("window.__onResize && window.__onResize()");
+    dock_apply_region(w, d);   // 几何固定，但条宽/档位/余量变了区域要跟着重摆
 }
 
-/// E3：鼠标压到玻璃条上（grown=true）/ 离开条与放大图标（false）→ 开关余量态。
-/// 常态窗口只有玻璃条那么高，所以「上方 28px 透明区吃点击」这个问题在结构上就不存在；
-/// 长高只为给放大图标腾渲染空间（见 DOCK_MARGIN 注释里的两条实测结论）。
-/// ⚠️ 开菜单时窗口高度以菜单为准（DOCK_MENU_EXTRA）—— 这里只改悬停那一半，别把菜单顶掉。
+/// E3/F+2：鼠标压到玻璃条上（grown=true）/ 离开条与放大图标（false）→ 切换窗口**区域**。
+/// 常态区域只有玻璃条（上方 136 预留既不可见也不吃点击，见 `dock_region_rect`）；放开区域只为给
+/// 放大图标/气泡腾渲染与命中空间。**窗口几何自始至终不变**（改了就会在合成器上跳一帧，见坑 18）。
 #[tauri::command]
 async fn dock_hover(app: AppHandle, grown: bool) -> Result<(), String> {
-    let prev = dock_extra();
     DOCK_GROWN.store(grown, Ordering::Relaxed);
-    let now = dock_extra();
-    if (now - prev).abs() < 0.5 {
-        return Ok(()); // 有效余量没变（含「菜单撑着」的情形），别白摆一次窗口
-    }
     let cfg = Config::load();
     if let Some(w) = app.get_webview_window(dock_label()) {
-        dock_apply_geom(&w, &cfg.dock);
+        dock_apply_region(&w, &cfg.dock);
     }
     Ok(())
 }
@@ -1923,16 +2015,12 @@ async fn dock_hover(app: AppHandle, grown: bool) -> Result<(), String> {
 /// 窗口高度取「悬停 28」与「菜单高度」的较大者，所以先开菜单再划走鼠标不会把菜单压扁。
 #[tauri::command]
 async fn dock_menu(app: AppHandle, open: bool, extra: f32) -> Result<(), String> {
-    let want = if open { extra.clamp(0.0, 480.0).round() as i32 } else { 0 };
-    let prev = dock_extra();
+    // 夹在预留内：区域不能越出窗口（越出部分不生效 → 菜单会被裁）
+    let want = if open { extra.clamp(0.0, DOCK_MENU_RESERVE - 8.0).round() as i32 } else { 0 };
     DOCK_MENU_EXTRA.store(want, Ordering::Relaxed);
-    let now = dock_extra();
-    if (now - prev).abs() < 0.5 {
-        return Ok(());
-    }
     let cfg = Config::load();
     if let Some(w) = app.get_webview_window(dock_label()) {
-        dock_apply_geom(&w, &cfg.dock);
+        dock_apply_region(&w, &cfg.dock);
     }
     Ok(())
 }
@@ -2002,8 +2090,8 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
     DOCK_MENU_EXTRA.store(0, Ordering::Relaxed);
     *DOCK_SELF_RECT.lock().unwrap() = [0, 0, 0, 0];
     dock_set_pointer_box(&dcur);
-    // 常态只有玻璃条那么高（长度 64 而不是 92）：上方没有隐形挡鼠标的余量区
-    let (wx, wy, ww, wh) = dock_window_rect(&dcur, 0.0);
+    // 窗口**固定**（条 + 上方预留 + 两侧侧向量）；余量靠区域按需放开，几何永不变
+    let (wx, wy, ww, wh) = dock_window_rect(&dcur);
     let url = dock_url(d, &cfg.settings);
     let win = match WebviewWindowBuilder::new(app, dock_label(), WebviewUrl::App(url.into()))
         .title("MiniCard · Dock")
@@ -2036,6 +2124,7 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
             apply_desktop_zorder(h);
         }
     }
+    dock_apply_region(&win, &cfg.dock);   // 初始区域 = 常态（只有玻璃条，上方预留不吃点击）
     nudge_and_show(&win, [ww, wh]);
 
     // 拖动落盘：写「中心 x + 上边缘 y」（宽随图标数变，按中心回推才不会漂）。
@@ -2095,8 +2184,8 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
                 .unwrap_or(sz[0] as f64);
             let mut cfg = Config::load();
             cfg.dock.cx = (logical.0 as f64 + w / 2.0) as f32;
-            // 存的是「虚拟 92 框的上边缘」= 条顶边往上 28：窗口上边缘比它低 (28 - 当前余量)
-            let grow = DOCK_MARGIN - dock_extra();
+            // 存的是「虚拟 92 框的上边缘」= 条顶边往上 28：窗口上边缘比它高 (预留 − 28)，恒定
+            let grow = DOCK_MARGIN - dock_top_reserve();
             cfg.dock.y = logical.1 as f32 - grow;
             let _ = cfg.save();
             push_dock_glass(&app_move, &win_ev);
@@ -2132,7 +2221,7 @@ fn sync_dock(app: &AppHandle, cfg: &Config) {
     }
     dock_set_pointer_box(&cfg.dock);
     // 尺寸 / 位置：宽随条目数与档位变，高随「余量态」变（常态 = 只有玻璃条那么高 + 上边缘下移 28）
-    let want = dock_window_rect(&cfg.dock, dock_extra());
+    let want = dock_window_rect(&cfg.dock);
     if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
         let s = w.scale_factor().unwrap_or(1.0) as f32;
         let (cx, cy) = (pos.x as f32 / s, pos.y as f32 / s);
@@ -2904,8 +2993,10 @@ mod tests {
         assert!(!is_shell_class_name(""));
     }
 
-    /// E3 余量按需存在（F2 起余量还可能是菜单撑的）：常态窗口 = 只有玻璃条高（上方没有隐形挡鼠标区），
-    /// 长高态才加 28px / 菜单高；两种状态下**玻璃条在屏幕上的位置必须逐像素一致**（条贴窗口底边 + 上边缘跟着挪）。
+    /// F+2：余量靠**窗口区域**按需放开，窗口几何**永不因悬停/菜单而变**
+    /// （改几何必在合成器上留一帧错位 —— 实测见 docs/dock-spike.md 坑 18）。
+    /// 条顶边恒 = y + 28（虚拟 92 框口径不变）；区域框在「条 / 条+余量 / 条+菜单段」间切，
+    /// 底边都钉在窗口底边；指针关注区 = 整个固定窗口。
     #[test]
     fn dock_margin_is_on_demand_and_bar_stays_put() {
         let mut d = super::config::Dock::default();
@@ -2914,44 +3005,59 @@ mod tests {
         d.size = 48;
         assert_eq!(d.bar_height(), 64.0);
         assert_eq!(d.bar_width(), 24.0, "空 Dock 只剩左右内边距");
-        // 全局余量态归零（同一个进程里别的用例可能动过）
         super::DOCK_GROWN.store(false, std::sync::atomic::Ordering::Relaxed);
         super::DOCK_MENU_EXTRA.store(0, std::sync::atomic::Ordering::Relaxed);
 
-        let idle = super::dock_window_rect(&d, 0.0);
-        let grown = super::dock_window_rect(&d, super::DOCK_MARGIN);
-        // 常态：高 = 条高，上边缘 = y + 28
-        assert_eq!((idle.1, idle.3), (1028.0, 64.0));
-        // 长高态：高 = 92，上边缘 = y（长高的那 28 全在条上方）
-        assert_eq!((grown.1, grown.3), (1000.0, 92.0));
-        // 两者底边（= 条底边）与中心 x 必须一致
-        assert_eq!(idle.1 + idle.3, grown.1 + grown.3);
-        assert_eq!(idle.0 + idle.2 / 2.0, grown.0 + grown.2 / 2.0);
-        assert_eq!(grown.0 + grown.2 / 2.0, d.cx);
-
-        // 右键菜单：加高量由页面按菜单实测高度报来（比 28 余量高），底边同样钉住
-        let menu = super::dock_window_rect(&d, 28.0 + 3.0 * 32.0 + 16.0);
-        assert_eq!(menu.3, 64.0 + 140.0);
-        assert_eq!(menu.1 + menu.3, idle.1 + idle.3, "菜单态条底边不动");
-        assert_eq!(menu.1 + menu.3 - 64.0 - 28.0, 1000.0, "条顶边仍 = y + 28");
-
-        // 档位跟着走：56 档条高 72、放大上限 1 + 36/56
-        d.size = 56;
-        let g56 = super::dock_window_rect(&d, super::DOCK_MARGIN);
-        assert_eq!(g56.3, 72.0 + super::DOCK_MARGIN);
-        // 图标数改宽度后仍以 cx 为中心
-        d.items = (0..5)
-            .map(|i| super::config::DockItem {
-                id: format!("i{i}"),
-                ..Default::default()
-            })
+        // 六图标（用户那台就是 6 个）：窗口固定 = 条宽 + 两侧侧向量
+        d.items = (0..6)
+            .map(|i| super::config::DockItem { id: format!("i{i}"), ..Default::default() })
             .collect();
-        let g5 = super::dock_window_rect(&d, 0.0);
-        assert_eq!(g5.2, 5.0 * (56.0 + 12.0) + 24.0);
-        assert_eq!(g5.0 + g5.2 / 2.0, d.cx);
-        // 指针关注区 = 虚拟 92 框（条 + 28 余量），与窗口实际几何无关
+        let side = super::dock_side_reserve(&d);
+        assert!(side >= 24.0, "侧向量要盖住悬停外扩（实测最坏 24.3）：{side}");
+        let wr = super::dock_window_rect(&d);
+        assert_eq!(wr.0 + wr.2 / 2.0, d.cx, "窗口仍以 cx 为中心");
+        assert_eq!(wr.2, d.bar_width() + 2.0 * side);
+        assert_eq!(wr.1, 1028.0 - super::dock_top_reserve());
+        assert_eq!(wr.1 + wr.3, 1028.0 + 64.0, "条底边 = 窗口底边");
+        assert_eq!(super::dock_bar_origin(&d).1, super::dock_top_reserve());
+
+        // 悬停 / 菜单都不动窗口几何（这是 F+2 的全部意义）
+        super::DOCK_GROWN.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(super::dock_window_rect(&d), wr, "悬停不改几何");
+        super::DOCK_MENU_EXTRA.store(140, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(super::dock_window_rect(&d), wr, "开菜单不改几何");
+
+        // 区域：常态只有条；悬停向上放开；菜单再放开到菜单段 —— 底边都不动、都不越出窗口
+        super::DOCK_MENU_EXTRA.store(0, std::sync::atomic::Ordering::Relaxed);
+        super::DOCK_GROWN.store(false, std::sync::atomic::Ordering::Relaxed);
+        let r0 = super::dock_region_rect(&d);
+        assert_eq!((r0.1, r0.3), (super::dock_top_reserve(), 64.0), "常态区域 = 只有玻璃条");
+        assert_eq!(r0.2, d.bar_width(), "常态区域宽度 = 条宽");
+        super::DOCK_GROWN.store(true, std::sync::atomic::Ordering::Relaxed);
+        let r1 = super::dock_region_rect(&d);
+        assert!(r1.1 < r0.1 && r1.3 > r0.3, "悬停区域向上放开");
+        assert_eq!(r1.1 + r1.3, r0.1 + r0.3, "区域底边（= 条底边）不动");
+        super::DOCK_MENU_EXTRA.store(140, std::sync::atomic::Ordering::Relaxed);
+        let r2 = super::dock_region_rect(&d);
+        assert!(r2.1 < r1.1, "菜单区域比悬停更高");
+        assert_eq!(r2.1 + r2.3, r0.1 + r0.3);
+        assert!(r2.1 >= 0.0 && r2.1 + r2.3 <= wr.3 + 0.5, "区域不越出窗口（顶部预留是最后一道闸门）");
+        assert_eq!(r2.1, 0.0, "菜单要的高度超过预留 → 夹在预留内（生产路径 dock_menu 先夹一次）");
+        super::DOCK_MENU_EXTRA.store(0, std::sync::atomic::Ordering::Relaxed);
+        super::DOCK_GROWN.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // 指针关注区 = 整个固定窗口
         let bx = super::dock_pointer_box(&d);
-        assert_eq!((bx[1], bx[3]), (d.y, 72.0 + super::DOCK_MARGIN));
-        assert_eq!(bx[0] + bx[2] / 2.0, d.cx);
+        assert_eq!((bx[0], bx[1], bx[2], bx[3]), wr);
+
+        // 档位跟着走：56 档条高 72；图标数改宽度后仍以 cx 为中心
+        d.size = 56;
+        assert_eq!(super::dock_window_rect(&d).3, 72.0 + super::dock_top_reserve());
+        d.items = (0..5)
+            .map(|i| super::config::DockItem { id: format!("i{i}"), ..Default::default() })
+            .collect();
+        let g5 = super::dock_window_rect(&d);
+        assert_eq!(g5.2, 5.0 * (56.0 + 12.0) + 24.0 + 2.0 * super::dock_side_reserve(&d));
+        assert_eq!(g5.0 + g5.2 / 2.0, d.cx);
     }
 }

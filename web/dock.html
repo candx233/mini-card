@@ -8,7 +8,7 @@
   /* ─── 界面字体：MiSans（子集与许可见 web/fonts/，与 card.html 同源） ─── */
   @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 400; font-display: block; src: url("fonts/MiSans-Regular.woff2") format("woff2"); }
   @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 500; font-display: block; src: url("fonts/MiSans-Medium.woff2") format("woff2"); }
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 600; font-display: block; src: url("fonts/MiSans-Semibold.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 600; font-display: block; src: url("fonts/MiSans-SemiBold.woff2") format("woff2"); }
   @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 700; font-display: block; src: url("fonts/MiSans-Bold.woff2") format("woff2"); }
   :root {
     --surface: oklch(0.966 0.005 258.3 / 0.08);
@@ -26,14 +26,17 @@
     /* 气泡：暗底白字（亮壁纸上也读得清）；亮主题在 __setTheme 里翻过来 */
     --bubble-bg: color-mix(in oklch, var(--bg) 84%, transparent);
     --bubble-fg: var(--fg);
-    /* Dock 规格（docs/dock-plan.md §1；JS 按 URL 参数覆盖） */
+    /* Dock 规格（docs/dock-plan.md §1；JS 按 URL 参数覆盖）
+       F+2/F+3：窗口**固定** = 条 + 上方预留 136 + 两侧侧向量；悬停时由**条自身**向外扩（不动窗口） */
     --icon: 48px;        /* 图标边长 32/40/48/56 */
     --gap: 12px;         /* 图标间距 */
-    --pad: 12px;         /* 左右内边距 */
+    --pad: 18px;         /* 条内左右内边距（实测恒 18：条宽 n*60+24 与内容之差的一半） */
     --bar-h: 64px;       /* 玻璃条高 = 图标 + 上下留白 8×2 */
     --radius-dock: 20px; /* 比卡片 16 更圆 */
     --radius-item: 11px; /* 48px 图标的圆角（≈23%，Windows 图标规范同量级） */
-    --margin-top: 28px;  /* 窗口高 = 玻璃条 + 放大余量（窗口上方的透明区） */
+    --top-reserve: 136px;/* 窗口上方常备预留（悬停 28 与菜单预留取大者；由 Rust 的区域按需放开） */
+    --bar-x: 0px;        /* 玻璃条在窗内的左边缘（逐帧由 JS 写：悬停时向两侧外扩） */
+    --bar-w: 384px;      /* 玻璃条宽（逐帧由 JS 写） */
   }
   *, *::before, *::after { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
@@ -41,10 +44,11 @@
     color: var(--fg); font-family: var(--font-body); font-size: 13px; line-height: 1.55;
     -webkit-font-smoothing: antialiased; user-select: none; cursor: default;
   }
-  /* 整窗就是「玻璃条 + 上方 28px 透明余量」：条贴底边，圆角裁在 .barwrap 上，
-     条目放在 .dock 直下（不裁），放大时向上顶进余量区。 */
+  /* 玻璃条：贴窗口**底边**，宽度/左缘逐帧由 JS 写（悬停时向两侧扩，把放大后的图标包住）。
+     窗口自身固定 = 条 + 上方 136 预留 + 两侧侧向量；常态那 136 由 Rust 的窗口区域裁掉。 */
   .dock {
-    position: absolute; left: 0; right: 0; bottom: 0; height: var(--bar-h);
+    position: absolute; bottom: 0; height: var(--bar-h);
+    left: var(--bar-x); width: var(--bar-w);
     border-radius: var(--radius-dock);
     background: none;
   }
@@ -61,23 +65,24 @@
     border-radius: inherit;
     pointer-events: none;
   }
-  .items {
-    position: relative; z-index: 2;
-    height: 100%; display: flex; align-items: flex-end; justify-content: center;
-    gap: var(--gap); padding: 0 var(--pad) 8px;
+  .items {                                 /* 条目层：与窗口同坐标；条目各自绝对定位 + translate */
+    position: absolute; inset: 0; z-index: 2; pointer-events: none;
   }
   .item {
-    position: relative; flex: 0 0 auto;
+    position: absolute; left: 0; bottom: 8px;
     width: var(--icon); height: var(--icon);
     border-radius: var(--radius-item);
     display: grid; place-items: center;
-    background: var(--fg-soft);
-    border: 1px solid var(--border);
     color: var(--fg);
-    /* 放大走**独立的 scale 属性**（rAF 逐帧写），transform 留给启动弹跳的 keyframes —— 两条互不打架；
+    pointer-events: auto;
+    /* 放大写**独立 scale 属性**、位移写**独立 translate 属性**（都逐帧由 rAF 写）：
+       transform 留给启动弹跳的 keyframes —— 三条各自独立才互不打架；
        也不写 transition：逐帧值再叠过渡会互相拖后腿（skill「动效铁律」） */
     transform-origin: bottom center;
   }
+  /* F+1：真图标条目**不画底也不画描边**（以前那圈 1px 亮环 + 淡底看着就像「外面套了个小框」）；
+     首字母 / URL 兜底块保留这套底 —— 它本身就是「图标替身」，不画就没形了。 */
+  .item.noicon { background: var(--fg-soft); border: 1px solid var(--border); }
   /* 图标自己裁圆角（条目框 overflow 必须可见，运行指示点要落在图标外面、贴到条上） */
   .item img { width: 100%; height: 100%; object-fit: contain; display: block; -webkit-user-drag: none; border-radius: var(--radius-item); }
   .item .glyph {
@@ -101,7 +106,9 @@
     100% { transform: translateY(0) scale(1); }
   }
   .item.launching { animation: dock-bounce 0.44s cubic-bezier(0.22, 0.68, 0.3, 1) 1; }
-  /* 气泡：悬停显名字 / 启动时显「启动中…」（落在上方 28px 余量里，不挡条） */
+  /* 浮层：气泡 / 菜单 / 拖入标线都长在**窗口坐标**里（条会左右外扩，不能挂在条上） */
+  .ovl { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+  /* 气泡：悬停显名字 / 启动时显「启动中…」（落在上方预留下，不挡条） */
   .bubble {
     position: absolute; bottom: calc(var(--bar-h) + 6px); left: 50%;
     transform: translateX(-50%) translateY(2px);
@@ -112,7 +119,6 @@
     overflow: hidden; text-overflow: ellipsis;
     opacity: 0; pointer-events: none;
     transition: opacity 0.12s ease-out, transform 0.12s ease-out;
-    z-index: 5;
   }
   .bubble.on { opacity: 1; transform: translateX(-50%) translateY(0); }
   .empty-hint {                            /* 无条目时的空态（骨架期可见，方便验收） */
@@ -129,7 +135,7 @@
     pointer-events: none;
   }
   .dropmark[hidden] { display: none; }
-  /* ─── F2 右键菜单：长在玻璃条上方（窗口按菜单高度临时长高，见 dock_menu）───
+  /* ─── F2 右键菜单：长在玻璃条上方（窗口上方常备 136 预留，开菜单只是把区域放开，几何不变）───
      形态按项目菜单语言（同 docs/tray-menu-plan.md §三）：行高 32 / 圆角 12 / 项内左右 10；
      底色用气泡那对变量（暗主题深底白字、亮主题白底深字，跟悬停名字气泡同一套） */
   .menu {
@@ -138,6 +144,7 @@
     background: var(--bubble-bg); border: 1px solid var(--border);
     box-shadow: 0 6px 18px color-mix(in oklch, oklch(0 0 0) 34%, transparent);
     display: flex; flex-direction: column; gap: 2px;
+    pointer-events: auto;
   }
   .menu[hidden] { display: none; }
   .menu .mi {
@@ -158,7 +165,9 @@
       <div class="wall" id="wall"></div>
       <div class="veil"></div>
     </div>
-    <div class="items" id="items"></div>
+  </div>
+  <div class="items" id="items"></div>
+  <div class="ovl">
     <div class="dropmark" id="dropmark" hidden></div>
     <div class="menu" id="menu" role="menu" hidden></div>
     <div class="bubble" id="bubble"></div>
@@ -169,19 +178,39 @@
   var params = new URLSearchParams(location.search);
   var T = window.__TAURI__;
 
-  /* ── 尺寸档（32/40/48/56）：条高 = 图标 + 16，圆角/间距按稿固定 ── */
+  /* ── 尺寸档（32/40/48/56）：条高 = 图标 + 16；条宽 = n*60 + 24（条内左右内边距恒 18） ── */
   var SIZE = Number(params.get('size')) || 48;
   var MAG = Number(params.get('mag'));
   if (!isFinite(MAG)) MAG = 55;
+  var PAD = 18;                 // 实测恒 18：条宽 n*(SIZE+12)+24 与内容之差的一半
+  var GAP = 12;
+  var KMAX = 1.75;
+  var REST = [];                // 各图标**静止**中心（窗内 x）：逐帧布局与放大衰减的锚点
+  var BARW0 = 384;              // 常态条宽
+  var BARL0 = 0;                // 常态条左缘（窗内 x）
+  var CUR = { x: 0, w: 0 };     // 当前已写入的条几何（避免每帧写 DOM）
+
+  function kMaxNow() { return 1 + 36 / SIZE; }
+  function itemCount() { return itemsEl ? itemsEl.children.length : 0; }
+
   function applySizing() {
     var s = document.documentElement.style;
     s.setProperty('--icon', SIZE + 'px');
     s.setProperty('--bar-h', (SIZE + 16) + 'px');
-    barOffsetY = (window.innerHeight || (SIZE + 16 + 28)) - (SIZE + 16);   // 玻璃条顶边在窗口内的 y
-    KMAX = kMaxNow();                                                       // 放大上限跟着档位走
+    KMAX = kMaxNow();
+    var n = itemCount();
+    BARW0 = n > 0 ? n * (SIZE + GAP) + 24 : 24;
+    var win = window.innerWidth || Math.round(BARW0 + 56);
+    BARL0 = (win - BARW0) / 2;
+    REST = [];
+    for (var i = 0; i < n; i++) REST.push(BARL0 + PAD + SIZE / 2 + i * (SIZE + GAP));
+    setBar(BARL0, BARW0);
     drawWall();
   }
-  window.__onResize = function () { applySizing(); };
+  window.__onResize = function () {   // Rust 摆完窗口（建窗/条目数变）会发这一枪
+    applySizing();
+    syncMagBoxes();
+  };
 
   /* ── 玻璃厚度 / 模糊 / 明暗（与 card.html 同口径） ── */
   function setGlass(v) {
@@ -203,17 +232,31 @@
   };
   if (params.get('dark') === '0') window.__setTheme(false);
 
-  /* ── 磨砂层：壁纸切片 + CSS blur（与 card.html 同一套数学；条贴窗口底边 → 加 barOffsetY） ── */
+  /* ── 玻璃条几何：左缘/宽逐帧写 CSS 变量（悬停时条向两侧扩，把放大后的行包住） ── */
+  function setBar(x, w) {
+    if (Math.abs(x - CUR.x) < 0.25 && Math.abs(w - CUR.w) < 0.25) return false;
+    CUR.x = x; CUR.w = w;
+    var s = document.documentElement.style;
+    s.setProperty('--bar-x', x.toFixed(2) + 'px');
+    s.setProperty('--bar-w', w.toFixed(2) + 'px');
+    return true;
+  }
+
+  /* ── 磨砂层：壁纸切片 + CSS blur（与 card.html 同一套数学） ──
+     条左缘/顶边在窗内会动（悬停外扩 + 贴底边）→ 位置用 CUR.x / barOffsetY 补偿，
+     保证条里显示的永远是**屏幕上那一段**壁纸。 */
   var wallEl = document.getElementById('wall');
   var wallImg = null, wallPos = [0, 0], wallMon = [0, 0], wallGeo = null, wallPad = 120;
   var barOffsetY = 0;
+  function barTopY() { return (window.innerHeight || 0) - (SIZE + 16); }
   function drawWall() {
     if (!wallEl || !wallGeo || !wallImg) return;
+    barOffsetY = barTopY();
     wallEl.style.backgroundImage = 'url("' + wallImg + '")';
     wallEl.style.backgroundSize = wallGeo.bw.toFixed(1) + 'px ' + wallGeo.bh.toFixed(1) + 'px';
-    // 玻璃条左上角的屏幕坐标 = 窗口坐标 + (0, 窗口高 − 条高)
+    // 条左上角的屏幕坐标 = 窗口坐标 + (条左缘, 窗口高 − 条高)
     wallEl.style.backgroundPosition =
-      (-(wallGeo.ox + wallPos[0] - wallPad)).toFixed(1) + 'px ' +
+      (-(wallGeo.ox + wallPos[0] + CUR.x - wallPad)).toFixed(1) + 'px ' +
       (-(wallGeo.oy + wallPos[1] + barOffsetY - wallPad)).toFixed(1) + 'px';
   }
   function setBlur(v) {
@@ -241,8 +284,17 @@
     im.src = p.wall;
   }
   window.__setWall = setWall;
+  /* 轻量位置更新（Rust 在窗口被拖走/换屏时推；F+2 起悬停与菜单都不再动窗口几何） */
+  window.__setWallPos = function (xy) {
+    if (!xy || !xy.length) return;
+    wallPos = xy;
+    drawWall();
+  };
   window.__setBlur = setBlur;
-  window.__getWall = function () { return { mon: wallMon, pos: wallPos, pad: wallPad, geo: wallGeo, barOffsetY: barOffsetY }; };
+  window.__getWall = function () {
+    return { mon: wallMon, pos: wallPos, pad: wallPad, geo: wallGeo, barOffsetY: barOffsetY,
+             barX: CUR.x, barW: CUR.w, innerH: window.innerHeight };
+  };
 
   /* ── 条目渲染 ── */
   var itemsEl = document.getElementById('items');
@@ -268,7 +320,8 @@
     itemsEl.innerHTML = '';
     items.forEach(function (it) {
       var el = document.createElement('div');
-      el.className = 'item';
+      // F+1：真图标条目无底无框；首字母/URL 兜底块保留淡底 + 描边（它是图标替身）
+      el.className = 'item' + (it.icon ? '' : ' noicon');
       el.dataset.id = it.id || '';
       el.dataset.name = it.name || '';
       el.dataset.path = it.path || '';
@@ -289,8 +342,9 @@
       itemsEl.appendChild(el);
     });
     emptyEl.style.display = items.length ? 'none' : 'block';
+    applySizing();      // 条目数变了 → 条宽/静止位置重算
     applyRunning();     // 重建后按记忆补回指示点（不然每轮 __setDock 都把点擦掉）
-    syncMagBoxes();     // 同理补回放大（按当前指针位置直接就位）
+    syncMagBoxes();     // 同理补回放大与位移（按当前指针位置直接就位）
   }
   window.__setDock = function (p) {
     if (!p) return;
@@ -314,28 +368,44 @@
   };
   window.__getRunning = function () { return RUNNING; };
 
-  /* ── E1 悬停放大（dock-plan P3）：rAF 逐帧写 scale，按鼠标距离衰减 ──
-     k = 1 + mag/100 · exp(−(d/(iconW·1.3))²)；两稿标定 mag=55 → 中心 1.55 / 邻位 1.22 / 再远 1.01
-     上限 1 + 36/size：图标底距窗口底 8px，再高就顶出窗口被裁（48 档 → 1.75）
-     铁律：不用无记忆 CSS 动画 —— 这里每帧都由「指针位置」算出来，窗口重建 / resize 都不存在重放 */
-  var KMAX = 1.75, GROWN = false, GROWN_REQ = false;
+  /* ── E1/F+3 悬停放大 + 位移（dock-plan P3 + F+3 A 案）──
+     k = 1 + mag/100 · exp(−(d/(iconW·1.3))²)，上限 1 + 36/size（48 档 1.75）；
+     **位移**：被指图标站住不动，两侧图标按「视觉间距 = gap」向两边让位 → 相邻视觉矩形零重叠；
+     **条宽**：条 = 让位后的行 + 两侧 pad → 悬停时整条玻璃向两侧「呼吸」外扩（窗口几何不变，
+     Rust 的 dock_side_reserve 已按同一套算法预留了外扩量）。
+     铁律：不用无记忆 CSS 动画 —— 每帧都由「指针位置」算出来，窗口重建 / resize 都不存在重放 */
+  var GROWN = false, GROWN_REQ = false;
   var IN_WIN = false, MX = -1e9, CURS = [], RAF = 0, RAF_T = 0;
+  var POS = [], BARS = [0, 0];
   var PT_N = 0, HOVER_N = 0, HOVER_ERR = '';   // 诊断计数（验收探针读 __getMag）
-  function kMaxNow() { return 1 + 36 / SIZE; }
   function kOf(d) {
     var k = 1 + (MAG / 100) * Math.exp(-Math.pow(d / (SIZE * 1.3), 2));
     return k > KMAX ? KMAX : k;
   }
-  function centers() {
-    var out = [];
-    Array.prototype.forEach.call(itemsEl.children, function (el) {
-      out.push(el.offsetLeft + el.offsetWidth / 2);   // 中心 x（窗内 CSS px；scale 不改布局盒）
-    });
-    return out;
+  /* 由当前 k 表算出每个图标的中心 x（窗内）与被指图标：被指图标锚在**静止**中心，
+     其余按「半宽 + gap + 半宽」向两侧铺开 —— 与 Rust dock_side_reserve 逐行同构 */
+  function layout(ks) {
+    var n = ks.length;
+    POS = new Array(n);
+    if (!n) { BARS = [BARL0, BARW0]; return; }
+    var j = 0, best = 1e9;
+    for (var i = 0; i < n; i++) {
+      var d = Math.abs(MX - REST[i]);
+      if (d < best) { best = d; j = i; }
+    }
+    POS[j] = REST[j];
+    for (var a = j + 1; a < n; a++) POS[a] = POS[a - 1] + SIZE * ks[a - 1] / 2 + GAP + SIZE * ks[a] / 2;
+    for (var b = j - 1; b >= 0; b--) POS[b] = POS[b + 1] - SIZE * ks[b + 1] / 2 - GAP - SIZE * ks[b] / 2;
+    var rowL = POS[0] - SIZE * ks[0] / 2, rowR = POS[n - 1] + SIZE * ks[n - 1] / 2;
+    BARS = [rowL - PAD, rowR - rowL + 2 * PAD];
   }
   function applyMag(ks) {
-    Array.prototype.forEach.call(itemsEl.children, function (el, i) {
+    var n = itemsEl.children.length;
+    for (var i = 0; i < n; i++) {
+      var el = itemsEl.children[i];
       var v = ks[i] || 1;
+      var tx = (POS[i] != null ? POS[i] : (REST[i] || 0)) - SIZE / 2;
+      el.style.translate = tx.toFixed(2) + 'px 0';
       if (v > 1.0005) {
         el.style.scale = String(v);
         el.style.setProperty('--ki', String(1 / v));   // 指示点反缩放（保持 4px）
@@ -343,36 +413,40 @@
         el.style.scale = '';
         el.style.removeProperty('--ki');
       }
-    });
+    }
+    if (setBar(BARS[0], BARS[1])) drawWall();   // 条动过 → 磨砂切片位置跟着补
   }
   function rafTick(t) {
     RAF = 0;
     var dt = RAF_T ? Math.min(0.12, (t - RAF_T) / 1000) : 0.016;
     RAF_T = t;
-    var cs = centers();
-    if (CURS.length !== cs.length) CURS = cs.map(function () { return 1; });
+    var n = itemsEl.children.length;
+    if (CURS.length !== n) CURS = REST.map(function () { return 1; });
     var a = 1 - Math.exp(-dt / 0.045);        // 45ms 时间常数：跟手，松手缓出
     var busy = false;
-    for (var i = 0; i < cs.length; i++) {
-      // 菜单开着时图标一概回落到 1.0（菜单就长在图标上方，放大只会互相压）
-      var tgt = (IN_WIN && !MENU_OPEN) ? kOf(Math.abs(MX - cs[i])) : 1;
+    for (var i = 0; i < n; i++) {
+      // 菜单开着 / 拖入进行中：图标一概回落到 1.0（菜单就长在图标上方；拖拽时布局要稳，
+      // 插入标线与 Rust 的落点判位都按静止几何走）
+      var tgt = (IN_WIN && !MENU_OPEN && !DROP_ACTIVE) ? kOf(Math.abs(MX - REST[i])) : 1;
       if (Math.abs(tgt - CURS[i]) < 0.002) { CURS[i] = tgt; continue; }
       CURS[i] += (tgt - CURS[i]) * a;
       busy = true;
     }
+    layout(CURS);
     applyMag(CURS);
     if (busy) startRaf(); else RAF_T = 0;
   }
   function startRaf() { if (!RAF) RAF = requestAnimationFrame(rafTick); }
   function syncMagBoxes() {   // 条目重建后按当前指针位置**直接就位**（不闪回 1，再缓动到新目标）
-    var cs = centers();
-    CURS = cs.map(function (cx) { return IN_WIN ? kOf(Math.abs(MX - cx)) : 1; });
+    CURS = REST.map(function (cx) { return IN_WIN ? kOf(Math.abs(MX - cx)) : 1; });
+    layout(CURS);
     applyMag(CURS);
     if (IN_WIN) startRaf();
   }
   window.__getMag = function () {
     return { mag: MAG, size: SIZE, kMax: kMaxNow(), inWin: IN_WIN, pointerX: IN_WIN ? MX : null,
              grown: GROWN, innerH: window.innerHeight, barTop: barTopY(), k: CURS.slice(),
+             rest: REST.slice(), pos: POS.slice(), barX: BARS[0], barW: BARS[1], pad: PAD,
              pt: PT_N, hoverReq: GROWN_REQ, hoverOk: HOVER_N, hoverErr: HOVER_ERR,
              rects: Array.prototype.map.call(itemsEl.children, function (el) {
                var r = el.getBoundingClientRect();
@@ -390,7 +464,7 @@
   };
   /* 指针位置只认 Rust 推来的**真光标**（窗口内 CSS px；null = 光标不在 Dock 那一带）。
      为什么不吃自己的 mousemove：WebView2 会在窗口几何变化前后补发坐标不实的合成 mousemove
-     （实测：光标明明在余量带里，收到的却是 (62, 90) 这种点）→ 「长高/缩回」会被带成来回抖。
+     （实测：光标明明在余量带里，收到的却是 (62, 90) 这种点）→ 「放开/收回」会被带成来回抖。
      所以：Rust 每 25/80ms 读一次 GetCursorPos 推过来，页面只做纯函数判断。 */
   window.__setPointer = function (x, y) {
     PT_N++;
@@ -408,26 +482,30 @@
       if (!inMenu && !inBar) { closeMenu(); leaveDock(); }
       return;
     }
-    // 常态下光标停在条**上方**的余量带里：不放大（窗口只有条高，放大会被顶边裁掉一截），
-    // 等它真的压到条上（inBar）再长高 + 放大
-    if (inBar || GROWN) { IN_WIN = true; MX = x; }
-    else { IN_WIN = false; MX = -1e9; }
-    startRaf();
-    if (!GROWN) {
-      if (inBar) setGrown(true);
-    } else if (!inBar && !itemAtPoint(x, y)) {
-      leaveDock();          // 余量区里、且不在放大图标上 → 缩回条高，那 28px 还给下面的窗口
+    // 常态：压到条上 / 站在放大图标上（图标顶出条外那一块）→ 区域放开 + 放大；
+    // 其余（预留带里且不在图标上）→ 区域收回，那 28px 还给下面的窗口。
+    // 这两条都写成**幂等**的：状态机一旦因为「窗口重建 / 命令丢包」错位，下一拍就能自愈
+    // （别再用 `GROWN` 当门闩判断「要不要发请求」——实测漏一次就会永久卡住：页面以为开着、
+    //   Rust 那边其实收着，指针进条也不再请求，放大还在但区域不开，图标顶出去的部分被裁掉）
+    if (inBar || itemAtPoint(x, y)) {
+      IN_WIN = true; MX = x;
+      setGrown(true);
+    } else {
+      IN_WIN = false; MX = -1e9;
+      setGrown(false);
     }
+    startRaf();
   };
 
-  /* ── E3 余量按需存在：常态窗口**只有玻璃条那么高**（上方没有隐形挡鼠标的那 28px），
-     鼠标压到条上才把窗口临时长高 28px，给放大图标腾出渲染空间；指针挪进余量区又不在放大图标上
-     → 缩回条高，那 28px 立刻还给下面的窗口（点击真的落下去）。
-     为什么不用 dock-plan §8 坑 1 的原方案（WM_NCHITTEST 返 HTTRANSPARENT）：实测 ① 鼠标在
-     WebView2 子窗上方时顶层窗**根本收不到** WM_NCHITTEST；② HTTRANSPARENT 只对**同线程**窗口生效，
-     穿透不到别的进程（浏览器/编辑器），等于白做 —— 两枪都记在 docs/dock-spike.md 坑 13 */
-  function barTopY() { return (window.innerHeight || 0) - (SIZE + 16); }
-  function itemAtPoint(x, y) {   // 按**视觉**矩形命中（放大后图标会顶出布局盒）
+  /* ── E3/F+2 余量按需存在：窗口**几何固定**（条 + 上方 136 预留 + 两侧侧向量），
+     只在「放开 / 收回窗口区域」之间切 —— 区域外的点系统根本不认为属于本窗，点击会落到下面
+     **任意进程**的窗口（2026-10-16 实测 PASS：docs/verify/mc_dock_region_passthru.py）。
+     为什么不用 dock-plan §8 坑 1 的原方案（固定 92 + WM_NCHITTEST 返 HTTRANSPARENT）：
+     实测 ① 鼠标在 WebView2 子窗上方时顶层窗**根本收不到** WM_NCHITTEST；② HTTRANSPARENT
+     只对**同线程**窗口生效，穿透不到别的进程 —— 两枪都记在 docs/dock-spike.md 坑 13。
+     为什么不再按需改窗口几何（E 段老方案）：SetWindowPos 那一帧合成器会把旧画面按新矩形摆，
+     整条 Dock 会跳一帧 28px（坑 18 实测）；改成区域后这个跳帧**结构性消失**。 */
+  function itemAtPoint(x, y) {   // 按**视觉**矩形命中（放大后图标会顶出条外）
     var hit = null;
     Array.prototype.forEach.call(itemsEl.children, function (el) {
       if (hit) return;
@@ -439,10 +517,12 @@
   function setGrown(on) {
     if (PREVIEW || GROWN_REQ === on) return;
     GROWN_REQ = on;
+    GROWN = on;            // 区域态**跟请求同步**（乐观）—— __setPointer 的「收回」分支靠它判断，
+                           // 漏了这一句会变成：进过条以后区域永远开着（余量带一直吃点击）
     if (T && T.core) {
       T.core.invoke('dock_hover', { grown: on }).then(function () { HOVER_N++; }, function (err) {
         HOVER_ERR = String(err && err.message ? err.message : err);
-        GROWN_REQ = !on;
+        GROWN_REQ = !on; GROWN = !on;
       });
     }
   }
@@ -453,9 +533,8 @@
     document.addEventListener('mousemove', function (e) { PT_N++; IN_WIN = true; MX = e.clientX; startRaf(); });
     document.documentElement.addEventListener('mouseleave', function () { IN_WIN = false; MX = -1e9; startRaf(); });
   }
-  window.addEventListener('resize', function () {   // 窗口高变了 = 余量态变了（Rust 摆完窗口就发这一枪）
-    GROWN = (window.innerHeight - (SIZE + 16)) > 2;
-    GROWN_REQ = GROWN;
+  window.addEventListener('resize', function () {   // 只有条目数/档位变了才有真 resize（余量态不再动几何）
+    GROWN = false; GROWN_REQ = false;
     applySizing();
   });
 
@@ -482,7 +561,7 @@
   var dockEl = document.getElementById('dock');
   dockEl.addEventListener('mousedown', function (e) {
     if (PREVIEW || e.button !== 0) return;
-    // 图标上按下不拖整条（放大后的图标顶出布局盒，按视觉矩形兜底）
+    // 图标上按下不拖整条（放大后图标顶出条外、位移后的视觉矩形，按视觉矩形兜底）
     if (e.target && e.target.closest && e.target.closest('.item')) return;
     if (itemAtPoint(e.clientX, e.clientY)) return;
     if (holdTimer) clearTimeout(holdTimer);
@@ -503,8 +582,8 @@
     if (!bubbleEl) return;
     bubbleEl.textContent = text;
     if (item) {
-      var cx = item.offsetLeft + item.offsetWidth / 2;
-      bubbleEl.style.left = cx + 'px';
+      var r = item.getBoundingClientRect();          // 位移 + 放大后按**视觉**中心落点
+      bubbleEl.style.left = (r.left + r.width / 2) + 'px';
     }
     bubbleEl.classList.add('on');
     if (bubbleTimer) clearTimeout(bubbleTimer);
@@ -525,7 +604,7 @@
     setTimeout(function () { el.classList.remove('launching'); }, 460);
   }
   itemsEl.addEventListener('mousedown', function (e) {
-    // 图标上按下要拦住整条的拖动判定（含放大后顶出布局盒的视觉矩形）
+    // 图标上按下要拦住整条的拖动判定（含放大后顶出条外、位移后的视觉矩形）
     if (e.target && e.target.closest && e.target.closest('.item')) e.stopPropagation();
     else if (itemAtPoint(e.clientX, e.clientY)) e.stopPropagation();
   });
@@ -533,7 +612,7 @@
     if (PREVIEW || !T || !T.core) return;
     if (SUPPRESS_CLICK) { SUPPRESS_CLICK = false; return; }   // 这一击只用来收菜单
     var el = e.target && e.target.closest ? e.target.closest('.item') : null;
-    if (!el) el = itemAtPoint(e.clientX, e.clientY);   // 放大图标往上顶出布局盒：按视觉矩形兜底
+    if (!el) el = itemAtPoint(e.clientX, e.clientY);   // 放大图标顶出条外：按视觉矩形兜底
     if (!el) return;
     var id = el.dataset.id;
     if (!id) return;
@@ -562,26 +641,31 @@
 
   /* ── F1 拖入标线：Rust 的 DragDrop 事件推 `__setDrop({index})`（Enter/Over 推，Drop/Leave 推 null）──
      位置 = 第 index 个槽（两个图标之间），与 Rust 侧 `insert_index_for_x` 同一套几何：
-     图标 i 中心 = 12 + size/2 + i×(size+12)，槽在它左边缘外半个间距处 */
+     槽按**静止**布局算（拖入期间 DROP_ACTIVE → 图标不放大不位移，两边看到的几何一致） */
   var dropEl = document.getElementById('dropmark');
+  var DROP_ACTIVE = false;
   window.__setDrop = function (p) {
     if (!dropEl) return;
-    if (!p || typeof p.index !== 'number') { dropEl.hidden = true; return; }
+    if (!p || typeof p.index !== 'number') {
+      dropEl.hidden = true;
+      if (DROP_ACTIVE) { DROP_ACTIVE = false; startRaf(); }
+      return;
+    }
     var n = itemsEl.children.length;
     var i = Math.max(0, Math.min(n, p.index | 0));
-    var pitch = SIZE + 12;
+    var pitch = SIZE + GAP;
     dropEl.dataset.i = String(i);
-    dropEl.style.left = (12 + i * pitch - 6) + 'px';   // margin-left:-1px 让 2px 线居中落在槽上
+    dropEl.style.left = (BARL0 + PAD + i * pitch - GAP / 2) + 'px';   // margin-left:-1px 让 2px 线居中落在槽上
     dropEl.hidden = false;
+    if (!DROP_ACTIVE) { DROP_ACTIVE = true; startRaf(); }             // 拖入中：图标回静止布局
   };
   window.__getDrop = function () {
     return dropEl && !dropEl.hidden ? { index: Number(dropEl.dataset.i || -1), left: dropEl.offsetLeft } : null;
   };
 
   /* ── F2 右键菜单 ──
-     菜单长在玻璃条**上方** —— 窗口只有条那么高，所以开菜单时把「需要的高度」报给 Rust
-     （`dock_menu(open, extra)` → 窗口临时长高，条不动）。关闭路径：点项 / 点条上别处 /
-     指针走出「菜单 ∪ 条」（页面只认 Rust 推来的真光标，见 __setPointer）。
+     菜单长在玻璃条**上方** —— 窗口上方常备 136 预留，开菜单只是把区域放开（几何不变）。
+     关闭路径：点项 / 点条上别处 / 指针走出「菜单 ∪ 条」（页面只认 Rust 推来的真光标）。
      为什么不做失焦关闭：Dock 窗是 NOACTIVATE + 不可聚焦的，它根本收不到 blur（点桌面也不关）。 */
   var menuEl = document.getElementById('menu');
   var MENU_OPEN = false, MENU_ITEM = null;
@@ -614,11 +698,12 @@
     menuEl.hidden = false;
     var winW = window.innerWidth || 0;
     var mw = menuEl.offsetWidth, mh = menuEl.offsetHeight;
-    var ax = itemEl ? (itemEl.offsetLeft + itemEl.offsetWidth / 2) : clientX;   // 锚点：图标中心 / 空白处指针
+    var ir = itemEl ? itemEl.getBoundingClientRect() : null;    // 位移 + 放大 → 按视觉中心锚
+    var ax = ir ? (ir.left + ir.width / 2) : clientX;
     menuEl.style.left = Math.round(Math.max(8, Math.min(winW - 8 - mw, ax - mw / 2))) + 'px';
     MENU_OPEN = true;
     IN_WIN = false; MX = -1e9; startRaf();                                       // 菜单开着不放大
-    // 长高量 = 菜单高 + 贴条 6 + 顶部留白 10（给投影一点余地）
+    // 放开量 = 菜单高 + 贴条 6 + 顶部留白 10（给投影一点余地）
     menuExtra(true, mh + 16);
   }
   window.__getMenu = function () {
@@ -642,7 +727,7 @@
     if (e.target && e.target.closest && e.target.closest('.menu')) return;   // 菜单自己身上右键 → 保持不动
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     var el = e.target && e.target.closest ? e.target.closest('.item') : null;
-    if (!el) el = itemAtPoint(e.clientX, e.clientY);   // 放大图标顶出布局盒 → 按视觉矩形兜底
+    if (!el) el = itemAtPoint(e.clientX, e.clientY);   // 放大图标顶出条外 → 按视觉矩形兜底
     openMenu(el, e.clientX);
   });
   /* 菜单开着时，窗内（条上）的任意按下都先当「关菜单」——第一次点只收菜单，不激活图标（跟系统菜单一致） */

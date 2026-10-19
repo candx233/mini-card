@@ -223,10 +223,11 @@ impl Dock {
         [self.bar_width(), self.bar_height() + 28.0]
     }
 
-    /// 第 i 个图标在**窗内**的中心 x（逻辑 px）：左内边距 12 + 半个图标 + i × (图标 + 间距 12)。
-    /// 与 dock.html 的 `.items { padding: 0 12px 8px; gap: 12px }` 同一套数 —— 拖入落点判位用它。
+    /// 第 i 个图标在**条内**的中心 x（逻辑 px）：左内边距 18 + 半个图标 + i × (图标 + 间距 12)。
+    /// ⚠️ 内边距实测恒 18（条宽 `n*60+24` 与内容 `n*48+(n-1)*12` 之差的一半，`.items` 是居中布局）
+    /// —— 以前写 12 差了 6px；拖入落点判位与页面 dropmark 都用这个值。
     pub fn item_center_x(&self, i: usize) -> f32 {
-        12.0 + self.size as f32 / 2.0 + i as f32 * (self.size as f32 + 12.0)
+        18.0 + self.size as f32 / 2.0 + i as f32 * (self.size as f32 + 12.0)
     }
 
     /// 拖入落点（窗内 x，逻辑 px）→ 插入位次：落在第 i 个图标中心右侧 → 插到 i+1。
@@ -611,21 +612,21 @@ size = [320.0, 190.0]
         d.items = (0..4)
             .map(|i| DockItem { id: format!("i{i}"), ..DockItem::default() })
             .collect();
-        assert_eq!(d.item_center_x(0), 36.0);
-        assert_eq!(d.item_center_x(1), 96.0);
+        assert_eq!(d.item_center_x(0), 42.0, "内边距 18 + 半图标 24");
+        assert_eq!(d.item_center_x(1), 102.0);
         // 落点在各图标中心的左侧 → 插在它前面；右侧 → 插在它后面
         assert_eq!(d.insert_index_for_x(0.0), 0, "最左 → 第 0 位");
-        assert_eq!(d.insert_index_for_x(36.0), 0, "正好压在第 0 个中心 → 取左（不越到 1）");
-        assert_eq!(d.insert_index_for_x(36.5), 1, "越过第 0 个中心 → 第 1 位");
-        assert_eq!(d.insert_index_for_x(96.0), 1, "压在第 1 个中心 → 第 1 位");
+        assert_eq!(d.insert_index_for_x(42.0), 0, "正好压在第 0 个中心 → 取左（不越到 1）");
+        assert_eq!(d.insert_index_for_x(42.5), 1, "越过第 0 个中心 → 第 1 位");
+        assert_eq!(d.insert_index_for_x(102.0), 1, "压在第 1 个中心 → 第 1 位");
         assert_eq!(d.insert_index_for_x(120.0), 2, "第 1 与第 2 之间 → 第 2 位");
         assert_eq!(d.insert_index_for_x(9999.0), 4, "最右 → 追加到末尾");
         // 空 Dock：任何落点都是第 0 位
         assert_eq!(Dock::default().insert_index_for_x(123.0), 0);
-        // 档位跟着走：56 档中心 = 12 + 28 = 40
+        // 档位跟着走：56 档中心 = 18 + 28 = 46
         let mut d56 = Dock::default();
         d56.size = 56;
-        assert_eq!(d56.item_center_x(0), 40.0);
-        assert_eq!(d56.item_center_x(1), 108.0);
+        assert_eq!(d56.item_center_x(0), 46.0);
+        assert_eq!(d56.item_center_x(1), 114.0);
     }
 }
