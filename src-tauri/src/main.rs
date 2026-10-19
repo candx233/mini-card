@@ -2898,6 +2898,13 @@ fn main() {
                                 && cx <= boxr[0] + boxr[2] + 2.0
                                 && cy >= boxr[1] - 2.0
                                 && cy <= boxr[1] + boxr[3] + 2.0;
+                            if in_zone != was_in {
+                                // 诊断：进出关注区的转换 + 当时的关注框/光标（%TEMP%\minicard-mainwin.log）
+                                mlog(&format!(
+                                    "dock pointer: in_zone {} -> {} | box {:?} | cursor {:.0},{:.0} | win {:.0},{:.0} scale {:.2}",
+                                    was_in, in_zone, boxr, cx, cy, wl, wt_, s
+                                ));
+                            }
                             if in_zone {
                                 let _ = w.eval(&format!(
                                     "window.__setPointer && window.__setPointer({:.1}, {:.1});",
