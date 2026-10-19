@@ -1172,6 +1172,14 @@ const DOCK_MARGIN: f32 = 28.0;
 /// 3 项菜单 114 + 贴条 6 + 投影/顶部留白 ≈ 136。
 const DOCK_MENU_RESERVE: f32 = 136.0;
 /// Dock 窗当前是否处于「余量态」（页面按指针在不在条上推过来）—— 只切**窗口区域**，不动几何
+/// F++：区域动画（窗口局部逻辑 px：x0,y0,x1,y1）。见 `dock_apply_region` 的说明。
+static DOCK_REGION_CUR: Mutex<[f32; 4]> = Mutex::new([0.0, 0.0, 0.0, 0.0]);
+static DOCK_REGION_TGT: Mutex<[f32; 4]> = Mutex::new([0.0, 0.0, 0.0, 0.0]);
+static DOCK_REGION_WRITTEN: Mutex<[i32; 4]> = Mutex::new([i32::MIN; 4]);
+static DOCK_REGION_ON: AtomicBool = AtomicBool::new(false);
+const DOCK_REGION_TAU: f32 = 0.20;      // 200ms（页面条是 180ms，区域略慢 → 永远包得住）
+/// 常态区域左右各放开的余量（见 dock_region_rect）
+const DOCK_REGION_SLACK: f32 = 12.0;
 static DOCK_GROWN: AtomicBool = AtomicBool::new(false);
 /// 右键菜单要求的窗口加高量（逻辑 px，0 = 没开菜单）：菜单要长在条上方，比 28px 余量还高，
 /// 所以窗口高度取「悬停余量 28」与「菜单需要的高度」的较大者（F2）。
@@ -1937,7 +1945,15 @@ fn dock_region_rect(d: &config::Dock) -> (f32, f32, f32, f32) {
     let side = dock_side_reserve(d);
     let w = d.bar_width() + 2.0 * side;
     if extra <= 0.5 {
-        (side, dock_top_reserve(), d.bar_width(), d.bar_height())
+        // 常态比条本身左右各宽 DOCK_REGION_SLACK：进门那一拍页面先把条涨起来、看门狗要到
+        // 下一拍（闲档 80ms）才把区域放开 —— 这段窗口里条会长出 ~9px，没有余量就被裁一下
+        // （区域实测：10 个采样点里就这一处 6.5px 的裁切）。12px×64 的代价可以忽略。
+        (
+            side - DOCK_REGION_SLACK,
+            dock_top_reserve(),
+            d.bar_width() + 2.0 * DOCK_REGION_SLACK,
+            d.bar_height(),
+        )
     } else {
         // +8：给悬停名字气泡与菜单投影留几像素（悬停中多接几像素点击无副作用）；
         // 再夹到顶部预留内 —— 区域越出窗口的部分不生效（菜单会被裁），这里做最后一道闸门
@@ -1946,24 +1962,88 @@ fn dock_region_rect(d: &config::Dock) -> (f32, f32, f32, f32) {
     }
 }
 
-/// 把窗口区域设成当前档位该有的样子。
+/// 把窗口区域设成当前档位该有的样子（**只设目标**，动画交给指针看门狗逐拍缓动）。
 /// ⚠️ SetWindowRgn 成功后 region 归系统所有（别再 DeleteObject）；区域外的点不属于本窗 ——
 /// 这就是「余量按需存在」的落地方式，比 HTTRANSPARENT 干净（不受同线程限制）。
+///
+/// ⚠️ 为什么要缓动：区域是**裁剪**。离开那一拍页面里的条还在按 180ms 缓动往回收，
+/// 区域若瞬切回「只有条」的小矩形，还很大的条会被**直接裁掉**（实测反馈：
+/// 「缩回那一些有直接切掉 然后再条慢慢回到原来的位置」）。所以区域与页面同速收敛
+/// （τ 200ms，略慢于页面 180ms 留安全余量），保证任何一帧都包住正在缓动的条与放大图标。
 fn dock_apply_region(w: &WebviewWindow, d: &config::Dock) {
+    *DOCK_REGION_TGT.lock().unwrap() = dock_region_target(d);
+    if !DOCK_REGION_ON.load(Ordering::Relaxed) {
+        dock_region_snap(w);
+    }
+}
+
+fn dock_region_target(d: &config::Dock) -> [f32; 4] {
+    let (x, y, cw, ch) = dock_region_rect(d);
+    [x, y, x + cw, y + ch]
+}
+
+/// 立刻把区域落到目标（建窗 / 几何变化 / 换档用；悬停进出不要用这个）。
+fn dock_apply_region_snap(w: &WebviewWindow, d: &config::Dock) {
+    *DOCK_REGION_TGT.lock().unwrap() = dock_region_target(d);
+    dock_region_snap(w);
+}
+
+fn dock_region_snap(w: &WebviewWindow) {
+    let tgt = *DOCK_REGION_TGT.lock().unwrap();
+    *DOCK_REGION_CUR.lock().unwrap() = tgt;
+    DOCK_REGION_ON.store(true, Ordering::Relaxed);
+    dock_region_write(w, tgt);
+}
+
+fn dock_region_write(w: &WebviewWindow, r: [f32; 4]) {
     let Some(hwnd) = hwnd_of(w) else { return };
     let s = w.scale_factor().unwrap_or(1.0) as f32;
-    let (x, y, cw, ch) = dock_region_rect(d);
-    let (px, py, px2, py2) = (
-        (x * s).round() as i32,
-        (y * s).round() as i32,
-        ((x + cw) * s).round() as i32,
-        ((y + ch) * s).round() as i32,
-    );
+    let rounded = [
+        (r[0] * s).round() as i32,
+        (r[1] * s).round() as i32,
+        (r[2] * s).round() as i32,
+        (r[3] * s).round() as i32,
+    ];
+    {
+        let mut wr = DOCK_REGION_WRITTEN.lock().unwrap();
+        if *wr == rounded {
+            return;    // 像素级没变就别再 SetWindowRgn（省重绘）
+        }
+        *wr = rounded;
+    }
     unsafe {
         use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
-        let r = CreateRectRgn(px, py, px2, py2);
+        let r = CreateRectRgn(rounded[0], rounded[1], rounded[2], rounded[3]);
         SetWindowRgn(hwnd, r, 1);
     }
+}
+
+/// 看门狗每拍调一次：区域向目标做指数缓动（τ = DOCK_REGION_TAU），返回「是否还在动」。
+fn dock_region_step(w: &WebviewWindow, dt: f32) -> bool {
+    if !DOCK_REGION_ON.load(Ordering::Relaxed) {
+        return false;
+    }
+    let tgt = *DOCK_REGION_TGT.lock().unwrap();
+    let mut busy = false;
+    let now;
+    {
+        let mut cur = DOCK_REGION_CUR.lock().unwrap();
+        let a = 1.0 - (-dt / DOCK_REGION_TAU).exp();
+        for i in 0..4 {
+            let d = tgt[i] - cur[i];
+            if d.abs() < 0.35 {
+                cur[i] = tgt[i];
+                continue;
+            }
+            cur[i] += d * a;
+            busy = true;
+        }
+        now = *cur;
+    }
+    if busy {
+        dock_region_write(w, now);
+    }
+    busy
 }
 
 /// 用一次（原子）SetWindowPos 把 Dock 摆到当前余量态该在的位置/尺寸：
@@ -1995,7 +2075,7 @@ fn dock_apply_geom(w: &WebviewWindow, d: &config::Dock) {
         );
     }
     let _ = w.eval("window.__onResize && window.__onResize()");
-    dock_apply_region(w, d);   // 几何固定，但条宽/档位/余量变了区域要跟着重摆
+    dock_apply_region_snap(w, d);   // 几何固定，但条宽/档位/余量变了区域要跟着重摆（这类切换直接落位）
 }
 
 /// E3/F+2：鼠标压到玻璃条上（grown=true）/ 离开条与放大图标（false）→ 切换窗口**区域**。
@@ -2020,7 +2100,12 @@ async fn dock_menu(app: AppHandle, open: bool, extra: f32) -> Result<(), String>
     DOCK_MENU_EXTRA.store(want, Ordering::Relaxed);
     let cfg = Config::load();
     if let Some(w) = app.get_webview_window(dock_label()) {
-        dock_apply_region(&w, &cfg.dock);
+        // 开菜单：区域**瞬开**（菜单面板是立刻出现的，缓动会把菜单上半截裁掉）；关菜单：缓动收回。
+        if open {
+            dock_apply_region_snap(&w, &cfg.dock);
+        } else {
+            dock_apply_region(&w, &cfg.dock);
+        }
     }
     Ok(())
 }
@@ -2124,7 +2209,7 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
             apply_desktop_zorder(h);
         }
     }
-    dock_apply_region(&win, &cfg.dock);   // 初始区域 = 常态（只有玻璃条，上方预留不吃点击）
+    dock_apply_region_snap(&win, &cfg.dock);   // 初始区域 = 常态（只有玻璃条，上方预留不吃点击）
     nudge_and_show(&win, [ww, wh]);
 
     // 拖动落盘：写「中心 x + 上边缘 y」（宽随图标数变，按中心回推才不会漂）。
@@ -2870,10 +2955,13 @@ fn main() {
                     .name("mini-card-dock-pointer".into())
                     .spawn(move || {
                         let mut was_in = false;
+                        let mut sleep_ms: u64 = 80;
+                        let mut last_tick = std::time::Instant::now();
                         loop {
-                            std::thread::sleep(std::time::Duration::from_millis(
-                                if was_in { 25 } else { 80 },
-                            ));
+                            std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                            let now_t = std::time::Instant::now();
+                            let dt = (now_t - last_tick).as_secs_f32().clamp(0.001, 0.12);
+                            last_tick = now_t;
                             let Some(w) = h.get_webview_window(dock_label()) else {
                                 was_in = false;
                                 continue;
@@ -2915,6 +3003,9 @@ fn main() {
                                 let _ = w.eval("window.__setPointer && window.__setPointer(null, null);");
                             }
                             was_in = in_zone;
+                            // 区域缓动（F++：进/出时区域跟着页面那条条一起长/缩，不瞬切）
+                            let anim = dock_region_step(&w, dt);
+                            sleep_ms = if anim { 16 } else if was_in { 25 } else { 80 };
                         }
                     })
                     .expect("spawn dock pointer watcher");
@@ -3039,7 +3130,11 @@ mod tests {
         super::DOCK_GROWN.store(false, std::sync::atomic::Ordering::Relaxed);
         let r0 = super::dock_region_rect(&d);
         assert_eq!((r0.1, r0.3), (super::dock_top_reserve(), 64.0), "常态区域 = 只有玻璃条");
-        assert_eq!(r0.2, d.bar_width(), "常态区域宽度 = 条宽");
+        assert_eq!(
+            r0.2,
+            d.bar_width() + 2.0 * super::DOCK_REGION_SLACK,
+            "常态区域宽度 = 条宽 + 两侧 slack（进门那一拍不被裁）"
+        );
         super::DOCK_GROWN.store(true, std::sync::atomic::Ordering::Relaxed);
         let r1 = super::dock_region_rect(&d);
         assert!(r1.1 < r0.1 && r1.3 > r0.3, "悬停区域向上放开");
