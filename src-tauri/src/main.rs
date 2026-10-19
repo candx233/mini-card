@@ -1177,9 +1177,20 @@ static DOCK_REGION_CUR: Mutex<[f32; 4]> = Mutex::new([0.0, 0.0, 0.0, 0.0]);
 static DOCK_REGION_TGT: Mutex<[f32; 4]> = Mutex::new([0.0, 0.0, 0.0, 0.0]);
 static DOCK_REGION_WRITTEN: Mutex<[i32; 4]> = Mutex::new([i32::MIN; 4]);
 static DOCK_REGION_ON: AtomicBool = AtomicBool::new(false);
-const DOCK_REGION_TAU: f32 = 0.20;      // 200ms（页面条是 180ms，区域略慢 → 永远包得住）
+/// 「区域该收、但页面里的条还在往回缩」→ 记下开始等的时间；页面报 settle（或超时）才真收。
+/// ⚠️ 别退回「区域逐拍缓动」：页面条是 rAF 逐帧连续走的（实测 200Hz / 5ms 一帧），
+/// 区域每拍 SetWindowRgn 一次（还带 redraw）→ 两条曲线不同步，收尾那几步就是用户听到的
+/// 「变长/变短最后一下卡帧」。区域只要**始终包住视觉**就够了，不必跟得一样细。
+static DOCK_REGION_PENDING: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// 悬停时区域要放开的「条以上高度」：放大图标最多顶出条顶 28px；名字气泡坐在「条顶以上 44px」
+/// 处、自身高 ≈22 → 最高到条顶以上 66px。给 **72** 留 6px 余量（区域太小会把气泡上沿裁掉）。
+/// ⚠️ 这个值只影响**区域**（=窗口可见/可点范围），不影响窗口几何（窗口常备 136 预留够用）。
+const DOCK_HOVER_EXTRA: f32 = 72.0;
 /// 常态区域左右各放开的余量（见 dock_region_rect）
 const DOCK_REGION_SLACK: f32 = 12.0;
+/// 区域「等页面落定再收」的兜底超时：页面 settle（rAF 停）正常几百毫秒内到；
+/// 丢了就按这个时间强收（τ=180ms 指数缓动 600ms 后残差 ≈0.9px，肉眼不可见）
+const DOCK_REGION_SETTLE_MS: u64 = 600;
 static DOCK_GROWN: AtomicBool = AtomicBool::new(false);
 /// 右键菜单要求的窗口加高量（逻辑 px，0 = 没开菜单）：菜单要长在条上方，比 28px 余量还高，
 /// 所以窗口高度取「悬停余量 28」与「菜单需要的高度」的较大者（F2）。
@@ -1867,7 +1878,8 @@ fn dock_drop_index(w: &WebviewWindow, pos: tauri::PhysicalPosition<f64>) -> usiz
 /// 当前该给 Dock 留多少「条以上的高度」（逻辑 px）：悬停余量 28 与右键菜单高度取大者。
 /// 0 = 常态（窗口只有玻璃条那么高，上方那 28px 不归我们）。
 fn dock_extra() -> f32 {
-    let hover = if DOCK_GROWN.load(Ordering::Relaxed) { DOCK_MARGIN } else { 0.0 };
+    // 悬停要放开的高度 = 放大图标 + 名字气泡（DOCK_HOVER_EXTRA，比几何余量 DOCK_MARGIN 大）
+    let hover = if DOCK_GROWN.load(Ordering::Relaxed) { DOCK_HOVER_EXTRA } else { 0.0 };
     hover.max(DOCK_MENU_EXTRA.load(Ordering::Relaxed) as f32)
 }
 
@@ -1966,14 +1978,49 @@ fn dock_region_rect(d: &config::Dock) -> (f32, f32, f32, f32) {
 /// ⚠️ SetWindowRgn 成功后 region 归系统所有（别再 DeleteObject）；区域外的点不属于本窗 ——
 /// 这就是「余量按需存在」的落地方式，比 HTTRANSPARENT 干净（不受同线程限制）。
 ///
-/// ⚠️ 为什么要缓动：区域是**裁剪**。离开那一拍页面里的条还在按 180ms 缓动往回收，
-/// 区域若瞬切回「只有条」的小矩形，还很大的条会被**直接裁掉**（实测反馈：
-/// 「缩回那一些有直接切掉 然后再条慢慢回到原来的位置」）。所以区域与页面同速收敛
-/// （τ 200ms，略慢于页面 180ms 留安全余量），保证任何一帧都包住正在缓动的条与放大图标。
+/// ⚠️ 时序规矩（F++ 第三枪，两句话）：
+/// - **放开**（区域变大）：立刻写。只大不小 → 任何一帧都包得住视觉，一次 SetWindowRgn 就够。
+/// - **收回**（区域变小）：**等页面里的条缩完**（页面 rAF 落定后调 `dock_region_settle`，
+///   或超时兜底）再一次收起。不能瞬收（会把还很大的条裁掉 —— 用户实测「缩回那一些有直接切掉」），
+///   也不能逐拍缓动（区域 16ms 一拍、页面 5ms 一帧，两条曲线对不齐，收尾那几像素就是
+///   用户听到的「变长/变短最后一下卡帧」；而且每拍 SetWindowRgn 都要整窗重绘）。
 fn dock_apply_region(w: &WebviewWindow, d: &config::Dock) {
-    *DOCK_REGION_TGT.lock().unwrap() = dock_region_target(d);
+    let tgt = dock_region_target(d);
+    *DOCK_REGION_TGT.lock().unwrap() = tgt;
     if !DOCK_REGION_ON.load(Ordering::Relaxed) {
         dock_region_snap(w);
+        return;
+    }
+    let cur = *DOCK_REGION_CUR.lock().unwrap();
+    let grows = tgt[0] <= cur[0] + 0.01
+        && tgt[1] <= cur[1] + 0.01
+        && tgt[2] >= cur[2] - 0.01
+        && tgt[3] >= cur[3] - 0.01;
+    if grows {
+        *DOCK_REGION_PENDING.lock().unwrap() = None;
+        dock_region_snap(w);
+    } else {
+        // 记「从什么时候开始等」，别覆盖已有计时（连续两次 apply 不该重置超时）
+        let mut p = DOCK_REGION_PENDING.lock().unwrap();
+        if p.is_none() {
+            *p = Some(std::time::Instant::now());
+        }
+    }
+}
+
+/// 页面报「条与图标的动效都落定了」→ 区域该收就收（一次 SetWindowRgn）。
+/// 页面在 `rafTick` 里 busy: true→false 那一下调，一击一次。
+#[tauri::command]
+fn dock_region_settle(app: AppHandle) {
+    if DOCK_REGION_PENDING.lock().unwrap().is_none() {
+        return;
+    }
+    let cfg = Config::load();
+    let tgt = dock_region_target(&cfg.dock);
+    *DOCK_REGION_TGT.lock().unwrap() = tgt;
+    *DOCK_REGION_PENDING.lock().unwrap() = None;
+    if let Some(w) = app.get_webview_window(dock_label()) {
+        dock_region_snap(&w);
     }
 }
 
@@ -2018,32 +2065,25 @@ fn dock_region_write(w: &WebviewWindow, r: [f32; 4]) {
     }
 }
 
-/// 看门狗每拍调一次：区域向目标做指数缓动（τ = DOCK_REGION_TAU），返回「是否还在动」。
-fn dock_region_step(w: &WebviewWindow, dt: f32) -> bool {
-    if !DOCK_REGION_ON.load(Ordering::Relaxed) {
-        return false;
-    }
-    let tgt = *DOCK_REGION_TGT.lock().unwrap();
-    let mut busy = false;
-    let now;
-    {
-        let mut cur = DOCK_REGION_CUR.lock().unwrap();
-        let a = 1.0 - (-dt / DOCK_REGION_TAU).exp();
-        for i in 0..4 {
-            let d = tgt[i] - cur[i];
-            if d.abs() < 0.35 {
-                cur[i] = tgt[i];
-                continue;
+/// 看门狗每拍调一次：区域「等页面落定」超时兜底（页面 settle 丢了也不至于永远开着）。
+fn dock_region_tick(w: &WebviewWindow) -> bool {
+    let expired = {
+        let mut p = DOCK_REGION_PENDING.lock().unwrap();
+        match *p {
+            Some(t0) if t0.elapsed().as_millis() as u64 >= DOCK_REGION_SETTLE_MS => {
+                *p = None;
+                true
             }
-            cur[i] += d * a;
-            busy = true;
+            Some(_) => false,
+            None => return false,
         }
-        now = *cur;
+    };
+    if expired {
+        let tgt = *DOCK_REGION_TGT.lock().unwrap();
+        *DOCK_REGION_CUR.lock().unwrap() = tgt;
+        dock_region_write(w, tgt);
     }
-    if busy {
-        dock_region_write(w, now);
-    }
-    busy
+    DOCK_REGION_PENDING.lock().unwrap().is_some()
 }
 
 /// 用一次（原子）SetWindowPos 把 Dock 摆到当前余量态该在的位置/尺寸：
@@ -2322,8 +2362,16 @@ fn sync_dock(app: &AppHandle, cfg: &Config) {
     // 层级
     let desk = matches!(cfg.dock.z, ZOrder::Desktop);
     DOCK_DESKTOP_LOCK.store(desk, Ordering::Relaxed);
-    let _ = w.set_always_on_top(matches!(cfg.dock.z, ZOrder::Top));
+    let set_top = w.set_always_on_top(matches!(cfg.dock.z, ZOrder::Top));
     if let Some(h) = hwnd_of(&w) {
+        let ex = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongW(h, -20) as u32
+        };
+        mlog(&format!(
+            "dock z: cfg={:?} desk={desk} set_top={set_top:?} ex=0x{ex:08x} TOPMOST={}",
+            cfg.dock.z,
+            (ex & 0x8) != 0
+        ));
         DOCK_HWND.store(h as isize, Ordering::Relaxed);
         if desk {
             apply_desktop_zorder(h);
@@ -2820,6 +2868,7 @@ fn main() {
             dock_click,
             dock_launch,
             dock_hover,
+    dock_region_settle,
             dock_menu,
             dock_reveal,
             dock_open_settings,
@@ -2956,12 +3005,8 @@ fn main() {
                     .spawn(move || {
                         let mut was_in = false;
                         let mut sleep_ms: u64 = 80;
-                        let mut last_tick = std::time::Instant::now();
                         loop {
                             std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                            let now_t = std::time::Instant::now();
-                            let dt = (now_t - last_tick).as_secs_f32().clamp(0.001, 0.12);
-                            last_tick = now_t;
                             let Some(w) = h.get_webview_window(dock_label()) else {
                                 was_in = false;
                                 continue;
@@ -3003,9 +3048,9 @@ fn main() {
                                 let _ = w.eval("window.__setPointer && window.__setPointer(null, null);");
                             }
                             was_in = in_zone;
-                            // 区域缓动（F++：进/出时区域跟着页面那条条一起长/缩，不瞬切）
-                            let anim = dock_region_step(&w, dt);
-                            sleep_ms = if anim { 16 } else if was_in { 25 } else { 80 };
+                            // 区域：放开时已经同步写过；这里只管「等页面落定再收」的超时兜底
+                            let pending = dock_region_tick(&w);
+                            sleep_ms = if pending || was_in { 25 } else { 80 };
                         }
                     })
                     .expect("spawn dock pointer watcher");

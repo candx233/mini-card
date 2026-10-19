@@ -53,10 +53,18 @@
     background: none;
   }
   .barwrap { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; z-index: 0; }
-  .wall {                                  /* 磨砂层：壁纸切片 + blur（inset 与位置由 JS 算） */
-    position: absolute; inset: calc(-1 * var(--wall-pad, 120px));
+  /* 磨砂层：壁纸切片 + blur。
+     ⚠️ F++ 第三枪：**尺寸必须固定**（= 最大条宽 + 2×pad），位置用 transform 反补偿条的移动。
+     为什么：`filter: blur(30px)` 是**按元素尺寸**栅格化的 —— 元素宽度每帧跟着条变，模糊层就要
+     每帧重新栅格一次（458×200 的 30px 模糊，一帧几毫秒起步）→ 运动末端速度慢、掉帧最容易被看见，
+     就是用户说的「变长和变短最后一下卡帧」。改成固定尺寸后模糊层只栅格一次、之后只是合成器平移。 */
+  .wall {
+    position: absolute; top: calc(-1 * var(--wall-pad, 120px)); left: calc(-1 * var(--wall-pad, 120px));
+    width: var(--wall-w, 700px); height: calc(var(--bar-h) + 2 * var(--wall-pad, 120px));
     background-repeat: no-repeat; background-size: 0 0;
     filter: blur(30px);
+    transform: translate3d(calc(-1 * var(--bar-x, 0px)), 0, 0);
+    will-change: transform;
   }
   .veil {                                  /* 白纱层：玻璃厚度（--surface 的 alpha）+ 描边 */
     position: absolute; inset: 0; z-index: 1;
@@ -108,9 +116,12 @@
   .item.launching { animation: dock-bounce 0.44s cubic-bezier(0.22, 0.68, 0.3, 1) 1; }
   /* 浮层：气泡 / 菜单 / 拖入标线都长在**窗口坐标**里（条会左右外扩，不能挂在条上） */
   .ovl { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
-  /* 气泡：悬停显名字 / 启动时显「启动中…」（落在上方预留下，不挡条） */
+  /* 气泡：悬停显名字 / 启动时显「启动中…」
+     F++：bottom 从「条高 + 6」抬到「条高 + 44」—— 放大到 1.55× 的图标会顶出条顶约 28px，
+     原来那位置正好压在图标上（用户实测「名字显示的位置得高一点 现在会挡到图标」）。
+     44 = 图标顶出 28 + 间隙 6 + 气泡下沿对齐余量 10（气泡高 22，条顶之上 44 内放得下）。 */
   .bubble {
-    position: absolute; bottom: calc(var(--bar-h) + 6px); left: 50%;
+    position: absolute; bottom: calc(var(--bar-h) + 44px); left: 50%;
     transform: translateX(-50%) translateY(2px);
     max-width: 90%; padding: 2px 8px; border-radius: 8px;
     background: var(--bubble-bg);
@@ -207,6 +218,7 @@
     REST = [];
     for (var i = 0; i < n; i++) REST.push(BARL0 + PAD + SIZE / 2 + i * (SIZE + GAP));
     BARW_MAX = n > 0 ? maxRowW() : 24;
+    LAST_TX = []; LAST_K = [];                    // 档位/条目数变了 → 写值缓存作废
     if (!IN_WIN) { BAR_ANIM.x = BARL0; BAR_ANIM.w = BARW0; }   // 闲态直接就位；悬停态交给逐帧缓动
     setBar(BAR_ANIM.x, BAR_ANIM.w);
     drawWall();
@@ -269,14 +281,20 @@
   var wallImg = null, wallPos = [0, 0], wallMon = [0, 0], wallGeo = null, wallPad = 120;
   var barOffsetY = 0;
   function barTopY() { return (window.innerHeight || 0) - (SIZE + 16); }
+  /* 只在「壁纸/模糊/窗口位置」变时调；**条宽变化不再需要重算**（磨砂层在屏幕上定住，条只是裁剪窗口）。
+     ⚠️ 别把 background-image 放回每帧路径：那是 data URL（MB 级字符串），每帧重设会反复解码。 */
   function drawWall() {
     if (!wallEl || !wallGeo || !wallImg) return;
     barOffsetY = barTopY();
-    wallEl.style.backgroundImage = 'url("' + wallImg + '")';
+    wallEl.style.setProperty('--wall-w', (BARW_MAX + 2 * wallPad).toFixed(1) + 'px');
+    if (wallEl.dataset.src !== wallImg) {          // 同一张图只设一次
+      wallEl.style.backgroundImage = 'url("' + wallImg + '")';
+      wallEl.dataset.src = wallImg;
+    }
     wallEl.style.backgroundSize = wallGeo.bw.toFixed(1) + 'px ' + wallGeo.bh.toFixed(1) + 'px';
-    // 条左上角的屏幕坐标 = 窗口坐标 + (条左缘, 窗口高 − 条高)
+    // 元素左上的屏幕坐标 = 窗口坐标 + (−pad)（transform 把条的位移抵掉）→ 位置只跟窗口有关
     wallEl.style.backgroundPosition =
-      (-(wallGeo.ox + wallPos[0] + CUR.x - wallPad)).toFixed(1) + 'px ' +
+      (-(wallGeo.ox + wallPos[0] - wallPad)).toFixed(1) + 'px ' +
       (-(wallGeo.oy + wallPos[1] + barOffsetY - wallPad)).toFixed(1) + 'px';
   }
   function setBlur(v) {
@@ -438,22 +456,30 @@
     if (IN_WIN && !MENU_OPEN && !DROP_ACTIVE) return { x: (win - BARW_MAX) / 2, w: BARW_MAX };
     return { x: BARL0, w: BARW0 };
   }
+  /* 逐帧写条目的位移/放大。
+     ⚠️ F++ 第三枪：**不要在动画尾巴上「摘属性」**。以前是 v 落回 1 时 `scale=''` +
+     `removeProperty('--ki')` —— 属性移除会触发一次样式重算 + `.running::after` 伪元素重排，
+     而这一下恰好发生在动画**收尾**那一刻（图标刚回到 1×）→ 用户看到的「变长/变短最后一下卡帧」。
+     现在一律写数值（`scale: 1` 与 `--ki: 1` 都不产生合成层），并且**值没变就不写**
+     （最后一两百毫秒本来就是亚像素变化，省下的样式写入直接换成平滑度）。 */
+  var LAST_TX = [], LAST_K = [];
   function applyMag(ks) {
     var n = itemsEl.children.length;
     for (var i = 0; i < n; i++) {
       var el = itemsEl.children[i];
       var v = ks[i] || 1;
       var tx = (POS[i] != null ? POS[i] : (REST[i] || 0)) - SIZE / 2;
-      el.style.translate = tx.toFixed(2) + 'px 0';
-      if (v > 1.0005) {
-        el.style.scale = String(v);
-        el.style.setProperty('--ki', String(1 / v));   // 指示点反缩放（保持 4px）
-      } else {
-        el.style.scale = '';
-        el.style.removeProperty('--ki');
+      if (LAST_TX[i] !== tx) {
+        el.style.translate = tx.toFixed(2) + 'px 0';
+        LAST_TX[i] = tx;
+      }
+      if (LAST_K[i] !== v) {
+        el.style.scale = (v > 1.0005 ? v.toFixed(4) : '1');
+        el.style.setProperty('--ki', (1 / (v > 1.0005 ? v : 1)).toFixed(4));
+        LAST_K[i] = v;
       }
     }
-    if (setBar(BAR_ANIM.x, BAR_ANIM.w)) drawWall();   // 条动过 → 磨砂切片位置跟着补
+    setBar(BAR_ANIM.x, BAR_ANIM.w);   // 磨砂层已在屏幕上定住（固定尺寸 + transform），条动不必补
   }
   function rafTick(t) {
     RAF = 0;
@@ -482,10 +508,21 @@
     }
     layout(CURS, MX);
     applyMag(CURS);
-    if (busy) startRaf(); else RAF_T = 0;
+    if (busy) { startRaf(); SETTLE_ARM = true; }
+    else {
+      RAF_T = 0;
+      // F++ 第三枪：条/图标的缓动真的停了 → 告诉 Rust「可以收区域了」（一次 SetWindowRgn）。
+      // 只在「这一轮动过」之后发（SETTLE_ARM），别在稳态每帧轰炸 IPC。
+      if (SETTLE_ARM) {
+        SETTLE_ARM = false;
+        if (T && T.core) T.core.invoke('dock_region_settle').catch(function () {});
+      }
+    }
   }
+  var SETTLE_ARM = false;
   function startRaf() { if (!RAF) RAF = requestAnimationFrame(rafTick); }
   function syncMagBoxes() {   // 条目重建后按当前指针位置**直接就位**（不闪回 1，再缓动到新目标）
+    LAST_TX = []; LAST_K = [];          // 元素换了 → 写值缓存作废
     CURS = REST.map(function (cx) { return IN_WIN ? kOf(Math.abs(MX - cx)) : 1; });
     layout(CURS, MX);
     applyMag(CURS);
