@@ -334,9 +334,13 @@ fn get_snapshot(snap: tauri::State<SharedSnap>) -> DataSnapshot {
 #[tauri::command]
 async fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
     let mut cfg = cfg;
+    let _cfg_guard = dock_cfg_lock();   // 与 dock_* 的读改写串行（见 DOCK_CFG_LOCK）
     // 页面持有的是旧值：以活窗口为准盖回去，防止拖动/移动被旧数据覆盖
     overlay_card_positions(&app, &mut cfg);
     overlay_dock_pos(&app, &mut cfg);
+    // Dock 条目**只认盘上活值**：增删排序一律走 dock_add / dock_remove / dock_reorder / dock_item_update，
+    // 主界面手里那份 payload 可能落后于「刚在 Dock 条上拖完的排序」→ 用它盖回去就把顺序吃掉了
+    cfg.dock.items = Config::load().dock.items;
     if let Some(w) = app.get_webview_window("main") {
         // 最小化中的残影几何不写（同 persist_bounds）
         if !is_iconic(&w) {
@@ -344,6 +348,7 @@ async fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
         }
     }
     cfg.save()?;
+    drop(_cfg_guard);   // 落盘完就放锁：下面的窗口同步不碰配置文件
     sync_cards(&app, &cfg);
     sync_dock(&app, &cfg);
     // 层级档切了就对所有活卡重放（设置页那个选项以前只存 config、不生效）
@@ -1862,6 +1867,16 @@ fn dock_set_pointer_box(d: &config::Dock) {
 /// 每个事件都 `Config::load()` 读盘解析 TOML 会把事件循环拖住 → 这里放一份同步时的快照。
 static DOCK_LAST: Mutex<Option<config::Dock>> = Mutex::new(None);
 
+/// Dock 配置读改写锁：`dock_*` 命令与 `save_config` 都是「Config::load → 改 → save」，
+/// 两个并发 invoke（比如同时改启动参数和分组分隔线）会互相把对方的改动盖掉 —— 这一段串行化。
+/// 只在「读盘 + 改 + 写盘」之间持有，窗口操作 / IPC 推送都在锁外。
+static DOCK_CFG_LOCK: Mutex<()> = Mutex::new(());
+
+/// 拿 Dock 配置锁（中毒也继续：锁保护的是读写顺序，状态本身无内部分支）
+fn dock_cfg_lock() -> std::sync::MutexGuard<'static, ()> {
+    DOCK_CFG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 拖放事件给的物理坐标（相对窗内）→ 插入位次：除以 scale 换成逻辑 x 再按图标中心判左右。
 fn dock_drop_index(w: &WebviewWindow, pos: tauri::PhysicalPosition<f64>) -> usize {
     let s = w.scale_factor().unwrap_or(1.0);
@@ -2186,7 +2201,9 @@ fn dock_payload(cfg: &Config) -> serde_json::Value {
                 "path": it.path,
                 "args": it.args,
                 "divider_before": it.divider_before,
+                // `icon` = 实际用的 PNG；`icon_custom` = 这张是用户指定的（主界面据此决定「恢复自动」是否可点）
                 "icon": dock::ensure_icon(it).map(|p| p.to_string_lossy().to_string()),
+                "icon_custom": !it.icon.is_empty(),
             })
         })
         .collect();
@@ -2436,6 +2453,7 @@ async fn dock_add(
 ) -> Result<serde_json::Value, String> {
     let at = index.unwrap_or(usize::MAX);
     let cfg = tauri::async_runtime::spawn_blocking(move || -> Result<Config, String> {
+        let _g = dock_cfg_lock();
         let mut cfg = Config::load();
         let mut n = 0usize;
         for raw in paths {
@@ -2473,9 +2491,13 @@ async fn dock_add(
 /// 删条目
 #[tauri::command]
 async fn dock_remove(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
-    let mut cfg = Config::load();
-    cfg.dock.items.retain(|it| it.id != id);
-    cfg.save()?;
+    let cfg = {
+        let _g = dock_cfg_lock();
+        let mut cfg = Config::load();
+        cfg.dock.items.retain(|it| it.id != id);
+        cfg.save()?;
+        cfg
+    };
     dock_after_change(&app, &cfg);
     Ok(dock_payload(&cfg))
 }
@@ -2483,17 +2505,61 @@ async fn dock_remove(app: AppHandle, id: String) -> Result<serde_json::Value, St
 /// 按给定顺序重排：只认已知 id，没列到的按原相对顺序追加到末尾（少传不会漏条目）
 #[tauri::command]
 async fn dock_reorder(app: AppHandle, ids: Vec<String>) -> Result<serde_json::Value, String> {
-    let mut cfg = Config::load();
-    let mut rest = cfg.dock.items.clone();
-    let mut out: Vec<config::DockItem> = Vec::new();
-    for id in &ids {
-        if let Some(pos) = rest.iter().position(|it| &it.id == id) {
-            out.push(rest.remove(pos));
+    let cfg = {
+        let _g = dock_cfg_lock();
+        let mut cfg = Config::load();
+        let mut rest = cfg.dock.items.clone();
+        let mut out: Vec<config::DockItem> = Vec::new();
+        for id in &ids {
+            if let Some(pos) = rest.iter().position(|it| &it.id == id) {
+                out.push(rest.remove(pos));
+            }
         }
-    }
-    out.extend(rest);
-    cfg.dock.items = out;
-    cfg.save()?;
+        out.extend(rest);
+        cfg.dock.items = out;
+        cfg.save()?;
+        cfg
+    };
+    dock_after_change(&app, &cfg);
+    Ok(dock_payload(&cfg))
+}
+
+/// 单条目设置（主界面 Dock 页逐条编辑）：启动参数 / 自定义图标 / 分组分隔线。
+/// · 三个参数各传 `None` = 这一项不动（三个控件分别保存，互不覆盖）
+/// · `icon` 传空串 = 恢复自动提取；非空 = 复制/缩放成 PNG 存进 icons 目录
+/// · 图标是解码 + 缩放（IO/CPU）活 → 整段进 spawn_blocking
+#[tauri::command]
+async fn dock_item_update(
+    app: AppHandle,
+    id: String,
+    args: Option<String>,
+    icon: Option<String>,
+    divider: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let cfg = tauri::async_runtime::spawn_blocking(move || -> Result<Config, String> {
+        let _g = dock_cfg_lock();
+        let mut cfg = Config::load();
+        let Some(item) = cfg.dock.items.iter_mut().find(|it| it.id == id) else {
+            return Err("这个 Dock 条目已经不存在了".into());
+        };
+        if let Some(a) = args {
+            item.args = a.trim().to_string();
+        }
+        if let Some(p) = icon {
+            if p.trim().is_empty() {
+                item.icon.clear();
+            } else {
+                item.icon = dock::custom_icon(&id, &p)?;
+            }
+        }
+        if let Some(d) = divider {
+            item.divider_before = d;
+        }
+        cfg.save()?;
+        Ok(cfg)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     dock_after_change(&app, &cfg);
     Ok(dock_payload(&cfg))
 }
@@ -2504,19 +2570,23 @@ async fn dock_reorder(app: AppHandle, ids: Vec<String>) -> Result<serde_json::Va
 /// · 尺寸过 `snap_size` 闸门（手改 config 的野值也在 Rust 侧收口）
 #[tauri::command]
 async fn dock_update(app: AppHandle, dock: config::Dock) -> Result<serde_json::Value, String> {
-    let mut cfg = Config::load();
-    let mut d = dock;
-    d.cx = cfg.dock.cx;
-    d.y = cfg.dock.y;
-    d.auto_hide = cfg.dock.auto_hide;
-    d.items = cfg.dock.items.clone();
-    d.size = cfg.dock.snap_size(d.size);
-    d.mag = d.mag.min(100);
-    if d.hide_desktop_icons != cfg.dock.hide_desktop_icons {
-        dock::set_desktop_icons(d.hide_desktop_icons)?;
-    }
-    cfg.dock = d;
-    cfg.save()?;
+    let cfg = {
+        let _g = dock_cfg_lock();
+        let mut cfg = Config::load();
+        let mut d = dock;
+        d.cx = cfg.dock.cx;
+        d.y = cfg.dock.y;
+        d.auto_hide = cfg.dock.auto_hide;
+        d.items = cfg.dock.items.clone();
+        d.size = cfg.dock.snap_size(d.size);
+        d.mag = d.mag.min(100);
+        if d.hide_desktop_icons != cfg.dock.hide_desktop_icons {
+            dock::set_desktop_icons(d.hide_desktop_icons)?;
+        }
+        cfg.dock = d;
+        cfg.save()?;
+        cfg
+    };
     dock_after_change(&app, &cfg);
     Ok(dock_payload(&cfg))
 }
@@ -2864,6 +2934,7 @@ fn main() {
             dock_add,
             dock_remove,
             dock_reorder,
+            dock_item_update,
             dock_update,
             dock_click,
             dock_launch,
@@ -3026,6 +3097,14 @@ fn main() {
                                 windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p);
                                 (p.x as f32 / s, p.y as f32 / s)
                             };
+                            // 左键是否按下（全局真值）：拖拽排序在窗外松手时页面收不到 pointerup，
+                            // 靠这一位兜底结束拖拽（0 = 已松开）
+                            let lb = unsafe {
+                                (windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01)
+                                    as u16)
+                                    & 0x8000
+                                    != 0
+                            };
                             let in_zone = boxr[2] > 0.0
                                 && cx >= boxr[0] - 2.0
                                 && cx <= boxr[0] + boxr[2] + 2.0
@@ -3040,12 +3119,16 @@ fn main() {
                             }
                             if in_zone {
                                 let _ = w.eval(&format!(
-                                    "window.__setPointer && window.__setPointer({:.1}, {:.1});",
+                                    "window.__setPointer && window.__setPointer({:.1}, {:.1}, {});",
                                     cx - wl,
-                                    cy - wt_
+                                    cy - wt_,
+                                    if lb { 1 } else { 0 }
                                 ));
                             } else if was_in {
-                                let _ = w.eval("window.__setPointer && window.__setPointer(null, null);");
+                                let _ = w.eval(&format!(
+                                    "window.__setPointer && window.__setPointer(null, null, {});",
+                                    if lb { 1 } else { 0 }
+                                ));
                             }
                             was_in = in_zone;
                             // 区域：放开时已经同步写过；这里只管「等页面落定再收」的超时兜底

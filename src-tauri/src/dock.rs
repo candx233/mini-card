@@ -47,9 +47,14 @@ pub fn icons_dir() -> PathBuf {
 }
 
 fn fnv1a_hex(s: &str) -> String {
+    fnv1a_hex_bytes(s.as_bytes())
+}
+
+/// 字节版 FNV-1a：自定义图标的指纹取**文件内容**（同一张图换个文件名也算同一张）
+fn fnv1a_hex_bytes(b: &[u8]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
+    for x in b {
+        h ^= *x as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{h:016x}")
@@ -86,6 +91,53 @@ pub fn ensure_icon(item: &DockItem) -> Option<PathBuf> {
         Ok(()) => Some(cache),
         Err(_) => None,
     }
+}
+
+/// 自定义图标：把用户选的图片转成 PNG 存进图标目录（asset 协议只覆盖 icons/**）。
+/// 文件名带**内容指纹** —— 同名覆盖会被 WebView 的 asset 缓存住，重选图标看着没变。
+/// 只缩不放：大图等比缩到 ≤256，小图保持原样（48 档在 150% 缩放下也够清晰）。
+pub fn custom_icon(id: &str, src: &str) -> Result<String, String> {
+    let p = PathBuf::from(win_path(src));
+    let bytes = std::fs::read(&p).map_err(|e| format!("读不了这个文件：{e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("不是能识别的图片：{e}"))?;
+    let (w, h) = (img.width().max(1), img.height().max(1));
+    let k = (256.0 / w.max(h) as f32).min(1.0);
+    let (nw, nh) = (
+        ((w as f32) * k).round().max(1.0) as u32,
+        ((h as f32) * k).round().max(1.0) as u32,
+    );
+    let img = if nw < w || nh < h {
+        img.resize(nw, nh, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let dir = icons_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let tag = sanitize_id(id);
+    let stamp = fnv1a_hex_bytes(&bytes);
+    let out = dir.join(format!("custom_{}_{}.png", tag, &stamp[..8]));
+    img.save_with_format(&out, image::ImageFormat::Png)
+        .map_err(|e| format!("写图标失败：{e}"))?;
+    // 同一 id 的旧指纹图标顺手清掉（来回换图标不会把 icons/ 越积越多）
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let prefix = format!("custom_{}_", tag);
+        for e in rd.flatten() {
+            let path = e.path();
+            if path != out && e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    Ok(out.to_string_lossy().to_string())
+}
+
+/// 文件名里的 id 白名单（id 本来就只含 [0-9a-f]；防手改 config 带入奇怪字符）
+fn sanitize_id(id: &str) -> String {
+    let s: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if s.is_empty() { "item".to_string() } else { s }
 }
 
 /// 提取图标 → PNG（三档择优；见文件头注释）
@@ -795,5 +847,38 @@ mod tests {
         assert!(item_running("c:\\windows\\system32\\notepad.exe", &set));
         assert!(!item_running("c:\\other\\notepad.exe", &set));
         assert!(!item_running("", &set));
+    }
+
+    #[test]
+    fn custom_icon_saves_png_and_replaces_old() {
+        let dir = std::env::temp_dir().join(format!("mc_icon_test_{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.png");
+        image::RgbaImage::from_pixel(300, 150, image::Rgba([200, 40, 30, 255]))
+            .save_with_format(&src, image::ImageFormat::Png)
+            .unwrap();
+        let out = custom_icon("testid", &src.to_string_lossy()).unwrap();
+        let p = PathBuf::from(&out);
+        assert!(p.exists());
+        assert!(p.file_name().unwrap().to_string_lossy().starts_with("custom_testid_"));
+        let got = image::open(&p).unwrap();
+        assert!(got.width() <= 256 && got.height() <= 256);
+        // 同一 id 换一张图：换新文件名（缓存失效），旧文件被清掉
+        let src2 = dir.join("src2.png");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 20, 30, 255]))
+            .save_with_format(&src2, image::ImageFormat::Png)
+            .unwrap();
+        let out2 = custom_icon("testid", &src2.to_string_lossy()).unwrap();
+        assert_ne!(out, out2);
+        let left = std::fs::read_dir(icons_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("custom_testid_"))
+            .count();
+        assert_eq!(left, 1);
+        let _ = std::fs::remove_file(out2);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&src2);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

@@ -339,6 +339,16 @@
   .dinfo h3 { font-size: 14px; }
   .dinfo .meta { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dact { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+  /* 逐条目设置（启动参数 / 自定义图标 / 分组分隔线）：展开在整行下面，不挤占主行 */
+  .drow .dopts {
+    display: none; flex: 1 1 100%; flex-direction: column; gap: 10px;
+    margin-top: 2px; padding-top: 12px; border-top: 1px solid var(--border);
+  }
+  .drow .dopts.on { display: flex; }
+  .dopt { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .dopt > .k { flex: 0 0 72px; font-size: 12.5px; color: var(--muted); }
+  .dopt .input { flex: 1 1 240px; min-width: 140px; }
+  .dopt .meta { font-size: 12px; }
   .icon-btn {
     width: 40px; height: 40px; display: grid; place-items: center;
     background: transparent; border: 1px solid var(--border); border-radius: var(--radius);
@@ -887,7 +897,7 @@
         <div class="group" data-od-id="group-dock-items">
           <div class="row-between" style="margin-bottom:14px;">
             <h3>Dock 上的应用</h3>
-            <span class="meta">用 ↑ ↓ 调顺序</span>
+            <span class="meta">可直接在 Dock 上拖动图标排序，或用 ↑ ↓</span>
           </div>
           <div class="dlist" id="dock-list" data-od-id="dock-list"></div>
           <div class="dlist-empty" id="dock-empty" data-od-id="dock-empty">把常用应用拖到 Dock 上，或点「＋ 添加应用」</div>
@@ -1888,9 +1898,11 @@
      数据源 = `get_dock` 的 payload（DOCK_PAYLOAD，条目里带图标缓存路径，与桌面 Dock 同一份）；
      设置项改动走 `dock_update`（Rust 侧会忽略 items/cx/y，防止页面旧值盖掉刚加的条目与刚拖的位置）。 */
   var DOCK_PAYLOAD = null;
+  var DOCK_OPT_OPEN = '';        // 哪个条目的设置面板是展开的（重渲染后保持）
   var dockPrevFrame = null, dockPrevWrap = null;
   var ARROW_UP = '<svg viewBox="0 0 24 24"><path d="M12 19V6"/><path d="M6 12l6-6 6 6"/></svg>';
   var ARROW_DOWN = '<svg viewBox="0 0 24 24"><path d="M12 5v13"/><path d="M6 12l6 6 6-6"/></svg>';
+  var SLIDERS_SVG = '<svg viewBox="0 0 24 24"><path d="M4 7h9"/><path d="M17 7h3"/><path d="M4 17h3"/><path d="M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>';
   var TRASH_SVG = '<svg viewBox="0 0 24 24"><path d="M3.6 6.4h16.8"/><path d="M18.6 6.4v12.6a2.2 2.2 0 0 1-2.2 2.2H7.6a2.2 2.2 0 0 1-2.2-2.2V6.4"/><path d="M9 6.4V4.6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.8"/><path d="M10.1 10.9v6.2M13.9 10.9v6.2"/></svg>';
 
   function esc(s) {
@@ -1972,12 +1984,69 @@
         '<div class="dact">' +
           '<button class="icon-btn d-up" title="上移" aria-label="上移"' + (i === 0 ? ' disabled' : '') + '>' + ARROW_UP + '</button>' +
           '<button class="icon-btn d-down" title="下移" aria-label="下移"' + (i === items.length - 1 ? ' disabled' : '') + '>' + ARROW_DOWN + '</button>' +
+          '<button class="icon-btn d-opts" title="条目设置" aria-label="条目设置">' + SLIDERS_SVG + '</button>' +
           '<button class="icon-btn btn-del" title="移除" aria-label="移除">' + TRASH_SVG + '</button>' +
+        '</div>' +
+        '<div class="dopts' + (DOCK_OPT_OPEN === it.id ? ' on' : '') + '">' +
+          '<label class="dopt"><span class="k">启动参数</span>' +
+            '<input class="input d-args" type="text" placeholder="可空，例如 --profile-directory=Default" value="' + esc(it.args || '') + '"></label>' +
+          '<div class="dopt"><span class="k">自定义图标</span>' +
+            '<button class="btn btn-secondary d-ico">选择图片…</button>' +
+            '<button class="btn btn-ghost d-ico-auto"' + (it.icon_custom ? '' : ' disabled') + '>恢复自动</button>' +
+            '<span class="meta">PNG / JPG / ICO，自动缩到 256</span></div>' +
+          '<div class="dopt"><span class="k">分组分隔线</span>' +
+            '<button class="switch d-div" role="switch" aria-label="分组分隔线" aria-checked="' + (it.divider_before ? 'true' : 'false') + '"></button>' +
+            '<span class="meta">' + (i === 0 ? '第一个图标前面不画线' : '在这个图标前面画一条竖线') + '</span></div>' +
         '</div>';
       row.querySelector('.d-up').addEventListener('click', function () { moveDock(i, -1); });
       row.querySelector('.d-down').addEventListener('click', function () { moveDock(i, 1); });
+      row.querySelector('.d-opts').addEventListener('click', function () {
+        DOCK_OPT_OPEN = (DOCK_OPT_OPEN === it.id) ? '' : it.id;
+        renderDockList();
+      });
       row.querySelector('.btn-del').addEventListener('click', function () {
         invoke('dock_remove', { id: it.id }).then(afterDockChange).catch(function (e) { toast('移除失败：' + e); });
+      });
+      // 启动参数：失焦 / 回车保存（值没变就不打 IPC）
+      var argsEl = row.querySelector('.d-args');
+      var saveArgs = function () {
+        var v = String(argsEl.value || '').trim();
+        if (v === String(it.args || '').trim()) return;
+        invoke('dock_item_update', { id: it.id, args: v })
+          .then(function (p) { return afterDockChange(p).then(function () { toast('启动参数已保存'); }); })
+          .catch(function (e) { toast('保存失败：' + e); });
+      };
+      argsEl.addEventListener('change', saveArgs);
+      argsEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); saveArgs(); }
+      });
+      // 自定义图标：原生选图 → Rust 转 PNG 存进 icons/（asset 协议范围内）
+      row.querySelector('.d-ico').addEventListener('click', function () {
+        invoke('plugin:dialog|open', {
+          options: {
+            multiple: false, title: '选择 Dock 图标',
+            filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'ico', 'bmp', 'webp'] }]
+          }
+        }).then(function (sel) {
+          if (!sel) return;
+          return invoke('dock_item_update', { id: it.id, icon: Array.isArray(sel) ? sel[0] : sel })
+            .then(function (p) { return afterDockChange(p).then(function () { toast('图标已更新'); }); });
+        }).catch(function (e) { toast('设置图标失败：' + e); });
+      });
+      row.querySelector('.d-ico-auto').addEventListener('click', function () {
+        invoke('dock_item_update', { id: it.id, icon: '' })
+          .then(function (p) { return afterDockChange(p).then(function () { toast('已恢复自动图标'); }); })
+          .catch(function (e) { toast('恢复失败：' + e); });
+      });
+      // 分组分隔线：真值立刻落盘（Dock 条那边同步重渲染）
+      var dv = row.querySelector('.d-div');
+      setSwitch(dv, !!it.divider_before);
+      dv.addEventListener('click', function () {
+        var on = !dv.classList.contains('on');
+        setSwitch(dv, on);
+        invoke('dock_item_update', { id: it.id, divider: on })
+          .then(afterDockChange)
+          .catch(function (e) { toast('设置失败：' + e); });
       });
       list.appendChild(row);
     });
