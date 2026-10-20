@@ -20,9 +20,12 @@ ed25519-dalek = "2"
 base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-plugin-global-shortcut = "2.3.2"
-windows = { version = "0.62.2", default-features = false, features = ["Media_Control", "Foundation", "Foundation_Collections", "Storage_Streams", "Win32_System_Com", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62.2", default-features = false, features = ["Media_Control", "Foundation", "Foundation_Collections", "Storage_Streams", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem"] }
 # dock 图标缓存（HICON → PNG；见 docs/dock-plan.md）
 image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "bmp"] }
+# Dock 的 OLE 拖放目标也走上面这个 windows crate（见 src/dock_drop.rs）
+# ⚠️ #[implement] 宏展开用的是 `::windows_core::…`（crate 根路径），必须把 windows-core 直接列进来
+windows-core = "0.62.2"
 # Dock 页「添加应用」的原生文件选择器（C 段）
 tauri-plugin-dialog = "2"
 

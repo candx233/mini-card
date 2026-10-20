@@ -9,6 +9,7 @@ mod config;
 mod data;
 mod display;
 mod dock;
+mod dock_drop;
 mod guide;
 mod media;
 mod update;
@@ -2166,6 +2167,35 @@ async fn dock_menu(app: AppHandle, open: bool, extra: f32) -> Result<(), String>
 }
 
 /// F1：拖放过程把「会插到第几位」推给页面画插入标线（`index = null` 收起）。
+/// Dock 自注册拖放目标的回调（`dock_drop.rs` 在 UI 线程上调用）。
+/// 坐标是窗内**物理 px**（与 wry 的 `DragDropEvent` 同口径）→ 与 DragDrop 分支共用 `dock_drop_index`。
+fn dock_drop_hooks(win: WebviewWindow) -> dock_drop::Hooks {
+    let (w1, w2, w3, w4) = (win.clone(), win.clone(), win.clone(), win);
+    dock_drop::Hooks {
+        enter: Box::new(move |x, y, paths| {
+            let idx = dock_drop_index(&w1, tauri::PhysicalPosition::new(x as f64, y as f64));
+            mlog(&format!("dock drop(own): enter idx={idx} n={}", paths.len()));
+            push_dock_drop(&w1, Some(idx));
+        }),
+        over: Box::new(move |x, y| {
+            let idx = dock_drop_index(&w2, tauri::PhysicalPosition::new(x as f64, y as f64));
+            push_dock_drop(&w2, Some(idx));
+        }),
+        leave: Box::new(move || push_dock_drop(&w3, None)),
+        drop: Box::new(move |x, y, paths| {
+            let idx = dock_drop_index(&w4, tauri::PhysicalPosition::new(x as f64, y as f64));
+            push_dock_drop(&w4, None);
+            mlog(&format!("dock drop(own): Drop idx={idx} paths={paths:?}"));
+            let app = w4.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = dock_add(app, paths, Some(idx)).await {
+                    mlog(&format!("dock drop(own) ERR {e}"));
+                }
+            });
+        }),
+    }
+}
+
 fn push_dock_drop(w: &WebviewWindow, index: Option<usize>) {
     let js = match index {
         Some(i) => format!("window.__setDrop && window.__setDrop({{ index: {i} }});"),
@@ -2268,6 +2298,9 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
     }
     dock_apply_region_snap(&win, &cfg.dock);   // 初始区域 = 常态（只有玻璃条，上方预留不吃点击）
     nudge_and_show(&win, [ww, wh]);
+    // 文件拖入：wry 的 WindowEvent::DragDrop 在本机 WebView2 上收不到（见 dock_drop.rs 头注释），
+    // 自注册 IDropTarget 兜住 —— 与上面 DragDrop 分支同一套落点判位。
+    dock_drop::install_async(app.clone(), dock_label(), dock_drop_hooks);
 
     // 拖动落盘：写「中心 x + 上边缘 y」（宽随图标数变，按中心回推才不会漂）。
     // ⚠️ 余量态来回切是**我们**动的窗口 → 按 DOCK_SELF_RECT 跳过，否则 y 每切一次写歪 28px
