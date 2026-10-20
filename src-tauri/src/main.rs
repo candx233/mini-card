@@ -1928,13 +1928,11 @@ fn dock_side_reserve(d: &config::Dock) -> f32 {
         return 6.0;
     }
     let size = d.size as f32;
-    let gap = 12.0f32;
     let bar = d.bar_width();
-    let content = n as f32 * size + (n as f32 - 1.0) * gap;
-    let pad = (bar - content) / 2.0;                 // 实测恒 18
+    let pad = 18.0f32;                               // 边距恒 18（条宽与内容差恒 36，分隔线额外宽度两边都算）
     let kmax = 1.0 + 36.0 / size;                    // 与页面同一条放大上限
     let mag = d.mag as f32;
-    let rest = |i: usize| pad + size / 2.0 + i as f32 * (size + gap);
+    let rest = |i: usize| d.item_center_x(i);        // 含分隔线偏移
     let mut worst = 0.0f32;
     let mut probe = 0.0f32;
     while probe <= bar + 0.001 {
@@ -1952,10 +1950,10 @@ fn dock_side_reserve(d: &config::Dock) -> f32 {
         let mut pos = vec![0.0f32; n];
         pos[j] = rest(j);
         for i in (j + 1)..n {
-            pos[i] = pos[i - 1] + size * ks[i - 1] / 2.0 + gap + size * ks[i] / 2.0;
+            pos[i] = pos[i - 1] + size * ks[i - 1] / 2.0 + d.gap_after(i - 1) + size * ks[i] / 2.0;
         }
         for i in (0..j).rev() {
-            pos[i] = pos[i + 1] - size * ks[i + 1] / 2.0 - gap - size * ks[i] / 2.0;
+            pos[i] = pos[i + 1] - size * ks[i + 1] / 2.0 - d.gap_after(i) - size * ks[i] / 2.0;
         }
         let row_l = pos[0] - size * ks[0] / 2.0;
         let row_r = pos[n - 1] + size * ks[n - 1] / 2.0;

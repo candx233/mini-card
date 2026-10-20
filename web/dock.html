@@ -210,8 +210,10 @@
   var SIZE = Number(params.get('size')) || 48;
   var MAG = Number(params.get('mag'));
   if (!isFinite(MAG)) MAG = 55;
-  var PAD = 18;                 // 实测恒 18：条宽 n*(SIZE+12)+24 与内容之差的一半
+  var PAD = 18;                 // 恒 18：条宽与内容之差恒 36（分隔线额外宽度两边都算）
   var GAP = 12;
+  var DIV_EXTRA = 8;            // 分组线额外占宽：组间 20 = 12 + 8（1px 线居中 → 两侧各 9.5）
+  var DIVS = [];                // DIVS[i] = 第 i 个条目前面有分组线（i>0）；由 renderItems 写入
   var KMAX = 1.75;
   var REST = [];                // 各图标**静止**中心（窗内 x）：逐帧布局与放大衰减的锚点
   var BARW0 = 384;              // 闲态条宽
@@ -222,6 +224,13 @@
 
   function kMaxNow() { return 1 + 36 / SIZE; }
   function itemCount() { return itemsEl ? itemsEl.children.length : 0; }
+  /* 间距与分隔线：第 i 与 i+1 之间 = 12，该处有分组线则 20（与 Rust `Dock::gap_after` 同一口径） */
+  function gapAfter(i) { return GAP + (DIVS[i + 1] ? DIV_EXTRA : 0); }
+  function divCount() {
+    var c = 0;
+    for (var i = 1; i < DIVS.length; i++) if (DIVS[i]) c++;
+    return c;
+  }
 
   function applySizing() {
     var s = document.documentElement.style;
@@ -229,11 +238,15 @@
     s.setProperty('--bar-h', (SIZE + 16) + 'px');
     KMAX = kMaxNow();
     var n = itemCount();
-    BARW0 = n > 0 ? n * (SIZE + GAP) + 24 : 24;
+    BARW0 = n > 0 ? n * (SIZE + GAP) + 24 + divCount() * DIV_EXTRA : 24;
     var win = window.innerWidth || Math.round(BARW0 + 56);
     BARL0 = (win - BARW0) / 2;
     REST = [];
-    for (var i = 0; i < n; i++) REST.push(BARL0 + PAD + SIZE / 2 + i * (SIZE + GAP));
+    var cx = BARL0 + PAD + SIZE / 2;
+    for (var i = 0; i < n; i++) {
+      REST.push(cx);
+      if (i < n - 1) cx += SIZE + gapAfter(i);
+    }
     BARW_MAX = n > 0 ? maxRowW() : 24;
     LAST_TX = []; LAST_K = [];                    // 档位/条目数变了 → 写值缓存作废
     if (!IN_WIN) { BAR_ANIM.x = BARL0; BAR_ANIM.w = BARW0; }   // 闲态直接就位；悬停态交给逐帧缓动
@@ -253,9 +266,10 @@
     if (!n) return 24;
     var lo = REST[0] - SIZE * 1.2, hi = REST[n - 1] + SIZE * 1.2, best = 0;
     for (var x = lo; x <= hi; x += 2) {
-      var sum = 0;
+      var sum = 0, gaps = 0;
       for (var i = 0; i < n; i++) sum += SIZE * kOf(Math.abs(x - REST[i]));
-      var w = sum + (n - 1) * GAP + 2 * PAD;
+      for (var g = 0; g < n - 1; g++) gaps += gapAfter(g);
+      var w = sum + gaps + 2 * PAD;
       if (w > best) best = w;
     }
     return Math.round(best * 10) / 10;
@@ -398,6 +412,7 @@
       itemsEl.appendChild(el);
     });
     // 分组分隔线：第 i 个条目 `divider_before` → 在 i-1 与 i 之间画一条（首个前面不画）
+    DIVS = items.map(function (it, i) { return i > 0 && !!it.divider_before; });   // 几何要用，先落位
     sepsEl.innerHTML = '';
     SEPS = []; LAST_SX = [];
     items.forEach(function (it, i) {
@@ -465,8 +480,8 @@
   function layoutAt(ks, j) {
     var n = ks.length, pos = new Array(n);
     pos[j] = REST[j];
-    for (var a = j + 1; a < n; a++) pos[a] = pos[a - 1] + SIZE * ks[a - 1] / 2 + GAP + SIZE * ks[a] / 2;
-    for (var b = j - 1; b >= 0; b--) pos[b] = pos[b + 1] - SIZE * ks[b + 1] / 2 - GAP - SIZE * ks[b] / 2;
+    for (var a = j + 1; a < n; a++) pos[a] = pos[a - 1] + SIZE * ks[a - 1] / 2 + gapAfter(a - 1) + SIZE * ks[a] / 2;
+    for (var b = j - 1; b >= 0; b--) pos[b] = pos[b + 1] - SIZE * ks[b + 1] / 2 - gapAfter(b) - SIZE * ks[b] / 2;
     return pos;
   }
   /* F++ D3：锚点**连续化** —— 「锚在 j」与「锚在 j±1」两套布局按指针在这两个图标中心之间的比例线性混合。
@@ -897,6 +912,14 @@
      槽按**静止**布局算（拖入期间 DROP_ACTIVE → 图标不放大不位移，两边看到的几何一致） */
   var dropEl = document.getElementById('dropmark');
   var DROP_ACTIVE = false;
+  /* 第 i 个槽（两图标之间）的 x：前一个图标右缘 + 该处间距的一半 */
+  function slotX(i) {
+    var n = REST.length;
+    if (!n) return BARL0 + PAD;
+    if (i <= 0) return REST[0] - SIZE / 2 - gapAfter(0) / 2;
+    if (i >= n) return REST[n - 1] + SIZE / 2 + gapAfter(n - 2) / 2;
+    return REST[i - 1] + SIZE / 2 + gapAfter(i - 1) / 2;
+  }
   window.__setDrop = function (p) {
     if (!dropEl) return;
     if (!p || typeof p.index !== 'number') {
@@ -906,9 +929,8 @@
     }
     var n = itemsEl.children.length;
     var i = Math.max(0, Math.min(n, p.index | 0));
-    var pitch = SIZE + GAP;
     dropEl.dataset.i = String(i);
-    dropEl.style.left = (BARL0 + PAD + i * pitch - GAP / 2) + 'px';   // margin-left:-1px 让 2px 线居中落在槽上
+    dropEl.style.left = slotX(i) + 'px';   // margin-left:-1px 让 2px 线居中落在槽上
     dropEl.hidden = false;
     if (!DROP_ACTIVE) { DROP_ACTIVE = true; startRaf(); }             // 拖入中：图标回静止布局
   };

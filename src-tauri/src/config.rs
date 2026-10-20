@@ -206,11 +206,39 @@ impl Dock {
         best
     }
 
-    /// 玻璃条宽（逻辑 px）= n × (图标 + 间距 12) + 左右内边距 24。
-    /// 7 个 48px 图标 → 444（dock-plan §1 的 `n*60+24`）。
+    /// 分组分隔线的额外占宽：组间 = 普通间距 12 + 8 = 20，1px 线居中后两侧各 9.5。
+    /// 改这个值必须同步 web/dock.html 的 `DIV_EXTRA` 与 web/index.html 的 `dockWinSize()`。
+    pub const DIVIDER_EXTRA: f32 = 8.0;
+
+    /// 第 i 个条目**之前**有几条分隔线（首个条目即使标了也不算 —— 它前面没有图标）。
+    pub fn dividers_before(&self, i: usize) -> usize {
+        let last = i.min(self.items.len().saturating_sub(1));
+        (1..=last).filter(|&j| self.items[j].divider_before).count()
+    }
+
+    /// 全条分隔线条数。
+    pub fn divider_count(&self) -> usize {
+        match self.items.len() {
+            0 => 0,
+            n => self.dividers_before(n - 1),
+        }
+    }
+
+    /// 第 i 与 i+1 个图标之间的间距：12，该处有分组线则 20。
+    pub fn gap_after(&self, i: usize) -> f32 {
+        12.0
+            + if self.items.get(i + 1).map(|it| it.divider_before).unwrap_or(false) {
+                Self::DIVIDER_EXTRA
+            } else {
+                0.0
+            }
+    }
+
+    /// 玻璃条宽（逻辑 px）= n × (图标 + 间距 12) + 左右内边距 24 + 分隔线额外宽度。
+    /// 7 个 48px 图标无分隔线 → 444（dock-plan §1 的 `n*60+24`）；每多一条分组线 +8。
     pub fn bar_width(&self) -> f32 {
         let n = self.items.len() as f32;
-        (n * (self.size as f32 + 12.0) + 24.0).max(24.0)
+        (n * (self.size as f32 + 12.0) + 24.0 + self.divider_count() as f32 * Self::DIVIDER_EXTRA).max(24.0)
     }
 
     /// 玻璃条高 = 图标 + 上下留白各 8（48 档 → 64）
@@ -223,11 +251,15 @@ impl Dock {
         [self.bar_width(), self.bar_height() + 28.0]
     }
 
-    /// 第 i 个图标在**条内**的中心 x（逻辑 px）：左内边距 18 + 半个图标 + i × (图标 + 间距 12)。
-    /// ⚠️ 内边距实测恒 18（条宽 `n*60+24` 与内容 `n*48+(n-1)*12` 之差的一半，`.items` 是居中布局）
-    /// —— 以前写 12 差了 6px；拖入落点判位与页面 dropmark 都用这个值。
+    /// 第 i 个图标在**条内**的中心 x（逻辑 px）：左内边距 18 + 半个图标 + i × (图标 + 间距 12)
+    /// + 它前面各条分隔线的额外宽度。
+    /// ⚠️ 内边距恒 18：条宽与内容的差恒 36（分隔线的额外宽度两边都算进来），`.items` 居中布局。
+    /// 拖入落点判位与页面 dropmark 都用这个值。
     pub fn item_center_x(&self, i: usize) -> f32 {
-        18.0 + self.size as f32 / 2.0 + i as f32 * (self.size as f32 + 12.0)
+        18.0
+            + self.size as f32 / 2.0
+            + i as f32 * (self.size as f32 + 12.0)
+            + self.dividers_before(i) as f32 * Self::DIVIDER_EXTRA
     }
 
     /// 拖入落点（窗内 x，逻辑 px）→ 插入位次：落在第 i 个图标中心右侧 → 插到 i+1。
@@ -628,5 +660,51 @@ size = [320.0, 190.0]
         d56.size = 56;
         assert_eq!(d56.item_center_x(0), 46.0);
         assert_eq!(d56.item_center_x(1), 114.0);
+    }
+
+    /// 分组分隔线（A 档）：组间 12 → 20、条宽每条 +8、中心按前缀累加。
+    /// 这三个数与 web/dock.html 的 gapAfter/REST/BARW0、web/index.html 的 dockWinSize 是同一套口径。
+    #[test]
+    fn dock_divider_geometry_and_drop_slot() {
+        let mut d = Dock::default();
+        d.items = (0..3)
+            .map(|i| DockItem { id: format!("i{i}"), ..DockItem::default() })
+            .collect();
+        assert_eq!(d.bar_width(), 204.0, "无分隔线：3×60+24");
+        assert_eq!(d.divider_count(), 0);
+
+        d.items[1].divider_before = true;
+        assert_eq!(d.divider_count(), 1);
+        assert_eq!(d.bar_width(), 212.0, "一条分隔线 → +8");
+        assert_eq!(d.gap_after(0), 20.0, "组间 = 12 + 8");
+        assert_eq!(d.gap_after(1), 12.0, "普通间距不动");
+        assert_eq!(d.item_center_x(0), 42.0, "18 + 24");
+        assert_eq!(d.item_center_x(1), 110.0, "42 + 60 + 8（分隔线在它前面）");
+        assert_eq!(d.item_center_x(2), 170.0, "110 + 60");
+        assert_eq!(d.bar_width() - (d.item_center_x(2) + 24.0), 18.0, "右内边距仍为 18");
+
+        // 落点判位跟着中心走：分隔线右侧的 8px 仍算「第 1 位之后」
+        assert_eq!(d.insert_index_for_x(42.0), 0);
+        assert_eq!(d.insert_index_for_x(80.0), 1, "落点在组间空隙里 → 第 1 位");
+        assert_eq!(d.insert_index_for_x(110.5), 2);
+
+        // 首条目上的 divider_before 不算（它前面没有图标）
+        let mut first = Dock::default();
+        first.items = (0..2)
+            .map(|i| DockItem { id: format!("i{i}"), ..DockItem::default() })
+            .collect();
+        first.items[0].divider_before = true;
+        assert_eq!(first.divider_count(), 0);
+        assert_eq!(first.bar_width(), 144.0);
+
+        // 7 个图标 + 2 条分隔线 = 444 + 16
+        let mut d7 = Dock::default();
+        d7.items = (0..7)
+            .map(|i| DockItem { id: format!("i{i}"), ..DockItem::default() })
+            .collect();
+        d7.items[2].divider_before = true;
+        d7.items[5].divider_before = true;
+        assert_eq!(d7.bar_width(), 460.0);
+        assert_eq!(d7.item_center_x(6), 18.0 + 24.0 + 6.0 * 60.0 + 16.0);
     }
 }

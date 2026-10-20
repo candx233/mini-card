@@ -1919,7 +1919,10 @@
   /* 条宽/窗高公式与 Rust `config::Dock` 一致：n*(size+12)+24、高 = size+16+28 */
   function dockWinSize() {
     var s = Number(dockCfg().size) || 48;
-    return { size: s, bar: s + 16, w: dockItems().length * (s + 12) + 24, h: s + 16 + 28 };
+    var items = dockItems();
+    var divs = 0;                                   // 分组线额外占宽：与 Rust `Dock::divider_count` 同口径
+    items.forEach(function (it, i) { if (i > 0 && it.divider_before) divs++; });
+    return { size: s, bar: s + 16, w: items.length * (s + 12) + 24 + divs * 8, h: s + 16 + 28 };
   }
   function setSwitch(el, on) {
     if (!el) return;
