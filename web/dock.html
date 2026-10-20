@@ -477,8 +477,14 @@
         同一个时长、同一个终点（旧版条是 180ms 指数缓动，尾巴上每 0.25px 挪一次 =「最后一点点卡顿」）。
      4) 指针在条内移动时 EASE 恒为 1：布局是「指针位置的纯函数」，不滞后、不回弹、不呼吸。 */
   var EASE = 0, EASE_TO = 0, EASE_FROM = 0, EASE_T0 = 0;
-  var EASE_DUR = 220;          // 进出场时长（ms）；图标与条共用一个时钟
-  var PX = -1e9;               // 布局用的指针 x（离场保留最后位置，收缩才不往左吸）
+  // 进出场用**临界阻尼阶跃响应**（不是 easeOutCubic）：起点速度为 0、末端渐近无过冲。
+  // easeOutCubic 起步就是全速（第一帧就吃掉 7% 行程，200Hz 上等于一帧跳 3.6px）——
+  // 屏幕逐帧量出来确实是 5ms 一改（200fps），但那个「起步一记踢腿」肉眼读成卡顿。
+  var EASE_TAU = 0.05;         // 50ms；50% ≈75ms、90% ≈190ms、收住 ≈260ms（85ms 时尾巴要爬到 550ms）
+  var PX = -1e9;               // 布局用的指针 x（平滑后的值；离场保留最后位置，收缩才不往左吸）
+  var PX_T = -1e9;             // 最近一次推送来的目标指针
+  var PTR_TAU = 0.05;          // 指针跟手时间常数（s）：推送 ~38Hz，靠它在 200Hz 的 rAF 里插值
+  var LAST_NOW = 0;
   var BUMP_W = 5 * SIZE;       // 放大窗口宽（≈5 个图标）
   function grownTarget() { return (IN_WIN || REORDER) && !MENU_OPEN && !DROP_ACTIVE; }
   function ksAt(px, ease) {
@@ -516,13 +522,23 @@
     if (to === EASE_TO) return;
     EASE_FROM = EASE; EASE_TO = to; EASE_T0 = nowMs();
   }
-  /** 推进 EASE；返回 true = 还在动 */
+  /** 指针平滑：推送是 25~38Hz，直接吃会让图标一跳一跳（200Hz 的 rAF 只看到 38 个状态） */
+  function pointerStep(dt) {
+    if (PX_T === -1e9) return false;
+    if (PX === -1e9) { PX = PX_T; return true; }      // 刚进条：直接就位，别从远处扫过来
+    var d = PX_T - PX;
+    if (Math.abs(d) < 0.05) { PX = PX_T; return false; }
+    PX += d * (1 - Math.exp(-dt / PTR_TAU));
+    return true;
+  }
+  /** 推进 EASE；返回 true = 还在动（临界阻尼：v(0)=0，末端渐近） */
   function easeStep(now) {
     if (EASE === EASE_TO) return false;
-    var tt = Math.min(1, Math.max(0, (now - EASE_T0) / EASE_DUR));
-    EASE = EASE_FROM + (EASE_TO - EASE_FROM) * (1 - Math.pow(1 - tt, 3));
-    if (tt >= 1) EASE = EASE_TO;
-    return EASE !== EASE_TO;
+    var u = Math.max(0, (now - EASE_T0) / 1000) / EASE_TAU;
+    var e = 1 - (1 + u) * Math.exp(-u);
+    EASE = EASE_FROM + (EASE_TO - EASE_FROM) * e;
+    if (Math.abs(EASE_TO - EASE) < 0.0008) { EASE = EASE_TO; return false; }
+    return true;
   }
   /* 逐帧写条目的位移/放大。
      ⚠️ F++ 第三枪：**不要在动画尾巴上「摘属性」**。以前是 v 落回 1 时 `scale=''` +
@@ -549,7 +565,8 @@
       }
       if (LAST_K[i] !== v) {
         el.style.scale = (v > 1.0005 ? v.toFixed(4) : '1');
-        el.style.setProperty('--ki', (1 / (v > 1.0005 ? v : 1)).toFixed(4));
+        // --ki 只给「运行中指示点」用；不跑的条目别每帧写它（写自定义属性 = 一次样式失效）
+        if (RUNNING[el.dataset.id]) el.style.setProperty('--ki', (1 / (v > 1.0005 ? v : 1)).toFixed(4));
         LAST_K[i] = v;
       }
     }
@@ -571,9 +588,12 @@
   function rafTick(t) {
     RAF = 0;
     var now = t || nowMs();
+    var dt = LAST_NOW ? Math.min(0.05, Math.max(0.001, (now - LAST_NOW) / 1000)) : 0.005;
+    LAST_NOW = now;
     easeTo(grownTarget());            // 状态可能被别人改过（菜单/拖入/失焦）→ 每帧对齐一次，幂等
     var busy = easeStep(now);
-    if (IN_WIN) PX = MX;
+    if (IN_WIN) { PX_T = MX; }
+    if (pointerStep(dt)) busy = true;
     // 菜单开着 / 拖入中 / 拖拽排序：图标一概回落到 1.0（菜单长在图标上方；拖拽要按静止几何落点），
     // 但条照旧按 EASE 撑着 —— 两条分开算，别用一个开关
     var kEase = (MENU_OPEN || DROP_ACTIVE || REORDER) ? 0 : EASE;
@@ -596,7 +616,7 @@
   function startRaf() { if (!RAF) RAF = requestAnimationFrame(rafTick); }
   function syncMagBoxes() {   // 条目重建后按当前指针位置**直接就位**（不闪回 1，不再重放进出场）
     LAST_TX = []; LAST_K = [];          // 元素换了 → 写值缓存作废
-    if (IN_WIN) PX = MX;
+    if (IN_WIN) { PX_T = MX; PX = MX; }
     EASE = EASE_TO = grownTarget() ? 1 : 0;
     CURS = ksAt(PX, EASE);
     layoutPos(CURS);
@@ -641,7 +661,8 @@
   window.__setMag = function (x) {   // 验收用：不开真鼠标也能把指针 x 钉到某个位置
     IN_WIN = x !== null && x >= 0;
     MX = IN_WIN ? x : -1e9;
-    if (IN_WIN) PX = MX;
+    PX_T = IN_WIN ? MX : -1e9;
+    PX = PX_T;
     easeTo(grownTarget());
     startRaf();
   };

@@ -3114,7 +3114,7 @@ fn main() {
             // E3 Dock 指针看门狗：指针位置**只认系统真值**（GetCursorPos），由这里推给页面；
             // 页面再不接自己的 mousemove —— 实测 WebView2 会在窗口几何变化前后补发坐标不实的
             // 合成 mousemove（光标在余量带里却收到 (62,90) 那种点），会让「长高/缩回」来回抖。
-            // 指针在 Dock 那一带（虚拟 92 框）里：25ms 一轮推窗内坐标；不在：转 80ms 空转，
+            // 指针在 Dock 那一带（虚拟 92 框）里：16ms 一轮（≈60Hz）推窗内坐标；不在：转 80ms 空转，
             // 只在「离开」那一枪推个 null 让页面归位。窗不在 / 被热键藏了就整段空转。
             {
                 let h = handle.clone();
@@ -3180,7 +3180,8 @@ fn main() {
                             was_in = in_zone;
                             // 区域：放开时已经同步写过；这里只管「等页面落定再收」的超时兜底
                             let pending = dock_region_tick(&w);
-                            sleep_ms = if pending || was_in { 25 } else { 80 };
+                            // 16ms ≈ 60Hz：推送就是图标位置的采样率（页面再短平滑插值，见 PTR_TAU）
+                            sleep_ms = if pending || was_in { 16 } else { 80 };
                         }
                     })
                     .expect("spawn dock pointer watcher");
