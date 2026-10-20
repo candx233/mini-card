@@ -219,7 +219,6 @@
   var BARW0 = 384;              // 闲态条宽
   var BARW_MAX = 384;           // **悬停态固定条宽**（F++ D0）= 扫描出的最大行宽 + 2×pad
   var BARL0 = 0;                // 常态条左缘（窗内 x）
-  var BAR_ANIM = { x: 0, w: 384 };   // 条的动画值（逐帧向目标缓动；与图标布局解耦）
   var CUR = { x: 0, w: 0 };     // 当前已写入的条几何（避免每帧写 DOM）
 
   function kMaxNow() { return 1 + 36 / SIZE; }
@@ -249,8 +248,8 @@
     }
     BARW_MAX = n > 0 ? maxRowW() : 24;
     LAST_TX = []; LAST_K = [];                    // 档位/条目数变了 → 写值缓存作废
-    if (!IN_WIN) { BAR_ANIM.x = BARL0; BAR_ANIM.w = BARW0; }   // 闲态直接就位；悬停态交给逐帧缓动
-    setBar(BAR_ANIM.x, BAR_ANIM.w);
+    var b0 = barNow();                            // 档位一变，条立刻就位（resize 不重放进出场）
+    setBar(b0.x, b0.w);
     drawWall();
   }
   window.__onResize = function () {   // Rust 摆完窗口（建窗/条目数变）会发这一枪
@@ -258,16 +257,16 @@
     syncMagBoxes();
   };
 
-  /* F++ D0：悬停态**固定**条宽 = 把指针扫一遍取「让位后行宽 + 2×pad」的最大值
-     （与 Rust `dock_side_reserve` 同一套口径；6×48 / mag 55 / σ1.3 实测 = 432.7）。
+  /* 悬停态**固定**条宽 = 把指针扫一遍取「放大的行宽 + 2×pad」的最大值
+     （与 Rust `dock_side_reserve` 同一套口径：行宽由 widths 累加，不是先定位再量）。
      条只在「进 / 出」两次过渡里动，指针在条内换图标时条一动不动。 */
   function maxRowW() {
     var n = REST.length;
     if (!n) return 24;
-    var lo = REST[0] - SIZE * 1.2, hi = REST[n - 1] + SIZE * 1.2, best = 0;
+    var lo = BARL0 - SIZE, hi = BARL0 + BARW0 + SIZE, best = 0;
     for (var x = lo; x <= hi; x += 2) {
-      var sum = 0, gaps = 0;
-      for (var i = 0; i < n; i++) sum += SIZE * kOf(Math.abs(x - REST[i]));
+      var ks = ksAt(x, 1), sum = 0, gaps = 0;
+      for (var i = 0; i < n; i++) sum += SIZE * ks[i];
       for (var g = 0; g < n - 1; g++) gaps += gapAfter(g);
       var w = sum + gaps + 2 * PAD;
       if (w > best) best = w;
@@ -297,7 +296,8 @@
 
   /* ── 玻璃条几何：左缘/宽逐帧写 CSS 变量（悬停时条向两侧扩，把放大后的行包住） ── */
   function setBar(x, w) {
-    if (Math.abs(x - CUR.x) < 0.25 && Math.abs(w - CUR.w) < 0.25) return false;
+    // ⚠️ 阈值别放大到 0.25px：缓动尾巴每帧只走 0.2~0.3px，会被量化成「一顿一顿」
+    if (Math.abs(x - CUR.x) < 0.01 && Math.abs(w - CUR.w) < 0.01) return false;
     CUR.x = x; CUR.w = w;
     var s = document.documentElement.style;
     s.setProperty('--bar-x', x.toFixed(2) + 'px');
@@ -464,45 +464,65 @@
   var IN_WIN = false, MX = -1e9, CURS = [], RAF = 0, RAF_T = 0;
   var POS = [];
   var PT_N = 0, HOVER_N = 0, HOVER_ERR = '';   // 诊断计数（验收探针读 __getMag）
-  function kOf(d) {
-    var k = 1 + (MAG / 100) * Math.exp(-Math.pow(d / (SIZE * 1.3), 2));
-    return k > KMAX ? KMAX : k;
-  }
-  function nearestIdx(px) {
-    var j = 0, best = 1e9;
-    for (var i = 0; i < REST.length; i++) {
-      var d = Math.abs(px - REST[i]);
-      if (d < best) { best = d; j = i; }
+  /* ── 放大模型（2026-10-20 重做，对齐 macOS Dock 的手感）──
+     旧版：k = 高斯(到指针距离) + 「被指图标钉住、两侧让位」的锚点布局 + 180ms 指数滞后。实测三个毛病：
+     ① 高斯尾巴让整排**一直在微动**；② 锚点在 j / j±1 之间混合 → 整排跟着指针**漂**；
+     ③ 比例吃滞后值、位置吃即时指针（两个时钟）→ 图标先动后长，肉眼看就是「位置不稳定」。
+     现在四条：
+     1) 比例 = **余弦窗口**（macOS 那套）：k = 1 + mag/100 · (1 − cos θ)/2，
+        θ = (x − (指针 − W/2)) / W · 2π，W = 5×图标宽。窗口外**一点不动**（紧凑支撑，没有尾巴）。
+     2) 布点 = **宽度累加 + 整行居中**：没有任何锚点，行中轴永远在窗心；指针移动只改各图标宽度，
+        行不会被「重新锚一次」带着漂。
+     3) 进出场 = 单一 EASE 0→1（220ms easeOutCubic），**同时**驱动图标比例与条宽 —— 同一个时钟、
+        同一个时长、同一个终点（旧版条是 180ms 指数缓动，尾巴上每 0.25px 挪一次 =「最后一点点卡顿」）。
+     4) 指针在条内移动时 EASE 恒为 1：布局是「指针位置的纯函数」，不滞后、不回弹、不呼吸。 */
+  var EASE = 0, EASE_TO = 0, EASE_FROM = 0, EASE_T0 = 0;
+  var EASE_DUR = 220;          // 进出场时长（ms）；图标与条共用一个时钟
+  var PX = -1e9;               // 布局用的指针 x（离场保留最后位置，收缩才不往左吸）
+  var BUMP_W = 5 * SIZE;       // 放大窗口宽（≈5 个图标）
+  function grownTarget() { return (IN_WIN || REORDER) && !MENU_OPEN && !DROP_ACTIVE; }
+  function ksAt(px, ease) {
+    var n = REST.length, out = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var u = (REST[i] - px) / BUMP_W + 0.5;
+      var b = (u <= 0 || u >= 1) ? 0 : (1 - Math.cos(u * 2 * Math.PI)) / 2;
+      var k = 1 + (MAG / 100) * b * ease;
+      out[i] = k > KMAX ? KMAX : k;
     }
-    return j;
+    return out;
   }
-  /* 单锚布局：锚在 j 的图标停在**静止**中心，其余按「半宽 + gap + 半宽」向两侧铺开 */
-  function layoutAt(ks, j) {
-    var n = ks.length, pos = new Array(n);
-    pos[j] = REST[j];
-    for (var a = j + 1; a < n; a++) pos[a] = pos[a - 1] + SIZE * ks[a - 1] / 2 + gapAfter(a - 1) + SIZE * ks[a] / 2;
-    for (var b = j - 1; b >= 0; b--) pos[b] = pos[b + 1] - SIZE * ks[b + 1] / 2 - gapAfter(b) - SIZE * ks[b] / 2;
-    return pos;
-  }
-  /* F++ D3：锚点**连续化** —— 「锚在 j」与「锚在 j±1」两套布局按指针在这两个图标中心之间的比例线性混合。
-     两套布局的相邻中心距都是「半宽 + gap + 半宽」，线性混合后仍是 → **零重叠不受影响**；
-     指针正好压在图标中心时权重 1/0，天然连续（旧版跨中点会整排瞬移 20~30px，实测单步 4px→跳 30.5px）。 */
-  function layout(ks, px) {
-    var n = ks.length;
+  /* 宽度累加 + 行居中（POS = 各图标中心，窗内坐标）；EASE=0 时精确等于 REST */
+  function layoutPos(ks) {
+    var n = ks.length, i, sum = 0, gaps = 0;
     POS = new Array(n);
     if (!n) return;
-    var j = nearestIdx(px);
-    var k2 = (px >= REST[j]) ? Math.min(n - 1, j + 1) : Math.max(0, j - 1);
-    var den = REST[k2] - REST[j];
-    var w = den ? Math.min(1, Math.max(0, (px - REST[j]) / den)) : 0;
-    var A = layoutAt(ks, j), B = layoutAt(ks, k2);
-    for (var i = 0; i < n; i++) POS[i] = A[i] + (B[i] - A[i]) * w;
+    for (i = 0; i < n; i++) sum += SIZE * ks[i];
+    for (i = 0; i < n - 1; i++) gaps += gapAfter(i);
+    var x = ((window.innerWidth || 0) - (sum + gaps)) / 2;
+    for (i = 0; i < n; i++) {
+      var w = SIZE * ks[i];
+      POS[i] = x + w / 2;
+      x += w + gapAfter(i);
+    }
   }
-  /* 条的目标几何（F++ D0）：悬停 = 固定 BARW_MAX、绕窗内中心；闲/菜单开着/拖入中 = 静止条 */
-  function barTarget() {
+  /* 条：闲态 BARW0 ↔ 悬停 BARW_MAX，绕窗心；进度就是 EASE */
+  function barNow() {
     var win = window.innerWidth || 0;
-    if ((IN_WIN || REORDER) && !MENU_OPEN && !DROP_ACTIVE) return { x: (win - BARW_MAX) / 2, w: BARW_MAX };
-    return { x: BARL0, w: BARW0 };
+    var w = BARW0 + (BARW_MAX - BARW0) * EASE;
+    return { x: (win - w) / 2, w: w };
+  }
+  function easeTo(on) {
+    var to = on ? 1 : 0;
+    if (to === EASE_TO) return;
+    EASE_FROM = EASE; EASE_TO = to; EASE_T0 = nowMs();
+  }
+  /** 推进 EASE；返回 true = 还在动 */
+  function easeStep(now) {
+    if (EASE === EASE_TO) return false;
+    var tt = Math.min(1, Math.max(0, (now - EASE_T0) / EASE_DUR));
+    EASE = EASE_FROM + (EASE_TO - EASE_FROM) * (1 - Math.pow(1 - tt, 3));
+    if (tt >= 1) EASE = EASE_TO;
+    return EASE !== EASE_TO;
   }
   /* 逐帧写条目的位移/放大。
      ⚠️ F++ 第三枪：**不要在动画尾巴上「摘属性」**。以前是 v 落回 1 时 `scale=''` +
@@ -545,39 +565,26 @@
         LAST_SX[s] = sx;
       }
     }
-    setBar(BAR_ANIM.x, BAR_ANIM.w);   // 磨砂层已在屏幕上定住（固定尺寸 + transform），条动不必补
+    var bb = barNow();                // 磨砂层已在屏幕上定住（固定尺寸 + transform），条动不必补
+    setBar(bb.x, bb.w);
   }
   function rafTick(t) {
     RAF = 0;
-    var dt = RAF_T ? Math.min(0.12, (t - RAF_T) / 1000) : 0.016;
-    RAF_T = t;
-    var n = itemsEl.children.length;
-    if (CURS.length !== n) CURS = REST.map(function () { return 1; });
-    var a = 1 - Math.exp(-dt / 0.18);         // F++ D1：180ms 时间常数（原来 45ms —— 太快）
-    var busy = false;
-    for (var i = 0; i < n; i++) {
-      // 菜单开着 / 拖入进行中：图标一概回落到 1.0（菜单就长在图标上方；拖拽时布局要稳，
-      // 插入标线与 Rust 的落点判位都按静止几何走）
-      var tgt = (IN_WIN && !MENU_OPEN && !DROP_ACTIVE && !REORDER) ? kOf(Math.abs(MX - REST[i])) : 1;
-      if (Math.abs(tgt - CURS[i]) < 0.002) { CURS[i] = tgt; continue; }
-      CURS[i] += (tgt - CURS[i]) * a;
-      busy = true;
-    }
-    // F++ D0：条只有「进/出」两次过渡，缓动与图标同一条时间常数；条内换图标不再影响条
-    var tg = barTarget();
-    if (Math.abs(tg.x - BAR_ANIM.x) < 0.05 && Math.abs(tg.w - BAR_ANIM.w) < 0.05) {
-      BAR_ANIM.x = tg.x; BAR_ANIM.w = tg.w;
-    } else {
-      BAR_ANIM.x += (tg.x - BAR_ANIM.x) * a;
-      BAR_ANIM.w += (tg.w - BAR_ANIM.w) * a;
-      busy = true;
-    }
-    layout(CURS, MX);
-    applyMag(CURS);
+    var now = t || nowMs();
+    easeTo(grownTarget());            // 状态可能被别人改过（菜单/拖入/失焦）→ 每帧对齐一次，幂等
+    var busy = easeStep(now);
+    if (IN_WIN) PX = MX;
+    // 菜单开着 / 拖入中 / 拖拽排序：图标一概回落到 1.0（菜单长在图标上方；拖拽要按静止几何落点），
+    // 但条照旧按 EASE 撑着 —— 两条分开算，别用一个开关
+    var kEase = (MENU_OPEN || DROP_ACTIVE || REORDER) ? 0 : EASE;
+    var ks = ksAt(PX, kEase);
+    CURS = ks;
+    layoutPos(ks);
+    applyMag(ks);                     // 里面顺带把条写到 barNow()（同一个 EASE）
     if (busy) { startRaf(); SETTLE_ARM = true; }
     else {
       RAF_T = 0;
-      // F++ 第三枪：条/图标的缓动真的停了 → 告诉 Rust「可以收区域了」（一次 SetWindowRgn）。
+      // 条/图标的进出场真的停了 → 告诉 Rust「可以收区域了」（一次 SetWindowRgn）。
       // 只在「这一轮动过」之后发（SETTLE_ARM），别在稳态每帧轰炸 IPC。
       if (SETTLE_ARM) {
         SETTLE_ARM = false;
@@ -587,17 +594,19 @@
   }
   var SETTLE_ARM = false;
   function startRaf() { if (!RAF) RAF = requestAnimationFrame(rafTick); }
-  function syncMagBoxes() {   // 条目重建后按当前指针位置**直接就位**（不闪回 1，再缓动到新目标）
+  function syncMagBoxes() {   // 条目重建后按当前指针位置**直接就位**（不闪回 1，不再重放进出场）
     LAST_TX = []; LAST_K = [];          // 元素换了 → 写值缓存作废
-    CURS = REST.map(function (cx) { return IN_WIN ? kOf(Math.abs(MX - cx)) : 1; });
-    layout(CURS, MX);
+    if (IN_WIN) PX = MX;
+    EASE = EASE_TO = grownTarget() ? 1 : 0;
+    CURS = ksAt(PX, EASE);
+    layoutPos(CURS);
     applyMag(CURS);
-    if (IN_WIN) startRaf();
+    if (EASE_TO) startRaf();
   }
   window.__getMag = function () {
     return { mag: MAG, size: SIZE, kMax: kMaxNow(), inWin: IN_WIN, pointerX: IN_WIN ? MX : null,
              grown: GROWN, innerH: window.innerHeight, barTop: barTopY(), k: CURS.slice(),
-             rest: REST.slice(), pos: POS.slice(), barX: BAR_ANIM.x, barW: BAR_ANIM.w,
+             rest: REST.slice(), pos: POS.slice(), barX: barNow().x, barW: barNow().w,
              barWMax: BARW_MAX, pad: PAD,
              pt: PT_N, hoverReq: GROWN_REQ, hoverOk: HOVER_N, hoverErr: HOVER_ERR,
              rects: Array.prototype.map.call(itemsEl.children, function (el) {
@@ -609,11 +618,10 @@
      量的是「算法本身」的连续性（真鼠标 / 别人在动电脑 / 动画相位都不干扰）。
      实测：D3 之前单步跳 30.5px，D3 之后 ≤3px。 */
   window.__sweepTarget = function (step) {
-    step = Math.max(1, step || 2);
+    step = Math.max(0.5, step || 2);
     var w = window.innerWidth || 0, rows = [], x, i, k;
     for (x = 0; x <= w; x += step) {
-      var ks = REST.map(function (c) { return kOf(Math.abs(x - c)); });
-      layout(ks, x);
+      layoutPos(ksAt(x, 1));
       rows.push([x, POS.slice()]);
     }
     var worst = [0, null];
@@ -623,15 +631,18 @@
         if (d > worst[0]) worst = [d, [rows[i - 1][0], rows[i][0], k]];
       }
     }
-    layout(CURS, MX);   // 还原现场（下一帧本来也会重算，这里多做一步保证干净）
+    var ksv = ksAt(PX, EASE);   // 还原现场（下一帧本来也会重算，这里多做一步保证干净）
+    layoutPos(ksv);
     return { barWIdle: BARW0, barWMax: BARW_MAX, stepMax: +worst[0].toFixed(2), at: worst[1],
              rest: REST.slice(), size: SIZE, pad: PAD,
-             atIcon: REST.map(function (c) { var ks = REST.map(function (q) { return kOf(Math.abs(c - q)); });
-                                             layout(ks, c); return POS.map(function (v) { return +v.toFixed(1); }); }) };
+             atIcon: REST.map(function (c) { layoutPos(ksAt(c, 1));
+                                             return POS.map(function (v) { return +v.toFixed(1); }); }) };
   };
   window.__setMag = function (x) {   // 验收用：不开真鼠标也能把指针 x 钉到某个位置
     IN_WIN = x !== null && x >= 0;
     MX = IN_WIN ? x : -1e9;
+    if (IN_WIN) PX = MX;
+    easeTo(grownTarget());
     startRaf();
   };
   window.__hitItem = function (x, y) {   // 验收用：这个点（窗内 CSS px）会激活哪个条目（点图标用的是同一个函数）
@@ -698,6 +709,7 @@
     return hit;
   }
   function setGrown(on) {
+    easeTo(on);                       // 放在最前面：预览 iframe 也要有进出场
     if (PREVIEW || GROWN_REQ === on) return;
     GROWN_REQ = on;
     GROWN = on;            // 区域态**跟请求同步**（乐观）—— __setPointer 的「收回」分支靠它判断，
