@@ -1358,12 +1358,28 @@ fn apply_desktop_zorder(card: *mut core::ffi::c_void) {
 }
 
 /// 把所有卡片钉回桌面层（档位是 Desktop 且没被放行时才动）
+/// 把「本该在桌面层」的窗口重新钉回锚点正上方。
+/// 卡片看 `settings.z_order`；**Dock 看它自己的 `dock.z`**（两档可以不同，别用同一个开关判）。
+/// 为什么要反复钉：Win+D「显示桌面」会把 Progman 抬到所有桌面层窗口之上（实测 z 49），
+/// 不钉的话 Dock/卡片在「显示桌面」状态下点不到、也拖不进（系统拖放只认最上面那层窗口）。
 fn reassert_desktop_layer(app: &AppHandle) {
-    if !desktop_mode() || z_suspended() {
+    if z_suspended() {
+        return;
+    }
+    let cards_desktop = desktop_mode();
+    let dock_desktop = DOCK_DESKTOP_LOCK.load(Ordering::Relaxed);
+    if !cards_desktop && !dock_desktop {
         return;
     }
     for (label, w) in app.webview_windows() {
-        if label.starts_with("card-") {
+        let want = if label.starts_with("card-") {
+            cards_desktop
+        } else if label == dock_label() {
+            dock_desktop
+        } else {
+            false
+        };
+        if want {
             if let Some(h) = hwnd_of(&w) {
                 apply_desktop_zorder(h);
             }
@@ -1389,7 +1405,7 @@ fn spawn_z_guard(app: AppHandle) {
                 ANCHOR.store(0, Ordering::Relaxed);
                 schedule_display_recheck();
             }
-            if !desktop_mode() {
+            if !desktop_mode() && !DOCK_DESKTOP_LOCK.load(Ordering::Relaxed) {
                 continue;
             }
             let _ = anchor_hwnd(); // 失效自动重解析
