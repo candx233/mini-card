@@ -2654,7 +2654,15 @@ async fn dock_click(id: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let key = dock::match_key(&item.path);
         if !key.is_empty() && !dock::is_url(&item.path) && dock::item_running(&key, &dock::running_set()) {
-            dock::activate_or_minimize(&key)
+            match dock::activate_or_minimize(&key) {
+                Ok(s) => Ok(s),
+                Err(e) => {
+                    // 运行中但没有可激活的窗口（托盘应用 / launcher 只剩隐藏窗 / 窗口在别的会话）
+                    // → 退回「再启动一次」：单实例应用会自己把已有窗口唤到前面（微信 / QQ音乐 / Steam 都是）
+                    crate::mlog(&format!("dock click 回退启动：{e}"));
+                    dock::launch(&item).map(|_| "launched")
+                }
+            }
         } else {
             dock::launch(&item).map(|_| "launched")
         }

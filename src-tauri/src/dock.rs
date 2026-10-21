@@ -642,10 +642,26 @@ fn same_app(item_key: &str, exe: &str) -> bool {
         return true;
     }
     let sys_like = |p: &str| p.starts_with("c:\\windows\\system32\\") || p.contains("\\windowsapps\\");
-    if !sys_like(item_key) {
-        return false;
+    // ② 系统应用别名（Win11 记事本）：只认文件名
+    if sys_like(item_key) && base(item_key) == base(exe) {
+        return true;
     }
-    base(item_key) == base(exe)
+    // ③ **同一安装树**：launcher 型应用的窗口常常不是它自己的进程画的 ——
+    //    Steam 条目是 `G:\steam\Steam.exe`，真正有窗口的是 `G:\steam\bin\cef\…\steamwebhelper.exe`；
+    //    战网/WeGame/Uplay 同理（launcher + 渲染子进程）。判据：条目 exe 的目录是窗口 exe 的路径前缀，
+    //    且下一字符是反斜杠。⚠️ 系统目录不参与（否则 System32 下任何进程都能认成记事本）。
+    if !sys_like(item_key) {
+        if let Some((dir, _)) = item_key.rsplit_once('\\') {
+            if dir.len() > 6
+                && exe.len() > dir.len() + 1
+                && exe.starts_with(dir)
+                && exe.as_bytes().get(dir.len()) == Some(&b'\\')
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// 该条目现在算「运行中」吗（拿一份 running 集合问，省得每条都重扫窗口）
@@ -691,11 +707,41 @@ unsafe extern "system" fn enum_win_cb(
     }
     let mut pid = 0u32;
     wam::GetWindowThreadProcessId(hwnd, &mut pid);
-    let exe = proc_exe(pid);
+    let mut exe = proc_exe(pid);
+    // UWP / MSIX：顶层窗是 ApplicationFrameWindow，属于 ApplicationFrameHost.exe；
+    // 真正跑 App 的进程挂在它的子窗 `Windows.UI.Core.CoreWindow` 上。
+    if is_frame_window(hwnd) {
+        let child = wam::FindWindowExW(
+            hwnd,
+            std::ptr::null_mut(),
+            windows_sys::w!("Windows.UI.Core.CoreWindow"),
+            std::ptr::null(),
+        );
+        if !child.is_null() {
+            let mut cpid = 0u32;
+            wam::GetWindowThreadProcessId(child, &mut cpid);
+            let cexe = proc_exe(cpid);
+            if !cexe.is_empty() {
+                exe = cexe;
+            }
+        }
+    }
     if !exe.is_empty() {
         rows.push((hwnd as isize, exe.to_lowercase()));
     }
     1
+}
+
+/// 顶层窗是不是 UWP 的宿主框（`ApplicationFrameWindow`）
+fn is_frame_window(hwnd: ws::Foundation::HWND) -> bool {
+    use ws::UI::WindowsAndMessaging as wam;
+    let mut buf = [0u16; 64];
+    let n = unsafe { wam::GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if n <= 0 {
+        return false;
+    }
+    let cls = String::from_utf16_lossy(&buf[..n as usize]);
+    cls == "ApplicationFrameWindow"
 }
 
 /// 运行中应用集合（exe 小写路径）—— D1 轮询的数据源
@@ -723,14 +769,12 @@ fn is_main_window(h: isize) -> bool {
     use ws::UI::WindowsAndMessaging as wam;
     unsafe {
         let hwnd = h as ws::Foundation::HWND;
-        if wam::GetWindowTextLengthW(hwnd) <= 0 {
-            return false;
-        }
         let mut r = ws::Foundation::RECT::default();
         if wam::GetWindowRect(hwnd, &mut r) == 0 {
             return false;
         }
-        (r.right - r.left) >= 160 && (r.bottom - r.top) >= 120
+        // 标题不再强制（有些应用主窗标题是空的）；只挡 0×0 / 小工具条
+        (r.right - r.left) >= 120 && (r.bottom - r.top) >= 90
     }
 }
 
@@ -838,6 +882,17 @@ mod tests {
         ));
         // 但普通目录下同名不算（别把别的 chrome 当自己）
         assert!(!same_app("d:\\tools\\a\\app.exe", "d:\\tools\\b\\app.exe"));
+
+        // 同一安装树：launcher 型（Steam 条目 Steam.exe，窗口是 bin\\cef\\…\\steamwebhelper.exe）
+        assert!(same_app(
+            "g:\\steam\\steam.exe",
+            "g:\\steam\\bin\\cef\\cef.win64\\steamwebhelper.exe"
+        ));
+        // 前缀必须落在目录边界上（d:\\ab 不能认成 d:\\a 里的）
+        assert!(!same_app("d:\\a\\b.exe", "d:\\ab\\c.exe"));
+        // 系统目录**不参与**同一安装树（否则 System32 下任何进程都能认成记事本）
+        assert!(!same_app("c:\\windows\\system32\\notepad.exe", "c:\\windows\\system32\\cmd.exe"));
+        assert!(same_app("c:\\windows\\system32\\notepad.exe", "c:\\windows\\system32\\notepad.exe"));
     }
 
     #[test]
