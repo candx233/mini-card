@@ -1175,8 +1175,10 @@ static DOCK_DESKTOP_LOCK: AtomicBool = AtomicBool::new(false);
 const DOCK_MARGIN: f32 = 28.0;
 /// 菜单预留高（逻辑 px）：自绘右键菜单长在条上方，窗口**永久**预留这么高 ——
 /// 菜单开合**不再改窗口几何**（F+2：改几何必在合成器上留一帧错位，实测见 docs/dock-spike.md 坑 18）。
-/// 3 项菜单 114 + 贴条 6 + 投影/顶部留白 ≈ 136。
-const DOCK_MENU_RESERVE: f32 = 136.0;
+/// 最长那份菜单 = 条目菜单 4 项（打开所在文件夹 / 从 Dock 移除 / 分隔线开关 / 取消）148
+/// + 贴条 6 + 投影/顶部留白 ≈ 172；`dock_menu` 的 extra 上限是 reserve−8，页面按「菜单高 + 16」申请，
+/// 所以这里必须 ≥ 菜单高 + 16，否则菜单上半截会被窗口上缘裁掉。
+const DOCK_MENU_RESERVE: f32 = 172.0;
 /// Dock 窗当前是否处于「余量态」（页面按指针在不在条上推过来）—— 只切**窗口区域**，不动几何
 /// F++：区域动画（窗口局部逻辑 px：x0,y0,x1,y1）。见 `dock_apply_region` 的说明。
 static DOCK_REGION_CUR: Mutex<[f32; 4]> = Mutex::new([0.0, 0.0, 0.0, 0.0]);
@@ -3306,7 +3308,7 @@ mod tests {
         // 悬停 / 菜单都不动窗口几何（这是 F+2 的全部意义）
         super::DOCK_GROWN.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(super::dock_window_rect(&d), wr, "悬停不改几何");
-        super::DOCK_MENU_EXTRA.store(140, std::sync::atomic::Ordering::Relaxed);
+        super::DOCK_MENU_EXTRA.store(super::DOCK_MENU_RESERVE as i32, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(super::dock_window_rect(&d), wr, "开菜单不改几何");
 
         // 区域：常态只有条；悬停向上放开；菜单再放开到菜单段 —— 底边都不动、都不越出窗口
@@ -3323,12 +3325,12 @@ mod tests {
         let r1 = super::dock_region_rect(&d);
         assert!(r1.1 < r0.1 && r1.3 > r0.3, "悬停区域向上放开");
         assert_eq!(r1.1 + r1.3, r0.1 + r0.3, "区域底边（= 条底边）不动");
-        super::DOCK_MENU_EXTRA.store(140, std::sync::atomic::Ordering::Relaxed);
+        super::DOCK_MENU_EXTRA.store(super::DOCK_MENU_RESERVE as i32, std::sync::atomic::Ordering::Relaxed);
         let r2 = super::dock_region_rect(&d);
         assert!(r2.1 < r1.1, "菜单区域比悬停更高");
         assert_eq!(r2.1 + r2.3, r0.1 + r0.3);
         assert!(r2.1 >= 0.0 && r2.1 + r2.3 <= wr.3 + 0.5, "区域不越出窗口（顶部预留是最后一道闸门）");
-        assert_eq!(r2.1, 0.0, "菜单要的高度超过预留 → 夹在预留内（生产路径 dock_menu 先夹一次）");
+        assert_eq!(r2.1, 0.0, "菜单要的高度 = 预留 → 夹满（顶上到 0；生产路径 dock_menu 先夹一次）");
         super::DOCK_MENU_EXTRA.store(0, std::sync::atomic::Ordering::Relaxed);
         super::DOCK_GROWN.store(false, std::sync::atomic::Ordering::Relaxed);
 

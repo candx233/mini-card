@@ -27,14 +27,14 @@
     --bubble-bg: color-mix(in oklch, var(--bg) 84%, transparent);
     --bubble-fg: var(--fg);
     /* Dock 规格（docs/dock-plan.md §1；JS 按 URL 参数覆盖）
-       F+2/F+3：窗口**固定** = 条 + 上方预留 136 + 两侧侧向量；悬停时由**条自身**向外扩（不动窗口） */
+       F+2/F+3：窗口**固定** = 条 + 上方预留 172 + 两侧侧向量；悬停时由**条自身**向外扩（不动窗口） */
     --icon: 48px;        /* 图标边长 32/40/48/56 */
     --gap: 12px;         /* 图标间距 */
     --pad: 18px;         /* 条内左右内边距（实测恒 18：条宽 n*60+24 与内容之差的一半） */
     --bar-h: 64px;       /* 玻璃条高 = 图标 + 上下留白 8×2 */
     --radius-dock: 20px; /* 比卡片 16 更圆 */
     --radius-item: 11px; /* 48px 图标的圆角（≈23%，Windows 图标规范同量级） */
-    --top-reserve: 136px;/* 窗口上方常备预留（悬停 28 与菜单预留取大者；由 Rust 的区域按需放开） */
+    --top-reserve: 172px;/* 窗口上方常备预留（悬停 28 与菜单预留取大者；由 Rust 的区域按需放开） */
     --bar-x: 0px;        /* 玻璃条在窗内的左边缘（逐帧由 JS 写：悬停时向两侧外扩） */
     --bar-w: 384px;      /* 玻璃条宽（逐帧由 JS 写） */
   }
@@ -45,7 +45,7 @@
     -webkit-font-smoothing: antialiased; user-select: none; cursor: default;
   }
   /* 玻璃条：贴窗口**底边**，宽度/左缘逐帧由 JS 写（悬停时向两侧扩，把放大后的图标包住）。
-     窗口自身固定 = 条 + 上方 136 预留 + 两侧侧向量；常态那 136 由 Rust 的窗口区域裁掉。 */
+     窗口自身固定 = 条 + 上方 172 预留 + 两侧侧向量；常态那 172 由 Rust 的窗口区域裁掉。 */
   .dock {
     position: absolute; bottom: 0; height: var(--bar-h);
     left: var(--bar-x); width: var(--bar-w);
@@ -162,7 +162,7 @@
     pointer-events: none;
   }
   .dropmark[hidden] { display: none; }
-  /* ─── F2 右键菜单：长在玻璃条上方（窗口上方常备 136 预留，开菜单只是把区域放开，几何不变）───
+  /* ─── F2 右键菜单：长在玻璃条上方（窗口上方常备 172 预留，开菜单只是把区域放开，几何不变）───
      形态按项目菜单语言（同 docs/tray-menu-plan.md §三）：行高 32 / 圆角 12 / 项内左右 10；
      底色用气泡那对变量（暗主题深底白字、亮主题白底深字，跟悬停名字气泡同一套） */
   .menu {
@@ -214,6 +214,7 @@
   var GAP = 12;
   var DIV_EXTRA = 8;            // 分组线额外占宽：组间 20 = 12 + 8（1px 线居中 → 两侧各 9.5）
   var DIVS = [];                // DIVS[i] = 第 i 个条目前面有分组线（i>0）；由 renderItems 写入
+  var ITEMS = [];               // 最近一次渲染的条目数据（右键菜单判「第几个 / 前面有没有线」）
   var KMAX = 1.75;
   var REST = [];                // 各图标**静止**中心（窗内 x）：逐帧布局与放大衰减的锚点
   var BARW0 = 384;              // 闲态条宽
@@ -381,6 +382,7 @@
   }
   function renderItems(items) {
     items = items || [];
+    ITEMS = items;
     // 运行态：payload 里带 `running`（get_dock 那条路）→ 先按它铺一遍；
     // 之后真条还有 2s 一轮的 __setRunning 推送来精修（预览 iframe 就靠这份轮询）
     if (items.length && Object.prototype.hasOwnProperty.call(items[0], 'running')) {
@@ -712,7 +714,7 @@
     startRaf();
   };
 
-  /* ── E3/F+2 余量按需存在：窗口**几何固定**（条 + 上方 136 预留 + 两侧侧向量），
+  /* ── E3/F+2 余量按需存在：窗口**几何固定**（条 + 上方 172 预留 + 两侧侧向量），
      只在「放开 / 收回窗口区域」之间切 —— 区域外的点系统根本不认为属于本窗，点击会落到下面
      **任意进程**的窗口（2026-10-16 实测 PASS：docs/verify/mc_dock_region_passthru.py）。
      为什么不用 dock-plan §8 坑 1 的原方案（固定 92 + WM_NCHITTEST 返 HTTRANSPARENT）：
@@ -972,7 +974,7 @@
   };
 
   /* ── F2 右键菜单 ──
-     菜单长在玻璃条**上方** —— 窗口上方常备 136 预留，开菜单只是把区域放开（几何不变）。
+     菜单长在玻璃条**上方** —— 窗口上方常备 172 预留，开菜单只是把区域放开（几何不变）。
      关闭路径：点项 / 点条上别处 / 指针走出「菜单 ∪ 条」（页面只认 Rust 推来的真光标）。
      为什么不做失焦关闭：Dock 窗是 NOACTIVATE + 不可聚焦的，它根本收不到 blur（点桌面也不关）。 */
   var menuEl = document.getElementById('menu');
@@ -988,10 +990,24 @@
     menuEl.hidden = true; menuEl.innerHTML = '';
     menuExtra(false, 0);
   }
+  /* 条目在当前 ITEMS 里的位次 + 真值（右键菜单据此改文案；首个条目前面不能画线） */
+  function itemPos(el) {
+    if (!el) return null;
+    for (var i = 0; i < ITEMS.length; i++) {
+      if (ITEMS[i].id === el.dataset.id) return { i: i, it: ITEMS[i] };
+    }
+    return null;
+  }
   function openMenu(itemEl, clientX) {
+    var d = itemPos(itemEl);
     var rows = itemEl
-      ? [{ act: 'reveal', label: '打开所在文件夹' }, { act: 'remove', label: '从 Dock 移除' }, { act: 'cancel', label: '取消' }]
+      ? [{ act: 'reveal', label: '打开所在文件夹' }, { act: 'remove', label: '从 Dock 移除' }]
       : [{ act: 'add', label: '添加应用' }, { act: 'settings', label: 'Dock 设置' }];
+    // 分组分隔线挂在条目「之前」→ 首个条目没有这一行（第一个前面没有图标可分隔）
+    if (itemEl && d && d.i > 0) {
+      rows.push({ act: 'divider', label: d.it.divider_before ? '移除前面的分隔线' : '在此前加分隔线' });
+    }
+    if (itemEl) rows.push({ act: 'cancel', label: '取消' });
     MENU_ITEM = itemEl || null;
     menuEl.innerHTML = '';
     rows.forEach(function (r) {
@@ -1057,6 +1073,12 @@
       T.core.invoke('dock_reveal', { path: it.dataset.path }).catch(function (err) { bubble('打开失败：' + err, it, 2000); });
     } else if (act === 'remove' && it) {
       T.core.invoke('dock_remove', { id: it.dataset.id }).catch(function (err) { bubble('移除失败：' + err, it, 2000); });
+    } else if (act === 'divider' && it) {
+      // 建 / 删分组线：真值落盘后由 Rust 把新 payload 推回来（窗宽 ±8 也在 sync_dock 里一起重排）
+      var d = itemPos(it);
+      if (!d || d.i < 1) return;
+      T.core.invoke('dock_item_update', { id: d.it.id, divider: !d.it.divider_before })
+        .catch(function (err) { bubble('设置失败：' + err, itemsEl.children[0], 2000); });
     } else if (act === 'add') {
       T.core.invoke('plugin:dialog|open', {
         options: {
