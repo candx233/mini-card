@@ -104,6 +104,12 @@
   .pct { font-size: 0.8125rem; color: var(--fg); text-align: right; }
   .bar { height: 0.4375rem; border-radius: 999px; overflow: hidden; background: color-mix(in oklch, var(--fg) 25%, transparent); }
   .bar > i { display: block; height: 100%; border-radius: 999px; background: color-mix(in oklch, var(--fg) 90%, transparent); }
+  /* 性能卡的填充改用 SVG（2026-10-22「条的变化不是无级的」）：
+     实测 CSS 背景色的 right edge 在合成时**整像素吸附**（宽度 +0.1px 时边缘覆盖率仍是 0→0→1），
+     慢速段就必然「一格一格」；SVG 形状走 Skia 覆盖率抗锯齿，覆盖率随亚像素位置连续变化。
+     形保持同款药丸：rect rx=ry=高/2，宽度用 JS 按百分比写（单位=CSS px，不用 viewBox 以免横向拉伸圆头）。 */
+  .perf-rows .bar > svg.bfill { display: block; width: 100%; height: 100%; }
+  .perf-rows .bar > svg.bfill rect { fill: color-mix(in oklch, var(--fg) 90%, transparent); }
   /* 性能行自身放大（2026-09-28 两轮 + 2026-10-01 第三轮「内容稍微放大、上下留空再小一点」
      + 2026-10-06「性能卡上的字还可以调大一点」）：
      .pct/.bar 与磁盘卡共用，必须在 .perf-rows 作用域里改，别动全局那条（会连带改磁盘卡排版）。
@@ -741,7 +747,7 @@
      ③ 槽位记忆跨重建存活：切 GPU 显隐、断流回来重建，条都不回零。 */
   var BAR_R = 0.12;       // 起停坡各占时长的比例（坡内线性加减速；主体匀速）
   var barState = {};      // key → {from, tgt, t0, ms}：显示值一律按 u 现算
-  var barItems = [];      // 活着的 fill [{el, key, w}]（w = 已写入值，同值不重复写）
+  var barItems = [];      // 活着的填充 [{el, key, w, put}]（put(x) 把百分比写进 DOM；w = 已写值，同值不重复写）
   var barRaf = 0;
   var snapGap = 0, snapPrevAt = 0;   // 推送间隔 EMA(ms)：补间时长跟着真实节奏走
   function barEase(u) {              // 梯形速度剖面：f(0)=0、f(1)=1、两端 v=0、中段匀速
@@ -781,11 +787,11 @@
       var st = barState[it.key]; if (!st) continue;
       if (st.ms > 0 && now - st.t0 < st.ms) live++;
       var x = barValue(st, now);
-      if (Math.abs(x - it.w) > 0.004) { it.el.style.width = x.toFixed(2) + '%'; it.w = x; }
+      if (Math.abs(x - it.w) > 0.004) { it.put(x); it.w = x; }
     }
     if (live && barItems.length) barRaf = requestAnimationFrame(barTick);   // 走完就停 rAF，静止零成本
   }
-  function barBind(el, key, tgt) {
+  function barBind(el, key, tgt, put) {
     if (!el) return;
     barTween(key, tgt);
     var x = barNow(key, tgt);
@@ -795,8 +801,11 @@
       if (it.el === el) { cur = it; return false; }
       return true;
     });
-    if (!cur) { el.style.width = x.toFixed(2) + '%'; cur = { el: el, key: key, w: x }; }   // 新元素：首帧直接落位
-    else if (Math.abs(x - cur.w) > 0.004) { el.style.width = x.toFixed(2) + '%'; cur.w = x; }   // 同值不写（1s 一拍不做无谓重排）
+    if (!cur) { cur = { el: el, key: key, w: x, put: put }; put(x); }      // 新元素：首帧直接落位
+    else {
+      cur.put = put;                                                        // 重建后 rect 换了，回调重挂
+      if (Math.abs(x - cur.w) > 0.004) { put(x); cur.w = x; }               // 同值不写（1s 一拍不做无谓重排）
+    }
     barItems.push(cur);
     if (!barRaf) barRaf = requestAnimationFrame(barTick);
   }
@@ -825,10 +834,30 @@
         (r[2] === null ? '' : ' num') + '">' + r[1] + '</span></div>';
       if (r[2] === null) return '<div class="perf-row">' + line + '</div>';
       return '<div class="perf-row">' + line +
-        '<div class="bar" role="img" aria-label="' + r[0] + ' 占用 ' + r[1] + '"><i style="width:' +
-        barW(r[0], r[2]) + '"></i></div></div>';
+        '<div class="bar" role="img" aria-label="' + r[0] + ' 占用 ' + r[1] + '">' +
+        '<svg class="bfill" width="100%" height="100%" aria-hidden="true">' +
+        '<rect x="0" y="0" width="' + barW(r[0], r[2]) + '" height="100%" rx="5" ry="5"></rect></svg></div></div>';
     }).join('');
     return '<div class="perf-rows' + (curState === 'error' ? ' dim' : '') + '">' + rows + '</div>';
+  }
+
+  /* 性能卡的 SVG 填充：把百分比换算成条内像素宽写进 rect。
+     用 SVG 而不是 CSS 背景：CSS 背景右缘在合成时整像素吸附（实测 +0.1px 仍是 0→0→1），
+     SVG 形状有亚像素覆盖率抗锯齿 —— 这是「条的变化要无级」的关键。 */
+  function perfBind(svg, lab, pct) {
+    if (!svg) return;
+    var rect = svg.querySelector('rect');
+    if (!rect) return;
+    var r = svg.getBoundingClientRect();
+    var h = r.height || 10, w = r.width || 220;
+    if (Math.abs((parseFloat(rect.getAttribute('height')) || 0) - h) > 0.05) {
+      rect.setAttribute('height', h.toFixed(2));
+      rect.setAttribute('rx', (h / 2).toFixed(2));
+      rect.setAttribute('ry', (h / 2).toFixed(2));
+    }
+    barBind(svg, 'perf:' + lab, pct, function (x) {
+      rect.setAttribute('width', Math.max(0, x / 100 * w).toFixed(2));
+    });
   }
 
   /* 性能卡 normal 态的走路更新：只条件写文字/aria，条宽交给 barTick 补间。
@@ -851,7 +880,7 @@
       if (w[2] === null) return false;
       var aria = w[0] + ' 占用 ' + w[1];
       if (bar.getAttribute('aria-label') !== aria) bar.setAttribute('aria-label', aria);
-      barBind(bar.querySelector('i'), 'perf:' + w[0], w[2]);
+      perfBind(bar.querySelector('svg.bfill'), w[0], w[2]);
     }
     return true;
   }
