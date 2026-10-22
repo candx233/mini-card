@@ -730,26 +730,122 @@
     return Math.max(1, Math.round(b / 1048576)) + ' MB';
   }
 
+  /* ── 条宽平滑引擎（性能卡的条）──
+     数据 1s 一拍，直接写 width% 就是「一秒跳一格」（2026-10-22 用户「跟 PPT 一样一帧一帧变化」）。
+     这里把每次新样本变成一段补间：从**当前显示值**出发、时长≈实测推送间隔、两端速度为 0（smoothstep），
+     条一直在走、下一拍刚好接上 —— 既没有瞬跳，也没有「冲一下停半秒」。
+     ① 不用 CSS transition：卡面整段重建会换掉 fill 元素，transition 要么从 0 重放、要么瞬跳；
+        这里 rAF 写宽度、进度按槽位（perf:CPU…）记忆，重建后按记忆落位续播（铁律①的同一套解法）。
+     ② 不用指数缓动（x += (t-x)*a）：尾巴永远到不了终点，再叠写入门槛就是「最后一小段卡顿」（dock 那轮实测踩过）。
+     ③ 时长跟着推送间隔走（EMA）：预览 2s 轮询 / 用户降频时自动放慢，不会「冲一下、停两秒」。
+     槽位记忆跨重建存活 → 切 GPU 显隐、断流回来重建，条都不会回零。 */
+  var barState = {};      // key → {from, tgt, t0, ms}（百分比；当前值现算，不存中间态）
+  var barItems = [];      // 活着的 fill [{el, key, w}]（w = 已写入值，同值不重复写）
+  var barRaf = 0;
+  var snapGap = 0, snapPrevAt = 0;   // 推送间隔 EMA(ms)：给补间时长用
+  function barEase(u) { return u * u * (3 - 2 * u); }              // smoothstep：v(0)=v(1)=0，无过冲
+  function barMs() { return Math.max(320, Math.min(1400, snapGap ? snapGap * 0.9 : 900)); }
+  function barValue(st, now) {
+    if (!(st.ms > 0)) return st.tgt;
+    var u = (now - st.t0) / st.ms;
+    if (u >= 1) return st.tgt;
+    if (u <= 0) return st.from;
+    return st.from + (st.tgt - st.from) * barEase(u);
+  }
+  function barTween(key, tgt) {
+    var now = performance.now();
+    var st = barState[key];
+    if (!st) { barState[key] = { from: tgt, tgt: tgt, t0: now, ms: 0 }; return; }   // 首见：直接落位（别从 0 长出来）
+    if (st.tgt === tgt) return;                                                     // 目标没变：别重启时间轴（重启=速度断档）
+    st.from = barValue(st, now);   // 中途改目标也从当前显示值起走 → 位置/速度都连续
+    st.tgt = tgt; st.t0 = now; st.ms = barMs();
+  }
+  function barW(key, v) {         // 重建时写进 style 的初值：补间中的当前值（防「先闪到目标再跳回来」）
+    var st = barState[key];
+    return (st ? barValue(st, performance.now()) : v).toFixed(2) + '%';
+  }
+  function barTick() {
+    barRaf = 0;
+    var now = performance.now(), live = 0;
+    for (var i = barItems.length - 1; i >= 0; i--) {
+      var it = barItems[i];
+      if (!it.el.isConnected) { barItems.splice(i, 1); continue; }   // 重建残留，清退
+      var st = barState[it.key]; if (!st) continue;
+      if (st.ms > 0 && now - st.t0 < st.ms) live++;
+      var x = barValue(st, now);
+      if (Math.abs(x - it.w) > 0.004) { it.el.style.width = x.toFixed(2) + '%'; it.w = x; }
+    }
+    if (live && barItems.length) barRaf = requestAnimationFrame(barTick);   // 走完就停 rAF，静止零成本
+  }
+  function barBind(el, key, tgt) {
+    if (!el) return;
+    barTween(key, tgt);
+    var x = barValue(barState[key], performance.now());
+    var cur = null;
+    barItems = barItems.filter(function (it) {
+      if (!it.el.isConnected) return false;          // 重建残留
+      if (it.el === el) { cur = it; return false; }
+      return true;
+    });
+    if (!cur) { el.style.width = x.toFixed(2) + '%'; cur = { el: el, key: key, w: x }; }   // 新元素：首帧直接落位
+    else if (Math.abs(x - cur.w) > 0.004) { el.style.width = x.toFixed(2) + '%'; cur.w = x; }   // 同值不写（1s 一拍不做无谓重排）
+    barItems.push(cur);
+    if (!barRaf) barRaf = requestAnimationFrame(barTick);
+  }
+  window.__barState = function () {   // 诊断用只读：{槽位: 当前显示百分比}
+    var now = performance.now(), o = {};
+    for (var k in barState) if (barState.hasOwnProperty(k)) o[k] = +barValue(barState[k], now).toFixed(2);
+    return o;
+  };
+
   /* ── 各卡渲染（结构与 cards-design.html 逐字同源） ── */
 
-  function renderPerf() {
+  /* 性能卡三行的期望值（唯一真源：整段重建与走路更新共用）→ [[标签, 显示文本, 值|null(无条)]] */
+  function perfRows() {
     var cpu = Math.round(snap.cpu) || 0;
     var ramPct = snap.mem_total > 0 ? Math.round(snap.mem_used / snap.mem_total * 100) : 0;
     var gpu = (snap.gpus && snap.gpus.length) ? Math.round(snap.gpus[0].usage) : null;
-    var rows =
-      row('CPU', cpu + '%', cpu) +
-      row('RAM', ramPct + '%', ramPct) +
-      (SHOW_GPU
-        ? (gpu === null
-            ? '<div class="perf-row"><div class="rowline"><span class="lab">GPU</span><span class="pct">未检测到</span></div></div>'
-            : row('GPU', gpu + '%', gpu))
-        : '');
+    var out = [['CPU', cpu + '%', cpu], ['RAM', ramPct + '%', ramPct]];
+    if (SHOW_GPU) out.push(gpu === null ? ['GPU', '未检测到', null] : ['GPU', gpu + '%', gpu]);
+    return out;
+  }
+
+  function renderPerf() {
+    var rows = perfRows().map(function (r) {
+      // 「未检测到」不是数字：保持原样不带 .num（mono/等宽数字会换字形）
+      var line = '<div class="rowline"><span class="lab">' + r[0] + '</span><span class="pct' +
+        (r[2] === null ? '' : ' num') + '">' + r[1] + '</span></div>';
+      if (r[2] === null) return '<div class="perf-row">' + line + '</div>';
+      return '<div class="perf-row">' + line +
+        '<div class="bar" role="img" aria-label="' + r[0] + ' 占用 ' + r[1] + '"><i style="width:' +
+        barW(r[0], r[2]) + '"></i></div></div>';
+    }).join('');
     return '<div class="perf-rows' + (curState === 'error' ? ' dim' : '') + '">' + rows + '</div>';
-    function row(lab, pct, v) {
-      return '<div class="perf-row"><div class="rowline"><span class="lab">' + lab +
-        '</span><span class="pct num">' + pct + '</span></div>' +
-        '<div class="bar" role="img" aria-label="' + lab + ' 占用 ' + pct + '"><i style="width:' + v + '%"></i></div></div>';
+  }
+
+  /* 性能卡 normal 态的走路更新：只条件写文字/aria，条宽交给 barTick 补间。
+     每秒整段重建会换掉 fill 元素（补间断档）也白重排一次文本；结构变了（GPU 行出现/消失）
+     返回 false，交回整段重建兜底。 */
+  function perfPaint() {
+    if (curState !== 'normal' || !snap) return false;
+    var rowsEl = bodyEl.querySelector('.perf-rows');
+    if (!rowsEl) return false;
+    var want = perfRows();
+    var rows = rowsEl.querySelectorAll('.perf-row');
+    if (rows.length !== want.length) return false;
+    for (var i = 0; i < want.length; i++) {
+      var r = rows[i], w = want[i];
+      var labEl = r.querySelector('.lab'), pctEl = r.querySelector('.pct');
+      if (!labEl || !pctEl || labEl.textContent !== w[0]) return false;
+      if (pctEl.textContent !== w[1]) pctEl.textContent = w[1];
+      var bar = r.querySelector('.bar');
+      if (!bar) { if (w[2] !== null) return false; continue; }   // GPU「未检测到」本来就没有条
+      if (w[2] === null) return false;
+      var aria = w[0] + ' 占用 ' + w[1];
+      if (bar.getAttribute('aria-label') !== aria) bar.setAttribute('aria-label', aria);
+      barBind(bar.querySelector('i'), 'perf:' + w[0], w[2]);
     }
+    return true;
   }
 
   function renderDisks() {
@@ -1375,6 +1471,11 @@
         lastRenderAt = Date.now();
         return;
       }
+      // 性能卡同理：只走路更新（条宽由 barTick 连续补间，重建会打断）
+      if (kind === 'Performance' && !force && perfPaint()) {
+        lastRenderAt = Date.now();
+        return;
+      }
       html =
         kind === 'Performance' ? renderPerf() :
         kind === 'Disks' ? renderDisks() :
@@ -1385,6 +1486,7 @@
         kind === 'Clock' ? renderClock() : renderWeather();
     }
     bodyEl.innerHTML = html;
+    if (kind === 'Performance' && st === 'normal') perfPaint();   // 重建/首帧：把条挂到补间上（按记忆落位，不回零）
     if (kind === 'Calendar') syncCalChip();   // 块位置按布局盒（亚像素）写入 SVG 层
     // 音乐卡：封面 dataURL（Rust 缓存）同步注入两层——.mc-cover 那层在 1px 边框底下（防蓝圈），.mc-art 是主图层
     if (kind === 'Music' && msnap && msnap.cover) {
@@ -1407,7 +1509,14 @@
   /* ── 数据接入：Tauri 事件推送 + 首帧拉取 ── */
   function onSnap(p) {
     if (!p) return;
-    snap = p; lastAt = Date.now();
+    var nowT = Date.now();
+    if (snapPrevAt) {
+      var g = nowT - snapPrevAt;
+      // 推送间隔 EMA（只认合理区间）：条宽补间时长跟着它走，预览轮询 / 用户降频都自动适配
+      if (g > 120 && g < 10000) snapGap = snapGap ? snapGap * 0.6 + g * 0.4 : g;
+    }
+    snapPrevAt = nowT;
+    snap = p; lastAt = nowT;
     if (kind === 'Disks' && !pendingTimer && Date.now() - lastRenderAt < (RATE || 5000)) {
       pendingTimer = setTimeout(function () { pendingTimer = null; render(); },
         (RATE || 5000) - (Date.now() - lastRenderAt));
