@@ -730,39 +730,47 @@
     return Math.max(1, Math.round(b / 1048576)) + ' MB';
   }
 
-  /* ── 条宽平滑引擎（性能卡的条）──
-     数据 1s 一拍，直接写 width% 就是「一秒跳一格」（2026-10-22 用户「跟 PPT 一样一帧一帧变化」）。
-     这里把每次新样本变成一段补间：从**当前显示值**出发、时长≈实测推送间隔、两端速度为 0（smoothstep），
-     条一直在走、下一拍刚好接上 —— 既没有瞬跳，也没有「冲一下停半秒」。
-     ① 不用 CSS transition：卡面整段重建会换掉 fill 元素，transition 要么从 0 重放、要么瞬跳；
-        这里 rAF 写宽度、进度按槽位（perf:CPU…）记忆，重建后按记忆落位续播（铁律①的同一套解法）。
-     ② 不用指数缓动（x += (t-x)*a）：尾巴永远到不了终点，再叠写入门槛就是「最后一小段卡顿」（dock 那轮实测踩过）。
-     ③ 时长跟着推送间隔走（EMA）：预览 2s 轮询 / 用户降频时自动放慢，不会「冲一下、停两秒」。
-     槽位记忆跨重建存活 → 切 GPU 显隐、断流回来重建，条都不会回零。 */
-  var barState = {};      // key → {from, tgt, t0, ms}（百分比；当前值现算，不存中间态）
+  /* ── 条宽平滑引擎（性能卡的条）── v3（2026-10-22）
+     数据 1s 一拍，直接写 width% 就是「一秒跳一格」。
+     v1 smoothstep / v2 弹簧：两端（或尾巴）速度趋 0 → 每秒「起步 → 慢爬 → 停 → 再起步」，
+     慢爬段速度只有几 px/s，而条右缘在合成后是整像素跳（实测每 100~170ms 才跳 1px）→ 看着就是顿。
+     v3 用**梯形速度曲线**：短加速坡（12%）→ 匀速主体 → 短减速坡，时长≈实测推送间隔。
+     匀速主体让每帧位移稳定且不低于“看得见连续”的速度，不做长慢爬；下一拍到达时上一段刚好走完。
+     ① 不用 CSS transition：卡面整段重建会换掉 fill 元素，transition 要么从 0 重放、要么瞬跳。
+     ② 闭式解按 t0 现算（任意 dt 稳定），掉帧/后台回来都不跑偏。
+     ③ 槽位记忆跨重建存活：切 GPU 显隐、断流回来重建，条都不回零。 */
+  var BAR_R = 0.12;       // 起停坡各占时长的比例（坡内线性加减速；主体匀速）
+  var barState = {};      // key → {from, tgt, t0, ms}：显示值一律按 u 现算
   var barItems = [];      // 活着的 fill [{el, key, w}]（w = 已写入值，同值不重复写）
   var barRaf = 0;
-  var snapGap = 0, snapPrevAt = 0;   // 推送间隔 EMA(ms)：给补间时长用
-  function barEase(u) { return u * u * (3 - 2 * u); }              // smoothstep：v(0)=v(1)=0，无过冲
-  function barMs() { return Math.max(320, Math.min(1400, snapGap ? snapGap * 0.9 : 900)); }
+  var snapGap = 0, snapPrevAt = 0;   // 推送间隔 EMA(ms)：补间时长跟着真实节奏走
+  function barEase(u) {              // 梯形速度剖面：f(0)=0、f(1)=1、两端 v=0、中段匀速
+    if (u <= 0) return 0;
+    if (u >= 1) return 1;
+    var A = 1 / (1 - BAR_R);
+    if (u < BAR_R) return A * u * u / (2 * BAR_R);
+    if (u <= 1 - BAR_R) return A * (BAR_R / 2 + u - BAR_R);
+    return 1 - A * (1 - u) * (1 - u) / (2 * BAR_R);
+  }
+  function barMs() { return Math.max(300, Math.min(1500, snapGap ? snapGap * 0.95 : 950)); }
   function barValue(st, now) {
-    if (!(st.ms > 0)) return st.tgt;
-    var u = (now - st.t0) / st.ms;
+    var u = st.ms > 0 ? (now - st.t0) / st.ms : 1;
     if (u >= 1) return st.tgt;
-    if (u <= 0) return st.from;
     return st.from + (st.tgt - st.from) * barEase(u);
   }
   function barTween(key, tgt) {
-    var now = performance.now();
-    var st = barState[key];
-    if (!st) { barState[key] = { from: tgt, tgt: tgt, t0: now, ms: 0 }; return; }   // 首见：直接落位（别从 0 长出来）
-    if (st.tgt === tgt) return;                                                     // 目标没变：别重启时间轴（重启=速度断档）
-    st.from = barValue(st, now);   // 中途改目标也从当前显示值起走 → 位置/速度都连续
+    var now = performance.now(), st = barState[key];
+    if (!st) { barState[key] = { from: tgt, tgt: tgt, t0: now, ms: 0 }; return; }   // 首见：直接落位
+    if (st.tgt === tgt) return;                                                    // 目标没变：别重启时间轴（重启=速度断档）
+    st.from = barValue(st, now);   // 从当前显示值起步 → 位置连续
     st.tgt = tgt; st.t0 = now; st.ms = barMs();
   }
-  function barW(key, v) {         // 重建时写进 style 的初值：补间中的当前值（防「先闪到目标再跳回来」）
+  function barNow(key, v) {       // 当前显示值；槽位还没有时用原始值
     var st = barState[key];
-    return (st ? barValue(st, performance.now()) : v).toFixed(2) + '%';
+    return st ? barValue(st, performance.now()) : v;
+  }
+  function barW(key, v) {         // 重建时写进 style 的初值：补间中的当前值（防「先闪到目标再跳回来」）
+    return barNow(key, v).toFixed(2) + '%';
   }
   function barTick() {
     barRaf = 0;
@@ -780,7 +788,7 @@
   function barBind(el, key, tgt) {
     if (!el) return;
     barTween(key, tgt);
-    var x = barValue(barState[key], performance.now());
+    var x = barNow(key, tgt);
     var cur = null;
     barItems = barItems.filter(function (it) {
       if (!it.el.isConnected) return false;          // 重建残留
@@ -1512,7 +1520,7 @@
     var nowT = Date.now();
     if (snapPrevAt) {
       var g = nowT - snapPrevAt;
-      // 推送间隔 EMA（只认合理区间）：条宽补间时长跟着它走，预览轮询 / 用户降频都自动适配
+      // 推送间隔 EMA（只认合理区间）：条宽补间时长跟着真实节奏走（预览轮询 2s / 用户降频都自动适配）
       if (g > 120 && g < 10000) snapGap = snapGap ? snapGap * 0.6 + g * 0.4 : g;
     }
     snapPrevAt = nowT;
