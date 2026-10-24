@@ -39,3 +39,5 @@ docs/verify/**/*.png
 /IDEA.md
 /docs/
 /minicard发版计划.md
+# 设计阶段的截图/对比图产物（本地取证，不进仓库）
+/design-shots/

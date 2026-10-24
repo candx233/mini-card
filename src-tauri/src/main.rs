@@ -1016,9 +1016,18 @@ unsafe extern "system" fn card_wnd_proc(
         // WM_MOVING 是系统拖动循环里「位置还没落地」的那一枪 → 改 RECT 就能无抖动地磁吸；
         // WM_EXITSIZEMOVE 收尾（清线 + 隐藏辅助线窗口 + 把卡钉回桌面层）。
         0x0216 => {
-            // WM_MOVING（Dock 不登记 guide 白名单 → 不画对齐线）
-            if !is_dock_hwnd(hwnd) {
-                let r = &mut *(lparam as *mut windows_sys::Win32::Foundation::RECT);
+            // WM_MOVING：卡片按整窗对齐；Dock 用可见玻璃条对齐
+            // （窗口含上下/两侧预留，按窗口边吸会吸到看不见的边）
+            let r = &mut *(lparam as *mut windows_sys::Win32::Foundation::RECT);
+            if is_dock_hwnd(hwnd) {
+                let d = DOCK_LAST
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| Config::load().dock);
+                let bar = dock_bar_rect_px(&d, r);
+                guide::moving_dock(hwnd, &bar, r);
+            } else {
                 guide::moving(hwnd, r);
             }
         }
@@ -1965,6 +1974,30 @@ fn dock_side_reserve(d: &config::Dock) -> f32 {
     worst.ceil() + 2.0
 }
 
+/// 玻璃条在屏幕上的物理矩形（WM_MOVING 的对齐基准）。
+/// 不能拿整个 Dock 窗口去吸：窗口含上下/两侧预留（顶部预留 172、两侧 side），
+/// 按窗口边对齐会让看不见的预留边吸到屏幕上，条本身反而不齐。
+/// 窗口高 = 条高 + 顶部预留（逻辑），用实际窗口高反推缩放；条在窗内水平居中。
+fn dock_bar_rect_px(
+    d: &config::Dock,
+    win: &windows_sys::Win32::Foundation::RECT,
+) -> windows_sys::Win32::Foundation::RECT {
+    let win_w = (win.right - win.left) as f32;
+    let win_h = (win.bottom - win.top) as f32;
+    let logical_h = d.bar_height() + dock_top_reserve();
+    let s = if logical_h > 0.0 { win_h / logical_h } else { 1.0 };
+    let bar_w = d.bar_width() * s;
+    let bar_h = d.bar_height() * s;
+    let top = win.top as f32 + dock_top_reserve() * s;
+    let cx = win.left as f32 + win_w / 2.0;
+    windows_sys::Win32::Foundation::RECT {
+        left: (cx - bar_w / 2.0).round() as i32,
+        top: top.round() as i32,
+        right: (cx + bar_w / 2.0).round() as i32,
+        bottom: (top + bar_h).round() as i32,
+    }
+}
+
 /// Dock 窗口的**固定**矩形（逻辑 px）：条永远贴窗口底边、上方常备 `dock_top_reserve()`、
 /// 两侧各备侧向量 —— **悬停/开菜单都不再改它**（改几何会在合成器上留一帧错位，见坑 18）。
 /// `d.cx/d.y` 的口径不变（中心 x + 虚拟 92 框的上边缘 = 条顶边往上 28）。
@@ -2223,17 +2256,18 @@ fn push_dock_drop(w: &WebviewWindow, index: Option<usize>) {
 /// Dock 的 URL 参数：尺寸档 / 放大强度 / 玻璃两参 / 明暗
 fn dock_url(d: &config::Dock, s: &config::Settings) -> String {
     format!(
-        "dock.html?size={}&mag={}&glass={}&blur={}&dark={}",
+        "dock.html?size={}&mag={}&glass={}&blur={}&dark={}&pinned={}",
         d.size,
         d.mag,
         s.glass_alpha,
         s.glass_blur,
-        if matches!(s.theme, config::Theme::Light) { 0 } else { 1 }
+        if matches!(s.theme, config::Theme::Light) { 0 } else { 1 },
+        if d.pinned { 1 } else { 0 }
     )
 }
 
 /// Dock 全量 payload（`get_dock` 命令与 `__setDock` 推送同一份形状）：
-/// `{ enabled, size, mag, z, hide_desktop_icons, items: [{id,name,path,args,divider_before,icon}] }`
+/// `{ enabled, pinned, size, mag, z, hide_desktop_icons, items: [{id,name,path,args,divider_before,icon}] }`
 /// `icon` = 提取好的 PNG 绝对路径（前端 convertFileSrc 加载）；取不到 = null → 前端落首字母色块。
 fn dock_payload(cfg: &Config) -> serde_json::Value {
     let items: Vec<serde_json::Value> = cfg
@@ -2255,6 +2289,7 @@ fn dock_payload(cfg: &Config) -> serde_json::Value {
         .collect();
     serde_json::json!({
         "enabled": cfg.dock.enabled,
+        "pinned": cfg.dock.pinned,
         "size": cfg.dock.size,
         "mag": cfg.dock.mag,
         "z": if matches!(cfg.dock.z, ZOrder::Desktop) { "desktop" } else { "top" },
@@ -2613,7 +2648,7 @@ async fn dock_item_update(
     Ok(dock_payload(&cfg))
 }
 
-/// Dock 设置项（启用/尺寸/放大/层级/隐藏桌面图标）。
+/// Dock 设置项（启用/固定位置/尺寸/放大/层级/隐藏桌面图标）。
 /// · 条目增删排序走各自命令 → 这里**忽略 payload 里的 items**（页面列表可能是旧的，会吃掉刚加的条目）
 /// · `cx/y/auto_hide` 同理以盘上活值为准（刚拖过窗口的那一下就写在盘上，别被页面的旧值顶掉）
 /// · 尺寸过 `snap_size` 闸门（手改 config 的野值也在 Rust 侧收口）

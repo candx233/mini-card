@@ -205,6 +205,7 @@
 (function () {
   var params = new URLSearchParams(location.search);
   var T = window.__TAURI__;
+  var PINNED = params.get('pinned') === '1';   // 固定位置：拖空白不移动整条
 
   /* ── 尺寸档（32/40/48/56）：条高 = 图标 + 16；条宽 = n*60 + 24（条内左右内边距恒 18） ── */
   var SIZE = Number(params.get('size')) || 48;
@@ -433,6 +434,7 @@
   }
   window.__setDock = function (p) {
     if (!p) return;
+    if ('pinned' in p) { PINNED = !!p.pinned; }
     if (p.size) { SIZE = Number(p.size) || SIZE; }
     if (isFinite(Number(p.mag))) { MAG = Number(p.mag); }
     applySizing();
@@ -586,6 +588,7 @@
     }
     var bb = barNow();                // 磨砂层已在屏幕上定住（固定尺寸 + transform），条动不必补
     setBar(bb.x, bb.w);
+    placeBubble();                    // 名字气泡跟着锚定图标的视觉中心（整排在放大布局里平移时也不掉队）
   }
   function rafTick(t) {
     RAF = 0;
@@ -771,6 +774,7 @@
   var holdTimer = null;
   function startDrag() {
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    if (PINNED) return;
     var wa = T && T.window;
     if (wa && wa.getCurrentWindow) {
       try { wa.getCurrentWindow().startDragging(); } catch (err) { console.error(err); }
@@ -778,7 +782,7 @@
   }
   var dockEl = document.getElementById('dock');
   dockEl.addEventListener('mousedown', function (e) {
-    if (PREVIEW || e.button !== 0) return;
+    if (PREVIEW || PINNED || e.button !== 0) return;
     // 图标上按下不拖整条（放大后图标顶出条外、位移后的视觉矩形，按视觉矩形兜底）
     if (e.target && e.target.closest && e.target.closest('.item')) return;
     if (itemAtPoint(e.clientX, e.clientY)) return;
@@ -880,13 +884,25 @@
   /* ── C1：点图标 → 启动 + 跳一下 + 1.5s「启动中」气泡 ── */
   var bubbleEl = document.getElementById('bubble');
   var bubbleTimer = null;
+  var bubbleItem = null;          // 气泡当前锚定的条目：位置每帧跟着它的视觉中心（见 applyMag）
+  /* 气泡 x = 锚定条目**视觉中心**。⚠️ 只在这里放一次不行：鼠标进条的那一下整排还在往放大布局
+     过渡（宽度累加 + 整行居中 → 每个图标的中心都会平移几 px），指针在图标内挪动时中心也继续
+     跟着指针走。实测「进条那一刻定住」会让名字偏出图标中心最多 8.4px（用户：没有完全跟在图标
+     的正上方）→ 悬停期间每帧重放，位移写入门槛 0.05px。 */
+  function placeBubble() {
+    if (!bubbleEl || !bubbleItem || !bubbleItem.isConnected) return;
+    var r = bubbleItem.getBoundingClientRect();     // 位移 + 放大后的视觉矩形
+    var x = r.left + r.width / 2;
+    var cur = parseFloat(bubbleEl.dataset.x || 'NaN');
+    if (isFinite(cur) && Math.abs(x - cur) < 0.05) return;
+    bubbleEl.dataset.x = String(x);
+    bubbleEl.style.left = x + 'px';
+  }
   function bubble(text, item, ms) {
     if (!bubbleEl) return;
     bubbleEl.textContent = text;
-    if (item) {
-      var r = item.getBoundingClientRect();          // 位移 + 放大后按**视觉**中心落点
-      bubbleEl.style.left = (r.left + r.width / 2) + 'px';
-    }
+    bubbleItem = item || null;
+    placeBubble();
     bubbleEl.classList.add('on');
     if (bubbleTimer) clearTimeout(bubbleTimer);
     if (ms > 0) {
@@ -895,6 +911,7 @@
   }
   function hideBubble() {
     if (bubbleEl) bubbleEl.classList.remove('on');
+    bubbleItem = null;
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
   }
   /* 跳一下：CSS keyframes 一次性 —— 每次重放都靠「先摘类再强制回流」重触发（动画铁律） */

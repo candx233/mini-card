@@ -132,6 +132,32 @@ pub fn align_offset(cur: R4, others: &[R4], work: Option<R4>, tol: i32) -> (i32,
     (dx, dy, lines)
 }
 
+/// 只算横向对齐（Dock 拖拽用：纵向固定在屏幕底部，不该被工作区底边吸走）。
+/// 返回 (dx, lines)；竖线从玻璃条顶跨到对齐对象/工作区的底。
+pub fn align_offset_x(cur: R4, others: &[R4], work: Option<R4>, tol: i32) -> (i32, Vec<[i32; 4]>) {
+    let mut xt: Vec<(i32, Option<R4>)> = Vec::new();
+    for o in others {
+        xt.push((o.0, Some(*o)));
+        xt.push(((o.0 + o.2) / 2, Some(*o)));
+        xt.push((o.2, Some(*o)));
+    }
+    if let Some(w) = work {
+        xt.push((w.0, None));
+        xt.push(((w.0 + w.2) / 2, None));
+        xt.push((w.2, None));
+    }
+    let own_x = [cur.0, (cur.0 + cur.2) / 2, cur.2];
+    if let Some((d, pos, partner)) = axis_match(own_x, &xt, tol) {
+        let (t, b) = match partner {
+            Some(p) => (cur.1.min(p.1), cur.3.max(p.3)),
+            None => work.map(|w| (w.1, w.3)).unwrap_or((cur.1, cur.3)),
+        };
+        (d, vec![[pos, t, pos, b]])
+    } else {
+        (0, Vec::new())
+    }
+}
+
 /* ────────────────────────── Win32：窗口与绘制 ────────────────────────── */
 
 /// 当前显示器的 DPI 缩放（磁吸容差按逻辑 px 定义）
@@ -379,6 +405,27 @@ fn work_area(cur: R4) -> Option<R4> {
     }
 }
 
+/// 落点 + 辅助线统一收尾：**不在这里动窗口位置**（见 moving_rect 的铁律注释）。
+fn publish(dx: i32, dy: i32, lines: Vec<[i32; 4]>, win: R4) -> bool {
+    let hit = (dx != 0 || dy != 0) && win.0 != -32000;
+    if let Ok(mut g) = PENDING.lock() {
+        *g = if hit {
+            Some([win.0 + dx, win.1 + dy, win.2 + dx, win.3 + dy])
+        } else {
+            None
+        };
+    }
+    // ⚠️ 2026-09-30 二次踩坑：不要在每一条 WM_MOVING 里反复 ShowWindow —— 拖动循环期间反复显示
+    // 顶层窗口会让循环的跟踪基准复位，慢拖时卡片几乎不动（用户看到的「拖不动」）。
+    // 现在只在拖动开始亮一次，拖动中只更新线。
+    if !GUIDE_SHOWN.load(Ordering::Relaxed) {
+        show_guide(true);
+        GUIDE_SHOWN.store(true, Ordering::Relaxed);
+    }
+    set_lines(lines);
+    hit
+}
+
 /// WM_MOVING：算对齐 + 更新辅助线；**不在这里动窗口位置**。
 ///
 /// ⚠️ 2026-09-30 真机踩坑（用户报「拖不动、不能想拖到哪拖到哪」）：原来在这里直接改 RECT 做磁吸，
@@ -386,11 +433,20 @@ fn work_area(cur: R4) -> Option<R4> {
 /// 慢拖（WM_MOVING 多）时卡片严重跟不上手：实测光标走 360px，卡只走 150px（91 次 WM_MOVING × 平均 2.3px）。
 /// 正解：拖动中只画辅助线（自由跟手），落点 `end_move()` 再一次性吸上去。
 pub fn moving(hwnd: HWND, rect: &mut RECT) -> bool {
-    let cur = (rect.left, rect.top, rect.right, rect.bottom);
+    let r = *rect;
+    moving_rect(hwnd, &r, &r)
+}
+
+/// 通用拖动对齐：`align` = 参与对齐的视觉矩形（Dock 用玻璃条），`win` = 窗口矩形。
+/// PENDING 存窗口落点 —— Dock 的窗口比玻璃条大一圈（上下/两侧预留），
+/// 对齐偏移同时作用在两者上，所以窗口左上角 + 同一 dx/dy 即可。
+pub fn moving_rect(hwnd: HWND, align: &RECT, win: &RECT) -> bool {
+    let a = (align.left, align.top, align.right, align.bottom);
+    let w = (win.left, win.top, win.right, win.bottom);
     let others = sibling_rects(hwnd);
-    let work = work_area(cur);
+    let work = work_area(a);
     let tol = ((TOL as f64) * scale_of(hwnd)).round() as i32;
-    let (dx, dy, lines) = align_offset(cur, &others, work, tol.max(2));
+    let (dx, dy, lines) = align_offset(a, &others, work, tol.max(2));
     #[cfg(debug_assertions)]
     {
         // 拖动对齐的现场取证（只在 debug 构建里写文件；release 不带）
@@ -402,29 +458,39 @@ pub fn moving(hwnd: HWND, rect: &mut RECT) -> bool {
         {
             let _ = writeln!(
                 f,
-                "self={:?} tol={} others={:?} work={:?} -> dx={} dy={} lines={:?}",
-                cur, tol, others, work, dx, dy, lines
+                "align={:?} win={:?} tol={} others={:?} work={:?} -> dx={} dy={} lines={:?}",
+                a, w, tol, others, work, dx, dy, lines
             );
         }
     }
-    let hit = (dx != 0 || dy != 0) && cur.0 != -32000;
-    if let Ok(mut g) = PENDING.lock() {
-        *g = if hit {
-            Some([cur.0 + dx, cur.1 + dy, cur.2 + dx, cur.3 + dy])
-        } else {
-            None
-        };
+    publish(dx, dy, lines, w)
+}
+
+/// Dock 拖拽：只做横向对齐（屏幕左/中/右、其它卡片的左右/中心），
+/// 纵向保持用户拖到的高度（不吸工作区底边，否则整条会被抬到任务栏上方）。
+pub fn moving_dock(hwnd: HWND, align: &RECT, win: &RECT) -> bool {
+    let a = (align.left, align.top, align.right, align.bottom);
+    let w = (win.left, win.top, win.right, win.bottom);
+    let others = sibling_rects(hwnd);
+    let work = work_area(a);
+    let tol = ((TOL as f64) * scale_of(hwnd)).round() as i32;
+    let (dx, lines) = align_offset_x(a, &others, work, tol.max(2));
+    #[cfg(debug_assertions)]
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::env::temp_dir().join("mc_guide.log"))
+        {
+            let _ = writeln!(
+                f,
+                "dock align={:?} win={:?} tol={} others={:?} work={:?} -> dx={} lines={:?}",
+                a, w, tol, others, work, dx, lines
+            );
+        }
     }
-    let _ = rect; // 位置一个像素都不改：改了就累积
-    // ⚠️ 2026-09-30 二次踩坑：不要在每一条 WM_MOVING 里反复 ShowWindow —— 拖动循环期间反复显示
-    // 顶层窗口会让循环的跟踪基准复位，慢拖时卡片几乎不动（用户看到的「拖不动」）。
-    // 现在只在拖动开始亮一次，拖动中只更新线。
-    if !GUIDE_SHOWN.load(Ordering::Relaxed) {
-        show_guide(true);
-        GUIDE_SHOWN.store(true, Ordering::Relaxed);
-    }
-    set_lines(lines);
-    hit
+    publish(dx, 0, lines, w)
 }
 
 /// 启动时先备好辅助线窗口（隐藏）：别在拖动循环里现建窗口，那一枪容易踩到系统的坑
@@ -512,6 +578,26 @@ mod tests {
         assert_eq!(dx, 0);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0][1], 90);
+    }
+
+    /// Dock 横向居中：玻璃条中心与屏幕中心差 6px → 吸 6px 并画竖线
+    #[test]
+    fn dock_snaps_to_screen_center_x() {
+        let work = (0, 0, 1920, 1080);
+        // 条宽 1064，中心 966（屏幕中心 960）
+        let (dx, lines) = align_offset_x((434, 1003, 1498, 1067), &[], Some(work), 6);
+        assert_eq!(dx, -6);
+        assert_eq!(lines.len(), 1, "只画一条竖线");
+        assert_eq!(lines[0][0], 960, "竖线画在屏幕中心");
+    }
+
+    /// Dock 对齐另一张卡片的中心（横向只吸中心，不碰纵向）
+    #[test]
+    fn dock_snaps_to_card_center_x() {
+        let other = (600, 100, 840, 220);
+        let (dx, lines) = align_offset_x((562, 1003, 886, 1067), &[other], None, 6);
+        assert_eq!(dx, -4);
+        assert_eq!(lines[0][0], 720);
     }
 
     /// 同时命中两根轴：两条线

@@ -158,6 +158,8 @@ impl Default for DockItem {
 #[serde(default)]
 pub struct Dock {
     pub enabled: bool,
+    /// 固定位置：固定后拖空白不再移动整条（主界面 Dock 页的「固定位置」开关）
+    pub pinned: bool,
     pub cx: f32,
     pub y: f32,
     /// 图标边长：32 / 40 / 48 / 56（默认 48）
@@ -177,6 +179,7 @@ impl Default for Dock {
     fn default() -> Self {
         Self {
             enabled: false,
+            pinned: false,
             cx: -1.0,
             y: -1.0,
             size: 48,
