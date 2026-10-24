@@ -1523,6 +1523,9 @@
       if (!mAbsentAt) mAbsentAt = nowT;
       if (msnap && msnap.present && nowT - mAbsentAt < 4000) p = msnap;
     }
+    // 封面只在「换图那一拍」进 payload（Rust 侧去掉了没变的 dataURL —— 一张图 100KB+，
+    // 2Hz 全量推等于每秒把图重新发给每个窗口）。**缺 cover 字段 = 沿用上一张**；空串 = 清掉。
+    if (p && msnap && !('cover' in p)) p.cover = msnap.cover;
     var key = (p && p.present) ? ((p.title || '') + '|' + (p.artist || '')) : null;
     // 切歌 = 前有真歌名、现在有真歌名、且变了；中场空元数据帧（key='|'）不算、也不重置基准
     var flip = !!(mKey && key && key !== '|' && mKey !== key);

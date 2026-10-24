@@ -65,6 +65,88 @@ fn card_label(id: &str) -> String {
     format!("card-{id}")
 }
 
+/* ─────────── 位置落盘节流（拖动中的 Moved 是一像素一枪） ─────────── */
+
+/// 拖动时 `WindowEvent::Moved` 每个鼠标采样都来一次（60~125Hz）。原来每条都
+/// `Config::load()`（读盘 + TOML 解析）+ `cfg.save()`（整份 5KB 覆写盘，还会被杀软
+/// 实时扫描一遍）—— 位置只对「松手之后」有意义，前面那些写入全是白费 IO。
+/// 这里把落盘节流到 250ms 一次，并保证最后一次改动一定补写（拖完立刻退出也不丢位置）。
+const POS_FLUSH_MS: u64 = 250;
+
+enum PosUpdate {
+    Card { id: String, pos: [f32; 2] },
+    /// Dock：已经换算成 config 口径（cx = 条中心 x / y = 虚拟 92 框上沿）
+    Dock { cx: f32, y: f32 },
+}
+
+static POS_Q: Mutex<Vec<PosUpdate>> = Mutex::new(Vec::new());
+static POS_FLUSH_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// 记一次待落盘的位置。同一个 id 多次入队 = 后写的赢（队列按到达顺序应用）。
+fn queue_pos(u: PosUpdate) {
+    // ⚠️ 置位与入队必须在同一把锁里：分开做的话「线程刚取空批并退出 → 这枪又入队」会把
+    // 最后一次位置留在队列里再也不落盘（拖完立刻关机就丢了）。
+    let spawn = {
+        let Ok(mut q) = POS_Q.lock() else { return };
+        let spawn = !POS_FLUSH_ARMED.swap(true, Ordering::Relaxed);
+        q.push(u);
+        spawn
+    };
+    if !spawn {
+        return;
+    }
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_millis(POS_FLUSH_MS));
+        let (batch, more) = {
+            let Ok(mut q) = POS_Q.lock() else { return };
+            let b = std::mem::take(&mut *q);
+            let more = !q.is_empty();
+            if !more {
+                POS_FLUSH_ARMED.store(false, Ordering::Relaxed);
+            }
+            (b, more)
+        };
+        flush_pos(batch);
+        if !more {
+            break;
+        }
+    });
+}
+
+/// 把一批位置写进盘上的 config（一次 load + 一次 save）。
+fn flush_pos(batch: Vec<PosUpdate>) {
+    if batch.is_empty() {
+        return;
+    }
+    let mut cfg = Config::load();
+    for u in batch {
+        match u {
+            PosUpdate::Card { id, pos } => {
+                if let Some(c) = cfg.cards.iter_mut().find(|c| c.id == id) {
+                    c.pos = pos;
+                }
+            }
+            PosUpdate::Dock { cx, y } => {
+                cfg.dock.cx = cx;
+                cfg.dock.y = y;
+            }
+        }
+    }
+    let _ = cfg.save();
+}
+
+/// 退出前把队列里没写完的位置补上（否则节流窗口里退出 = 最后一次拖动白拖）。
+fn flush_pos_now() {
+    let batch = match POS_Q.lock() {
+        Ok(mut q) => {
+            POS_FLUSH_ARMED.store(false, Ordering::Relaxed);
+            std::mem::take(&mut *q)
+        }
+        Err(_) => return,
+    };
+    flush_pos(batch);
+}
+
 /// 最近一次采样到的磁盘数 + 是否还没有数据（采样未到 / 真的 0 块盘）。
 /// 快照线程每秒更新；建窗 / 参数面板 / 自动高度三处都读它算磁盘卡的实际窗口高。
 static DISK_N: AtomicUsize = AtomicUsize::new(0);
@@ -1856,7 +1938,14 @@ fn create_card(app: &AppHandle, cfg: &Config, card: &CardInstance) {
     let id = card.id.clone();
     let app_move = app.clone();
     let win_ev = win.clone();
+    let card_hwnd = hwnd_of(&win).map(|h| h as isize); // 销毁时从对齐白名单里注销（句柄会被系统复用）
     win.on_window_event(move |e| {
+        if let tauri::WindowEvent::Destroyed = e {
+            if let Some(h) = card_hwnd {
+                guide::forget(h as windows_sys::Win32::Foundation::HWND);
+            }
+            return;
+        }
         if let tauri::WindowEvent::Moved(p) = e {
             // ⚠️ scale 必须**事件到达时现取**（原来建窗时缓存一份）：把卡拖到另一台缩放
             //    不同的显示器后缓存值会过期 → 写盘/推送给主界面的逻辑坐标整体偏。
@@ -1870,11 +1959,11 @@ fn create_card(app: &AppHandle, cfg: &Config, card: &CardInstance) {
                 }
                 *last = Some(logical);
             }
-            let mut cfg = Config::load();
-            if let Some(c) = cfg.cards.iter_mut().find(|c| c.id == id) {
-                c.pos = [logical.0 as f32, logical.1 as f32];
-                let _ = cfg.save();
-            }
+            // 位置落盘走节流（见 queue_pos）：拖动中这条事件每像素一枪，别每条都整份覆写盘
+            queue_pos(PosUpdate::Card {
+                id: id.clone(),
+                pos: [logical.0 as f32, logical.1 as f32],
+            });
             // 移动后推磨砂 + 位置（真值）：同屏只发相对位置、换屏重推全量（见 push_glass_pos）；
             // 主界面参数面板的「位置」也吃这条事件，不显示拖动中途的野坐标
             push_glass_pos(&app_move, &id);
@@ -2469,12 +2558,13 @@ fn create_dock(app: &AppHandle, cfg: &Config) {
                 .outer_size()
                 .map(|z| z.width as f64 / s)
                 .unwrap_or(sz[0] as f64);
-            let mut cfg = Config::load();
-            cfg.dock.cx = (logical.0 as f64 + w / 2.0) as f32;
             // 存的是「虚拟 92 框的上边缘」= 条顶边往上 28：窗口上边缘比它高 (预留 − 28)，恒定
             let grow = DOCK_MARGIN - dock_top_reserve();
-            cfg.dock.y = logical.1 as f32 - grow;
-            let _ = cfg.save();
+            // 同卡片：落盘节流（拖动中 Moved 每像素一枪，别整份覆写 config）
+            queue_pos(PosUpdate::Dock {
+                cx: (logical.0 as f64 + w / 2.0) as f32,
+                y: logical.1 as f32 - grow,
+            });
             push_dock_glass(&app_move, &win_ev);
         }
         _ => {}
@@ -3370,6 +3460,10 @@ fn main() {
         .expect("error while building mini-card");
 
     app.run(|_app, event| {
+        // 退出前补写节流窗口里的最后一次位置（拖完 250ms 内退出也不丢）
+        if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+            flush_pos_now();
+        }
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
             // 主窗改成「销毁式休眠」后，「所有窗口都没了」成为可达状态
             //（关到托盘 + 一张卡都未开 = 销毁主窗即最后一个窗口）：

@@ -455,6 +455,24 @@ fn read_snap(mgr: &SessionManager) -> Option<MusicSnap> {
     })
 }
 
+/// 音乐推送 payload：**没变的封面 dataURL 不进 payload**（缺 `cover` 字段 = 页面沿用上一张）。
+///
+/// 封面是几十~上百 KB 的 PNG dataURL，2Hz 全量推 = 每秒把一张图序列化一遍、再拷给每个窗口
+/// （每个渲染进程各自解析一次）。页面那头（card.html `onMusic`）只认「换图」这一拍，
+/// 稳态下的这份开销是纯浪费。
+/// ⚠️ 空串照发：那是「这首歌确实没封面，清掉」的显式信号，不能当成「没变」省掉。
+fn music_payload(snap: &MusicSnap, last_cover: &mut String) -> serde_json::Value {
+    let Ok(serde_json::Value::Object(mut o)) = serde_json::to_value(snap) else {
+        return serde_json::Value::Null;
+    };
+    if !snap.cover.is_empty() && snap.cover == *last_cover {
+        o.remove("cover");
+    } else {
+        *last_cover = snap.cover.clone();
+    }
+    serde_json::Value::Object(o)
+}
+
 /// 启动轮询线程（setup 里调用一次）。会话消失 → present:false（保留管理器，下次直接复用）。
 pub fn spawn(app: AppHandle) {
     std::thread::spawn(move || {
@@ -470,6 +488,7 @@ pub fn spawn(app: AppHandle) {
         }
         let mut mgr: Option<SessionManager> = None;
         let mut ticks: u64 = 0;
+        let mut last_cover = String::new();
         loop {
             if mgr.is_none() {
                 mgr = SessionManager::RequestAsync()
@@ -484,15 +503,17 @@ pub fn spawn(app: AppHandle) {
                 // 会话消失 → 本地计时一起清掉：下次从 0 起算，别把上一轮的账续上
                 *CLOCK.lock().unwrap() = None;
             }
-            {
-                *SNAP.lock().unwrap() = Some(snap.clone());
-            }
             // 每 20 拍（10s）落一次盘，供重启续算；写文件不在热路径上
             ticks += 1;
             if ticks % 20 == 0 {
                 save_clock(snap.present);
             }
-            let _ = app.emit("music", &snap);
+            // 封面 dataURL（几十~上百 KB）只在**换图那一拍**进 payload：2Hz 全量推等于每秒
+            // 把一张图序列化 + 拷给每个窗口（每个渲染进程再解一次）。
+            let payload = music_payload(&snap, &mut last_cover);
+            // 先推、再把快照 move 进 SNAP：省掉「clone 一份带封面的快照」那次整串拷贝
+            let _ = app.emit("music", &payload);
+            *SNAP.lock().unwrap() = Some(snap);
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
@@ -568,6 +589,37 @@ mod tests {
         // 歌手对不上 → 退到同名备选（同曲不同版本至少还能画条）
         assert_eq!(pick_duration_json(PL, "想说", "别人唱的版本"), 200689.0);
         assert_eq!(pick_duration_json("不是 json", "想说", "颜人中"), 0.0);
+    }
+
+    /// 封面 dataURL 只在「换图那一拍」进 payload（稳态 2Hz 推送不再搬几十上百 KB）
+    #[test]
+    fn music_payload_sends_cover_only_when_it_changes() {
+        let snap = |cover: &str| MusicSnap {
+            present: true,
+            app: "a".into(),
+            title: "想说".into(),
+            artist: "颜人中".into(),
+            status: "playing".into(),
+            position_ms: 1000.0,
+            duration_ms: 200689.0,
+            cover: cover.to_string(),
+        };
+        let mut last = String::new();
+        let p1 = music_payload(&snap("data:image/png;base64,AAA"), &mut last);
+        assert_eq!(p1.get("cover").and_then(|v| v.as_str()), Some("data:image/png;base64,AAA"));
+        // 同一张图：字段整个消失（页面沿用上一张）
+        let p2 = music_payload(&snap("data:image/png;base64,AAA"), &mut last);
+        assert!(p2.get("cover").is_none(), "没换图不该再带 dataURL");
+        assert_eq!(p2.get("title").and_then(|v| v.as_str()), Some("想说"), "其余字段照常推");
+        // 换图：重新带上
+        let p3 = music_payload(&snap("data:image/png;base64,BBB"), &mut last);
+        assert_eq!(p3.get("cover").and_then(|v| v.as_str()), Some("data:image/png;base64,BBB"));
+        // 空串 = 「这歌没封面，清掉」的显式信号，每次都要发
+        let empty = snap("");
+        let p4 = music_payload(&empty, &mut last);
+        assert_eq!(p4.get("cover").and_then(|v| v.as_str()), Some(""));
+        let p5 = music_payload(&empty, &mut last);
+        assert_eq!(p5.get("cover").and_then(|v| v.as_str()), Some(""), "空封面不能被当成「没变」省掉");
     }
 
     /// 本地计时：播放走表、暂停冻结、换曲归零 + 落盘续算（一个测试里顺序跑，避免共用单例打架）

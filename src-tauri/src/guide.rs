@@ -28,7 +28,7 @@ use std::sync::OnceLock;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, EnumWindows, GetClassNameW, GetClientRect, GetSystemMetrics,
+    CreateWindowExW, DefWindowProcW, GetSystemMetrics,
     GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, RegisterClassW,
     SetLayeredWindowAttributes, SetWindowPos, ShowWindow, LWA_COLORKEY, SM_CXVIRTUALSCREEN,
     SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
@@ -185,10 +185,10 @@ unsafe extern "system" fn guide_proc(
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
             let hdc = BeginPaint(hwnd, &mut ps);
             if !hdc.is_null() {
-                let mut rc: RECT = std::mem::zeroed();
-                GetClientRect(hwnd, &mut rc);
+                // 只填脏区（ps.rcPaint）：set_lines 现在只脏「线的条带」，整屏 FillRect 会把
+                // 一次 1px 线的变化放大成 2560×1440 的填色。
                 let bg = CreateSolidBrush(KEY);
-                FillRect(hdc, &rc, bg);
+                FillRect(hdc, &ps.rcPaint, bg);
                 DeleteObject(bg);
                 let (ox, oy) = (
                     ORIG_X.load(Ordering::Relaxed),
@@ -280,59 +280,68 @@ fn set_lines(lines: Vec<[i32; 4]>) {
     if h as isize == 0 {
         return;
     }
-    if let Ok(mut g) = LINES.lock() {
-        *g = lines;
-    }
+    // 只在「线的集合真的变了」时重画。以前每来一条 WM_MOVING 都 InvalidateRect 整窗：
+    // 没对齐时线恒为空集，等于每秒白刷 ~60~125 次 2560×1440 的色键层（GDI 全屏 FillRect +
+    // DWM 色键合成，色键层走不了 GPU 加速）。现在「没线 → 没线」零成本。
+    let old = {
+        let Ok(mut g) = LINES.lock() else { return };
+        if *g == lines {
+            return;
+        }
+        std::mem::replace(&mut *g, lines.clone())
+    };
     unsafe {
-        // 只要异步重画：UpdateWindow 会在 WM_MOVING 里同步跑一次整屏 FillRect（2560×1440），
-        // 每条鼠标消息都搭上一次十几毫秒的活，拖动循环会被拖垮。
-        InvalidateRect(h, std::ptr::null(), 0);
+        // 只脏「旧线的条带 + 新线的条带」（竖线 1px 宽、横线 1px 高，各扩 2px 吃掉线宽）：
+        // WM_PAINT 里也只填 ps.rcPaint —— 一次对齐变化 = 几条 1px 宽的窄条，而不是整屏。
+        let (ox, oy) = (ORIG_X.load(Ordering::Relaxed), ORIG_Y.load(Ordering::Relaxed));
+        for l in old.iter().chain(lines.iter()) {
+            let (xa, ya, xb, yb) = (l[0], l[1], l[2], l[3]);
+            let rc = RECT {
+                left: xa.min(xb) - 2 - ox,
+                top: ya.min(yb) - 2 - oy,
+                right: xa.max(xb) + 2 - ox,
+                bottom: ya.max(yb) + 2 - oy,
+            };
+            InvalidateRect(h, &rc, 0);
+        }
     }
 }
 
-/// 别的卡片窗口矩形（本进程、可见、没最小化、类名 Tauri Window、排除自己）。
-/// 桌面层锁的「最小化窗 rect=-32000」「DWM 隐形窗」都用可见性/最小化过滤掉了。
+/// 别的卡片窗口矩形（**登记过的卡窗**、可见、没最小化、排除自己）。
+///
+/// ⚠️ 原来这里 `EnumWindows` 全桌扫 + 逐窗判 pid / 类名。这条路径在 **WM_MOVING 里每个鼠标
+/// 采样都要跑一遍**（60~125Hz），而拖动中的 WM_MOVING 是在系统的拖动循环里同步处理的 ——
+/// 全桌扫描的耗时直接加在拖动延迟上。实测本机 512 个顶层窗，一趟 EnumWindows 约 0.23ms
+/// （＝拖动时 ~23ms/s 纯花在「找自己有哪些兄弟窗」）。`cards()` 白名单本来就是「哪些窗口
+/// 参与对齐」的唯一真源，直接按它取矩形：窗口数 = 卡片数（≤ 8），一趟 ~5µs。
 fn sibling_rects(self_hwnd: HWND) -> Vec<R4> {
-    struct Ctx {
-        self_hwnd: HWND,
-        pid: u32,
-        out: Vec<R4>,
-    }
-    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> i32 {
-        let c = &mut *(lparam as *mut Ctx);
-        if hwnd == c.self_hwnd || IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
-            return 1;
-        }
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid != c.pid {
-            return 1;
-        }
-        let mut buf = [0u16; 64];
-        let n = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
-        if n <= 0 || String::from_utf16_lossy(&buf[..n as usize]) != "Tauri Window" {
-            return 1;
-        }
-        // 只认登记过的卡窗；主界面同为 "Tauri Window"，绝不能当对齐目标。
-        if !cards().lock().unwrap().contains(&(hwnd as isize)) {
-            return 1;
-        }
-
-        let mut r: RECT = std::mem::zeroed();
-        if GetWindowRect(hwnd, &mut r) != 0 && r.right > r.left && r.bottom > r.top {
-            c.out.push((r.left, r.top, r.right, r.bottom));
-        }
-        1
-    }
-    let mut ctx = Ctx {
-        self_hwnd,
-        pid: unsafe { GetCurrentProcessId() },
-        out: Vec::new(),
-    };
+    let list: Vec<isize> = cards().lock().map(|v| v.clone()).unwrap_or_default();
+    let mut out = Vec::with_capacity(list.len());
+    let me = unsafe { GetCurrentProcessId() };
     unsafe {
-        EnumWindows(Some(cb), &mut ctx as *mut Ctx as LPARAM);
+        for h in list {
+            if h == 0 || h == self_hwnd as isize {
+                continue;
+            }
+            let hw = h as HWND;
+            // 登记表里可能留着一个已经销毁的旧句柄（句柄会被系统复用）：再核一次 pid，
+            // 免得撞上别人的窗口、把卡片吸到陌生窗口的边上。一次调用，窗口数那么少，便宜。
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hw, &mut pid);
+            if pid != me {
+                continue;
+            }
+            // 最小化窗 rect=-32000、DWM 隐形窗，全靠可见性 / 最小化过滤掉
+            if IsWindowVisible(hw) == 0 || IsIconic(hw) != 0 {
+                continue;
+            }
+            let mut r: RECT = std::mem::zeroed();
+            if GetWindowRect(hw, &mut r) != 0 && r.right > r.left && r.bottom > r.top {
+                out.push((r.left, r.top, r.right, r.bottom));
+            }
+        }
     }
-    ctx.out
+    out
 }
 
 /// 卡片窗登记表：对齐目标只认这里登记过的窗口。
