@@ -1909,7 +1909,17 @@
 
   var T = window.__TAURI__;
   if (T && T.core && T.event) {
+    /* 预览 iframe 的轮询开关（主界面切页时按页调）：卡片库的 9 个预览 iframe 原先各自 2s
+       拉一次 get_snapshot（天气 60s），**页面藏着照样拉** —— 每次都要 IPC + 一次整卡重绘，
+       全在后台白跑。主界面切走时置 true，切回时立刻补一帧。 */
+    var PULL_PAUSED = false;
+    window.__setPreviewPaused = function (on) {
+      if (!previewMode) return;
+      PULL_PAUSED = !!on;
+      if (!PULL_PAUSED) pull();
+    };
     function pull() {
+      if (PULL_PAUSED) return;
       T.core.invoke('get_snapshot').then(function (s) { if (s && (s.cpu || (s.disks || []).length)) onSnap(s); })
         .catch(function () {});
     }
@@ -1923,6 +1933,7 @@
     // 天气：单独一路（挂 weather 事件 + 首帧拉一次；非天气卡不打扰）
     if (kind === 'Weather') {
       function pullW() {
+        if (PULL_PAUSED) return;
         T.core.invoke('get_weather').then(function (w) {
           if (w) { wsnap = w; wAt = Date.now(); render(); }
         }).catch(function () {});

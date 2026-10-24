@@ -794,6 +794,9 @@
       placeNavPill(btn);
       $$('.page').forEach(function (p) { p.classList.toggle('active', p === next); });
       var c = $('.content'); if (c) c.scrollTop = 0;
+      // 卡片库的预览 iframe：只在「卡片库」这一页开着时轮询（9 个 iframe 后台各拉一次 = 白跑）
+      // 实现在下面那个 IIFE 里（卡片库预览与它同域），挂 window 上跨块调用
+      if (window.__setPreviewsPaused) window.__setPreviewsPaused(next.id !== 'page-lib');
     });
   });
 
@@ -1296,6 +1299,17 @@
      以前是写死的假预览（带标题行、假数值），与设计稿/桌面卡片早已不同源。
      现在直接加载 card.html?preview=1，尺寸/居中/配色/数据全部与桌面卡片一致。 */
   var PREVIEW_K = 0.55;
+
+  /* 预览 iframe 的轮询开关：卡片页在 iframe 里自己 2s 拉一次 get_snapshot（天气 60s），
+     页面藏着也照拉 —— 9 个预览 iframe 就是后台 4.5 次/秒的 IPC + 整卡重绘，纯白跑。
+     同源直接调卡片页暴露的钩子；切回卡片库时钩子会立刻补一帧。 */
+  window.__setPreviewsPaused = function (paused) {
+    $$('.prev-frame').forEach(function (f) {
+      try { f.contentWindow.__setPreviewPaused && f.contentWindow.__setPreviewPaused(paused); }
+      catch (e) { /* 还没 load 完：它的 load 回调里会按当前页再定一次 */ }
+    });
+  };
+
   function buildPreviews() {
     var glow = (CFG.settings && CFG.settings.accent) || [76, 154, 255];
     var dark = (CFG.settings && CFG.settings.theme === 'Light') ? 0 : 1;
@@ -1327,6 +1341,11 @@
       f.style.transformOrigin = '0 0';
       f.src = 'card.html?kind=' + kind + '&id=preview-' + t.id + '&preview=1&wall=0' +
               '&glass=' + glass + '&accent=' + glow.join(',') + '&dark=' + dark;
+      // 建的时候这一页可能不是当前页：load 后按「卡片库是否在前台」决定要不要开始轮询
+      f.addEventListener('load', function () {
+        var lib = document.getElementById('page-lib');
+        window.__setPreviewsPaused(!(lib && lib.classList.contains('active')));
+      });
       wrap.appendChild(f);
       stage.appendChild(wrap);
     });
