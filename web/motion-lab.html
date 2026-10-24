@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MiniCard · 动效对照台（预览稿）</title>
+<style>
+  /* ══════════════════════════════════════════════════════════════
+     动效对照台 —— 独立预览文件，不改动 card.html / index.html / dock.html
+     每张卡都是 1:1 真尺寸（待办 240×120、时钟 240×120 @ 根字号 0.833）
+     左边「现在」= 现有代码的实际行为，右边「改后」= 建议落地的做法
+     ══════════════════════════════════════════════════════════════ */
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 400; font-display: block; src: url("fonts/MiSans-Regular.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 500; font-display: block; src: url("fonts/MiSans-Medium.woff2") format("woff2"); }
+  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 600; font-display: block; src: url("fonts/MiSans-Semibold.woff2") format("woff2"); }
+
+  :root {
+    --bg: #F4F5F7;
+    --panel: #FFFFFF;
+    --line: #E3E5E9;
+    --line-soft: #EEF0F3;
+    --fg: #1C2027;
+    --muted: #5F6874;
+    --accent: #4C9AFF;
+    --accent-strong: #1D6AC6;
+    --accent-soft: #E8F1FD;
+    --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
+    --font-mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+
+    /* ─── 建议的动效令牌（本轮要讨论的就是这一组）─── */
+    --dur-fast: 120ms;      /* 颜色 / 描边 / 阴影 */
+    --dur-normal: 200ms;    /* 交互反馈：开关、悬停、按压 */
+    --dur-slow: 320ms;      /* 大位移：页面切换、展开、行重排 */
+    --ease-out: cubic-bezier(.22, 1, .36, 1);     /* 收尾缓出，不过冲 */
+    --ease-snap: cubic-bezier(.2, 0, 0, 1);       /* 快进快出，给颜色用 */
+    --ease-spring: cubic-bezier(.34, 1.3, .64, 1);/* 轻微过冲，给按压回弹 */
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  body {
+    color: var(--fg); font-family: var(--font-body); font-size: 13px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 30px 28px 64px; }
+  .num, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  /* ─── 页头 ─── */
+  .head { display: flex; align-items: flex-start; gap: 14px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+  .head h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+  .head p { margin: 5px 0 0; color: var(--muted); font-size: 12.5px; max-width: 74ch; }
+  .badge {
+    flex: 0 0 auto; margin-left: auto; padding: 3px 9px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent-strong);
+    font-size: 11px; font-weight: 600; white-space: nowrap;
+  }
+
+  /* ─── 区块 ─── */
+  section { margin-top: 34px; }
+  .sec-h { display: flex; align-items: baseline; gap: 10px; }
+  .sec-h h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .sec-h .idx {
+    width: 20px; height: 20px; border-radius: 6px; background: var(--fg); color: #fff;
+    font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+    display: grid; place-items: center; align-self: center;
+  }
+  .sec-h .tag { margin-left: auto; font-size: 11px; color: var(--muted); }
+  .sec-p { margin: 7px 0 0 30px; color: var(--muted); font-size: 12.5px; max-width: 78ch; }
+
+  /* ─── 卡片舞台 ─── */
+  .pair { display: flex; flex-wrap: wrap; gap: 30px; margin: 18px 0 0 30px; align-items: flex-start; }
+  .frame { display: flex; flex-direction: column; gap: 8px; }
+  .frame-cap { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; letter-spacing: .01em; }
+  .frame-cap i {
+    width: 6px; height: 6px; border-radius: 999px; background: #B9C0CA; display: block;
+  }
+  .frame.after .frame-cap { color: var(--accent-strong); }
+  .frame.after .frame-cap i { background: var(--accent); }
+  .frame-note {
+    font-family: var(--font-mono); font-size: 10.5px; line-height: 1.6; color: var(--muted);
+    max-width: 240px;
+  }
+  .frame-note b { color: #39404B; font-weight: 500; }
+
+  .stage {
+    background:
+      radial-gradient(120% 90% at 8% 0%, #DFE9F5 0%, rgba(223,233,245,0) 55%),
+      radial-gradient(100% 80% at 92% 18%, #F3E7DD 0%, rgba(243,231,221,0) 52%),
+      radial-gradient(120% 100% at 50% 105%, #DCE7E2 0%, rgba(220,231,226,0) 62%),
+      #EDF1F6;
+    border-radius: 16px; padding: 16px 14px;
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start;
+  }
+
+  /* ─── 卡面：照 card.html 的浅色档（__setTheme(false) 的四条覆盖）─── */
+  .mcard {
+    --fg: oklch(0.28 0.02 258);
+    --muted: oklch(0.47 0.02 261);
+    --border: oklch(0 0 0 / 0.10);
+    --tshadow: oklch(1 0 0 / 0.6);
+    --accent: oklch(0.685 0.168 256.0);
+    --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent);
+    position: relative; width: 240px; height: 120px; border-radius: 1rem; overflow: hidden;
+    padding: .875em 1em;
+    background: rgba(255, 255, 255, .34);
+    /* 描边用 inset 阴影而不是 border：真卡的描边画在 .veil（绝对定位）上，不占布局，
+       这里用 border 会吃掉 2px 内容高，1:1 对不上 */
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .72), 0 10px 26px rgba(24, 38, 60, .10);
+    -webkit-backdrop-filter: blur(18px) saturate(1.15);
+    backdrop-filter: blur(18px) saturate(1.15);
+    color: var(--fg); font-size: 16px;
+    text-shadow: 0 .833px 1.667px var(--tshadow);
+    display: flex; flex-direction: column; user-select: none;
+  }
+  .mcard > * { position: relative; z-index: 2; }
+  .mcard .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  /* ─── 待办卡（card.html .card-todo / .td-*）─── */
+  .mcard.todo { padding: .625em .75em; }
+  .td-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: .25em; }
+  .td-row {
+    display: flex; align-items: center; gap: .5em; height: 1.3125em; border-radius: .375em;
+    cursor: pointer;
+  }
+  /* 行重排的过渡只挂在「改后」：现在的实现是整段重建，压根没有位移过程 */
+  .draw-check .td-row { transition: transform var(--dur-slow) var(--ease-out); }
+  .td-row:hover { background: var(--fg-soft); }
+  .td-ck {
+    flex: 0 0 auto; width: 1.0625em; height: 1.0625em; border-radius: 999px;
+    border: 1px solid color-mix(in oklch, var(--fg) 34%, transparent);
+    display: grid; place-items: center; color: var(--fg);
+    transition: background-color var(--dur-normal) var(--ease-snap), border-color var(--dur-normal) var(--ease-snap);
+  }
+  .td-ck svg { width: .625em; height: .625em; display: block; }
+  .td-row.done .td-ck { background: var(--accent); border-color: transparent; }
+  .td-t { flex: 1; min-width: 0; font-size: .9375em; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color var(--dur-normal) var(--ease-snap); }
+  .td-row.done .td-t { color: var(--muted); text-decoration: line-through; }
+
+  /* 「现在」：勾是 display 切换，瞬间出现 */
+  .now-check .td-ck svg { display: none; }
+  .now-check .td-row.done .td-ck svg { display: block; }
+
+  /* 「改后」：勾用 stroke-dashoffset 画出来 + 盒子 0.9→1.04→1 的弹一下 */
+  .draw-check .td-ck svg path {
+    stroke-dasharray: 26; stroke-dashoffset: 26;
+    transition: stroke-dashoffset 280ms var(--ease-out);
+  }
+  .draw-check .td-row.done .td-ck svg path { stroke-dashoffset: 0; }
+  .draw-check .td-row.done .td-ck { animation: ckPop var(--dur-slow) var(--ease-out); }
+  @keyframes ckPop {
+    0% { transform: scale(.9); }
+    55% { transform: scale(1.04); }
+    100% { transform: scale(1); }
+  }
+
+  /* ─── 时钟卡（card.html .clock-*）─── */
+  .mcard.clock { font-size: 13.333px; }   /* 真窗口 240×120 对 BASE 240×144 → 根字号 16×0.833 */
+  .clock-body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .125em; }
+  .clock-time {
+    display: flex; align-items: center; height: 1em; gap: 0;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 4.5em; font-weight: 600; line-height: 1; letter-spacing: -.02em; color: var(--fg);
+  }
+  .clock-date { font-size: 1.125em; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: .1875em; }
+  .clock-lunar { font-size: 1em; line-height: 1.5; color: var(--muted); }
+
+  /* 数字列：每格 1em 高，竖向滚动。
+     宽度不写死 1ch —— 实测 1ch 比真字幅宽 1.19px/位，整串会比原文宽 4.75px；
+     让列宽由数字自身（tabular-nums 等宽）决定，宽度与原文逐像素一致。 */
+  .dgt { display: inline-block; height: 1em; overflow: hidden; letter-spacing: inherit; }
+  .dgt .strip { display: block; transition: transform 300ms var(--ease-out); will-change: transform; }
+  .dgt .strip i { display: block; height: 1em; line-height: 1; font-style: normal; text-align: center; }
+  .lit { display: inline-block; }
+
+  /* ─── 开关（index.html .switch / 改后加按压拉伸）─── */
+  .sw {
+    width: 36px; height: 21px; border-radius: 999px; border: 0; background: #D4D7DC;
+    position: relative; flex: 0 0 auto; padding: 0; cursor: pointer;
+    transition: background-color var(--dur-normal) var(--ease-snap);
+  }
+  .sw::after {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .22);
+    transform-origin: left center;
+    transition: transform var(--dur-normal) var(--ease-out);
+  }
+  .sw.on { background: var(--accent-strong); }
+  .sw.on::after { transform: translateX(15px); transform-origin: right center; }
+  /* 改后：按住时拇指横向拉开、纵向压扁（EasyUI StretchSwitch 的做法） */
+  .stretch:active::after { transform: translateX(0) scaleX(1.22) scaleY(.88); }
+  .stretch.on:active::after { transform: translateX(15px) scaleX(1.22) scaleY(.88); }
+
+  .swrow {
+    display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 11px;
+    background: #fff; border: 1px solid var(--line); border-radius: 9px; min-width: 210px;
+  }
+  .swrow .t { font-size: 12px; }
+  .swrow .meta { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); }
+
+  /* ─── 说明卡 / 代码行 ─── */
+  .how {
+    margin: 16px 0 0 30px; padding: 12px 14px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; max-width: 940px;
+  }
+  .how ul { margin: 0; padding-left: 17px; color: #39404B; font-size: 12.5px; }
+  .how li { margin: 3px 0; }
+  .how li b { font-weight: 600; }
+  .how code, .code {
+    font-family: var(--font-mono); font-size: 11.5px; background: #F1F3F6;
+    border-radius: 4px; padding: 1px 5px; color: #2B3138;
+  }
+  .how .gap { margin-top: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+
+  /* ─── 令牌条 ─── */
+  .tok { display: flex; flex-direction: column; gap: 9px; }
+  .tok-group { display: flex; flex-direction: column; gap: 7px; }
+  .tok-gh { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+  .trl { display: flex; align-items: center; gap: 12px; }
+  .trl-k { flex: 0 0 214px; font-family: var(--font-mono); font-size: 11px; color: #39404B; }
+  .trl-k em { font-style: normal; color: var(--muted); }
+  .trl-t { position: relative; flex: 0 0 200px; height: 28px; border-radius: 8px; background: #EBEEF3; }
+  .trl-t .chip {
+    position: absolute; left: 2px; top: 2px; width: 44px; height: 24px; border-radius: 6px;
+    background: var(--accent);
+  }
+  .tok-group.after .trl-t .chip { background: var(--accent-strong); }
+
+  .btnrow { display: flex; gap: 8px; margin: 16px 0 0 30px; flex-wrap: wrap; align-items: center; }
+  .btn {
+    border: 1px solid var(--line); background: #fff; color: var(--fg);
+    font-family: var(--font-body); font-size: 12px; font-weight: 500;
+    padding: 6px 12px; border-radius: 8px; cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease-snap), border-color var(--dur-fast) var(--ease-snap);
+  }
+  .btn:hover { background: #F7F9FC; border-color: #D2D8E1; }
+  .btn:active { background: #EDF1F6; }
+  .btn.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
+  .btn.primary:hover { background: #1A5FB4; }
+  .btn .k { font-family: var(--font-mono); font-size: 11px; opacity: .75; margin-left: 4px; }
+
+  /* 进度条对照组 */
+  .bars { display: flex; flex-direction: column; gap: 10px; margin: 16px 0 0 30px; }
+  .bar-row { display: flex; align-items: center; gap: 12px; }
+  .bar-lab { flex: 0 0 214px; font-family: var(--font-mono); font-size: 11px; color: #39404B; }
+  .bar-lab em { font-style: normal; color: var(--muted); }
+  .bar-track { position: relative; flex: 0 0 200px; height: 10px; border-radius: 999px; background: #E4E8EE; overflow: hidden; }
+  .bar-track i { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 999px; background: color-mix(in oklch, var(--fg) 78%, transparent); }
+  .bar-track i.linear { transition: width 2000ms linear; }
+  .bar-track i.eased { transition: width 2000ms var(--ease-out); }
+  .bar-track.go i { width: 100%; }
+  .bar-verdict { font-size: 11px; color: var(--muted); }
+
+  /* ─── 页脚 ─── */
+  .foot { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  .foot p { margin: 4px 0; }
+  .foot .mono { font-size: 11px; }
+
+  /* ─── 减少动态效果：只关动、不藏内容（所有终态立即呈现）─── */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      transition-duration: 1ms !important;
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <div>
+      <h1>动效对照台 · Motion Lab</h1>
+      <p>独立预览稿，<b>没动 card.html / index.html / dock.html 一行</b>。卡片按 1:1 真尺寸摆（待办 240×120、时钟 240×120），点元件自己试手感。左「现在」= 现有代码的实际行为，右「改后」= 建议落地的做法。</p>
+    </div>
+    <span class="badge">预览 · 未落地</span>
+  </header>
+
+  <!-- ═══════════ 1. 令牌 ═══════════ -->
+  <section>
+    <div class="sec-h"><span class="idx">1</span><h2>时长与曲线：把 5 处散落的规格收敛成 3 档</h2><span class="tag">改动量最小 / 视觉零风险</span></div>
+    <p class="sec-p">现在代码里是 <span class="mono">.15s ease</span>（6 处）、<span class="mono">.18s cubic-bezier(.22,.61,.36,1)</span>、<span class="mono">.25s linear</span>、<span class="mono">.35s linear</span> 各写各的。下面两条轨道跑同样距离，看的人能立刻分出「哪条是同一家人」。</p>
+
+    <div class="btnrow" style="margin-left:30px">
+      <button class="btn primary" id="play-tokens">播放全部</button>
+      <span class="bar-verdict">两条轨道距离、速度一样，只有曲线不同</span>
+    </div>
+
+    <div class="bars" style="margin-top:14px">
+      <div class="tok-group now">
+        <div class="tok-gh">现在 · 4 条规格</div>
+        <div class="trl"><span class="trl-k">0.18s cubic-bezier(.22,.61,.36,1) <em>开关 / 导航块</em></span><span class="trl-t"><i class="chip" data-dur="180" data-ease="cubic-bezier(.22,.61,.36,1)"></i></span></div>
+        <div class="trl"><span class="trl-k">0.15s ease <em>颜色 / 描边 ×6 处</em></span><span class="trl-t"><i class="chip" data-dur="150" data-ease="ease"></i></span></div>
+        <div class="trl"><span class="trl-k">0.25s linear <em>音乐进度</em></span><span class="trl-t"><i class="chip" data-dur="250" data-ease="linear"></i></span></div>
+        <div class="trl"><span class="trl-k">0.35s linear <em>番茄进度</em></span><span class="trl-t"><i class="chip" data-dur="350" data-ease="linear"></i></span></div>
+      </div>
+      <div class="tok-group after" style="margin-top:14px">
+        <div class="tok-gh">统一后 · 3 档 + 1 条特殊规则</div>
+        <div class="trl"><span class="trl-k">200ms var(--ease-out) <em>交互反馈</em></span><span class="trl-t"><i class="chip" data-dur="200" data-ease="cubic-bezier(.22,1,.36,1)"></i></span></div>
+        <div class="trl"><span class="trl-k">120ms var(--ease-snap) <em>颜色 / 描边 / 阴影</em></span><span class="trl-t"><i class="chip" data-dur="120" data-ease="cubic-bezier(.2,0,0,1)"></i></span></div>
+        <div class="trl"><span class="trl-k">200ms var(--ease-spring) <em>按压回弹</em></span><span class="trl-t"><i class="chip" data-dur="200" data-ease="cubic-bezier(.34,1.3,.64,1)"></i></span></div>
+        <div class="trl"><span class="trl-k">进度条：保持 linear <em>时长 = 推送间隔</em></span><span class="trl-t"><i class="chip" data-dur="250" data-ease="linear"></i></span></div>
+      </div>
+    </div>
+
+    <div class="bars">
+      <div class="tok-gh" style="margin-bottom:2px">反例：进度条不要跟着统一成缓动</div>
+      <div class="bar-row">
+        <span class="bar-lab">linear <em>正确：匀速 = 真的在走</em></span>
+        <span class="bar-track" id="bar-a"><i class="linear"></i></span>
+        <span class="bar-verdict">2s 走完</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-lab">ease-out <em>错误：前快后慢，看着像卡住</em></span>
+        <span class="bar-track" id="bar-b"><i class="eased"></i></span>
+        <span class="bar-verdict">同样 2s</span>
+      </div>
+      <div class="btnrow" style="margin:10px 0 0">
+        <button class="btn" id="play-bars">同时跑一遍</button>
+      </div>
+    </div>
+
+    <div class="how">
+      <ul>
+        <li>新增 6 个变量：<code>--dur-fast/normal/slow</code> + <code>--ease-out/snap/spring</code>，把现有 5 处硬编码换成变量，<b>视觉变化只有 ±20ms 和收尾曲线</b>，不改布局、不改尺寸。</li>
+        <li>关键取舍：<b>进度条继续用 linear</b>。它表示的是真实时间在流逝，一旦套上缓动，用户会觉得「进度条在骗我」。这条写进令牌注释，避免以后被一起「统一」掉。</li>
+      </ul>
+      <div class="gap">/ 落点：card.html 的 .card / .td-ck / .pomo-track .bar>i / .mc-prog .bar>i，index.html 的 .switch / .nav-pill / .opt</div>
+    </div>
+  </section>
+
+  <!-- ═══════════ 2. 待办勾选 ═══════════ -->
+  <section>
+    <div class="sec-h"><span class="idx">2</span><h2>待办：勾要画出来，沉底要走过去</h2><span class="tag">最划算的一条</span></div>
+    <p class="sec-p">现在是 <span class="mono">display:none → block</span>，勾是「啪」地弹出来的；勾完 <span class="mono">render(true)</span> 整段重建，完成项瞬间跳到底部。改法两件事：勾用 <span class="mono">stroke-dashoffset</span> 描出来、盒子 0.9→1.04→1 弹一下；行重排用 FLIP（先记住旧位置，改完 DOM 反向位移再归零）。点任意一行试试。</p>
+    <div class="pair">
+      <div class="frame now">
+        <div class="frame-cap"><i></i>现在</div>
+        <div class="stage">
+          <div class="mcard todo now-check" data-todo="now">
+            <div class="card-body td-rows"></div>
+          </div>
+        </div>
+        <div class="frame-note">勾：瞬间出现，<b>没有过程</b><br>沉底：整段重建 → <b>硬跳</b><br>文字划线：跟着一起瞬变</div>
+      </div>
+      <div class="frame after">
+        <div class="frame-cap"><i></i>改后</div>
+        <div class="stage">
+          <div class="mcard todo draw-check" data-todo="after">
+            <div class="card-body td-rows"></div>
+          </div>
+        </div>
+        <div class="frame-note">勾：<b>280ms 描线</b> + 盒子弹一下<br>沉底：<b>320ms FLIP 位移</b>，不跨帧闪<br>文字：颜色 200ms 过渡</div>
+      </div>
+    </div>
+    <div class="how">
+      <ul>
+        <li>勾：<code>stroke-dasharray:26; stroke-dashoffset:26 → 0</code>，<b>SVG 本来就在 DOM 里</b>，只把 <code>display:none</code> 换成 dashoffset，标记结构不用改。</li>
+        <li>盒子：<code>@keyframes ckPop { .9 → 1.04 → 1 }</code>，320ms 缓出，过冲只有 4%，不会甩。</li>
+        <li>沉底：<code>getBoundingClientRect</code> 记旧位 → 重排 → 反向 <code>translateY</code> → 下一帧归零。<b>难点不在 CSS，在于先别整段重建 innerHTML</b>（行 DOM 要稳定），这是这条里唯一有工作量的地方。</li>
+        <li>顺带修一个坑：盒子弹出用的是 <code>animation</code>，只要整段重建，<b>已完成的行每次 render 都会重弹一次</b>。行 DOM 稳定之后这个副作用自动消失。</li>
+      </ul>
+      <div class="gap">/ 落点：card.html .td-ck / .td-row / renderTodo（拆成按行更新）</div>
+    </div>
+  </section>
+
+  <!-- ═══════════ 3. 开关按压 ═══════════ -->
+  <section>
+    <div class="sec-h"><span class="idx">3</span><h2>开关：按下的那一下要有反应</h2><span class="tag">2 条 CSS</span></div>
+    <p class="sec-p">主界面 8 个 <span class="mono">.switch</span> 只有 <span class="mono">translateX(15px)</span>，按下去和松手完全一样。<b>按住不放</b>对比一下：右边拇指会横向拉开、纵向压扁，松手弹回原位。</p>
+    <div class="pair">
+      <div class="frame now">
+        <div class="frame-cap"><i></i>现在</div>
+        <div class="stage">
+          <div class="swrow"><span class="t">显示在桌面</span><span class="sw" role="switch" aria-checked="false" tabindex="0"></span><span class="meta">.18s</span></div>
+        </div>
+        <div class="frame-note">只有位移，<b>无按压反馈</b></div>
+      </div>
+      <div class="frame after">
+        <div class="frame-cap"><i></i>改后</div>
+        <div class="stage">
+          <div class="swrow"><span class="t">显示在桌面</span><span class="sw stretch" role="switch" aria-checked="false" tabindex="0"></span><span class="meta">200ms</span></div>
+        </div>
+        <div class="frame-note">按住：<b>scaleX 1.22 / scaleY .88</b><br>松手：200ms 弹到位，微微过冲</div>
+      </div>
+    </div>
+    <div class="how">
+      <ul>
+        <li>两条规则：<code>.stretch:active::after</code> 与 <code>.stretch.on:active::after</code>；<code>transform-origin</code> 随开态切左/右，拇指只会往轨道里长，<b>不会顶出 36px 的轨</b>。</li>
+        <li>鼠标用户也能看到：拖动窗口时按住开关不放就是按住状态，不需要真的拖。</li>
+      </ul>
+      <div class="gap">/ 落点：index.html .switch（8 处共用这一条，改一次全生效）</div>
+    </div>
+  </section>
+
+  <!-- ═══════════ 4. 数字滚动 ═══════════ -->
+  <section>
+    <div class="sec-h"><span class="idx">4</span><h2>时钟：数字按位滚，不要整段换字</h2><span class="tag">单独一轮 / 只给低频数字</span></div>
+    <p class="sec-p">现在每次 <span class="mono">render</span> 都整段重写 <span class="mono">innerHTML</span>，数字是瞬变的。改法：每位数字一列 0–9（末尾再补一个 0 用于 9→0 进位），<span class="mono">translateY</span> 滚到位。点下面的按钮给两边同时跳时间。</p>
+    <div class="btnrow" style="margin-left:30px">
+      <button class="btn primary" id="t1">+1 分钟</button>
+      <button class="btn" id="t10">+10 分钟</button>
+      <button class="btn" id="t955">跳到 09:59 <span class="k">测进位</span></button>
+      <button class="btn" id="treset">复位 10:24</button>
+      <span class="bar-verdict mono" id="tstate">10:24</span>
+    </div>
+    <div class="pair">
+      <div class="frame now">
+        <div class="frame-cap"><i></i>现在</div>
+        <div class="stage">
+          <div class="mcard clock">
+            <div class="card-body clock-body">
+              <div class="clock-time num" data-clock="now">10:24</div>
+              <div class="clock-date">2026年10月24日 周六</div>
+              <div class="clock-lunar">农历 九月初四</div>
+            </div>
+          </div>
+        </div>
+        <div class="frame-note">整段 innerHTML 重写<br><b>数字瞬变</b>，没有任何过渡</div>
+      </div>
+      <div class="frame after">
+        <div class="frame-cap"><i></i>改后</div>
+        <div class="stage">
+          <div class="mcard clock">
+            <div class="card-body clock-body">
+              <div class="clock-time num" data-clock="after"></div>
+              <div class="clock-date">2026年10月24日 周六</div>
+              <div class="clock-lunar">农历 九月初四</div>
+            </div>
+          </div>
+        </div>
+        <div class="frame-note">每位 <b>300ms 滚动</b><br>9→0 走上补的第 11 格，<b>不倒带</b><br>只换变化的位，其余不动</div>
+      </div>
+    </div>
+    <div class="how">
+      <ul>
+        <li>每列 11 格：<code>0…9</code> + 再一个 <code>0</code>。9→0 时先滚到第 10 格（视觉上就是 0），<code>transition:none</code> 归位到第 0 格 —— 两格字一样，看不出接缝。</li>
+        <li>宽度用 <code>1ch</code>（等宽数字的「0」宽度），<b>和时间串逐字宽度一致</b>，不会因为换成列而整体变宽变窄。</li>
+        <li>只建议给低频数字用：时钟、番茄的分钟位、天气温度。<b>网速（1s 一刷）不做</b> —— 令牌里 settle 300ms，每秒滚一次等于永不停歇。</li>
+      </ul>
+      <div class="gap">/ 落点：card.html renderClock / renderPomo / .clock-time</div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p><b>这个文件只是预览稿</b>：<span class="mono">web/motion-lab.html</span>，不参与打包、不被任何页面引用，删掉即恢复原状。</p>
+    <p>减少动态效果（<span class="mono">prefers-reduced-motion: reduce</span>）下所有过渡降到 1ms，<b>内容全部立即可见，不隐藏任何东西</b>。</p>
+    <p class="mono">卡片尺寸 240×120 · 根字号：待办 16px / 时钟 13.333px（= 16 × 120/144）· 数据为示意</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ═══════════ 1. 令牌轨道 ═══════════ */
+  function initTracks() {
+    document.querySelectorAll('.trl-t .chip').forEach(function (chip) {
+      var dur = Number(chip.dataset.dur) || 200;
+      var ease = chip.dataset.ease || 'ease';
+      chip.style.transition = 'transform ' + dur + 'ms ' + ease;
+    });
+  }
+  function playTracks() {
+    var chips = Array.prototype.slice.call(document.querySelectorAll('.trl-t .chip'));
+    chips.forEach(function (chip) {
+      var dur = Number(chip.dataset.dur) || 200;
+      chip.style.transform = 'translateX(150px)';
+      setTimeout(function () { chip.style.transform = 'translateX(0)'; }, dur + 140);
+    });
+  }
+  document.getElementById('play-tokens').addEventListener('click', playTracks);
+
+  function playBars() {
+    var tracks = ['bar-a', 'bar-b'].map(function (id) { return document.getElementById(id); });
+    // 先瞬间归零（不带动画），下一帧再开始 —— 否则第二次点击会从上一次的位置接着走
+    tracks.forEach(function (t) {
+      t.classList.remove('go');
+      var i = t.querySelector('i');
+      i.style.transition = 'none';
+      i.style.width = '0';
+    });
+    void document.body.offsetWidth;
+    requestAnimationFrame(function () {
+      tracks.forEach(function (t) {
+        var i = t.querySelector('i');
+        i.style.width = '';
+        i.style.transition = '';
+        t.classList.add('go');
+      });
+    });
+  }
+  document.getElementById('play-bars').addEventListener('click', playBars);
+
+  /* ═══════════ 2. 待办（现在 vs 改后） ═══════════ */
+  var TODO_DATA = [
+    { text: '把发版计划写清楚', done: false },
+    { text: '重跑一遍活卡截图', done: true },
+    { text: '回复邮件', done: false }
+  ];
+  var CK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.8l4.2 4.2L19 7.4"/></svg>';
+
+  function buildTodo(card) {
+    var rowsEl = card.querySelector('.td-rows');
+    rowsEl.innerHTML = '';
+    TODO_DATA.forEach(function (it, i) {
+      var row = document.createElement('div');
+      row.className = 'td-row' + (it.done ? ' done' : '');
+      row.dataset.i = i;
+      row.setAttribute('role', 'button');
+      row.innerHTML = '<i class="td-ck" aria-hidden="true">' + CK_SVG + '</i><span class="td-t">' + it.text + '</span>';
+      row.addEventListener('click', function () { onTodoClick(card, i); });
+      rowsEl.appendChild(row);
+    });
+    sortRows(rowsEl, false);
+  }
+
+  // 未完成在上、完成沉底（和 renderTodo 的稳定排序一致）
+  function sortRows(rowsEl, animate) {
+    var rows = Array.prototype.slice.call(rowsEl.children);
+    var order = rows.slice().sort(function (a, b) {
+      var da = a.classList.contains('done') ? 1 : 0;
+      var db = b.classList.contains('done') ? 1 : 0;
+      return da - db || Number(a.dataset.i) - Number(b.dataset.i);
+    });
+    if (!animate) {
+      order.forEach(function (r) { rowsEl.appendChild(r); });
+      return;
+    }
+    // FLIP：先记旧位，重排后反向位移，下一帧归零
+    var first = new Map();
+    rows.forEach(function (r) { first.set(r, r.getBoundingClientRect().top); });
+    order.forEach(function (r) { rowsEl.appendChild(r); });
+    var moved = [];
+    order.forEach(function (r) {
+      var d = first.get(r) - r.getBoundingClientRect().top;
+      if (!d) return;
+      r.style.transition = 'none';
+      r.style.transform = 'translateY(' + d + 'px)';
+      moved.push(r);
+    });
+    if (!moved.length) return;
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        moved.forEach(function (r) {
+          r.style.transition = '';
+          r.style.transform = '';
+        });
+      });
+    });
+  }
+
+  function onTodoClick(card, i) {
+    TODO_DATA[i].done = !TODO_DATA[i].done;
+    var rowsEl = card.querySelector('.td-rows');
+    var row = rowsEl.querySelector('.td-row[data-i="' + i + '"]');
+    if (row) row.classList.toggle('done', TODO_DATA[i].done);
+    // 「现在」= 硬跳；「改后」= FLIP 走过去
+    sortRows(rowsEl, card.classList.contains('draw-check'));
+  }
+
+  document.querySelectorAll('[data-todo]').forEach(buildTodo);
+
+  /* ═══════════ 3. 开关 ═══════════ */
+  document.querySelectorAll('.sw').forEach(function (sw) {
+    function toggle() {
+      var on = sw.classList.toggle('on');
+      sw.setAttribute('aria-checked', on ? 'true' : 'false');
+    }
+    sw.addEventListener('click', toggle);
+    sw.addEventListener('keydown', function (e) {
+      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
+    });
+  });
+
+  /* ═══════════ 4. 时钟数字滚动 ═══════════ */
+  var ROLL_MS = 300;
+
+  function RollingTime(el, initial) {
+    this.el = el;
+    this.digits = [];
+    el.innerHTML = '';
+    // 数字列在 DOM 里是 0-9 十一格，读屏会把整列念出来 → 视觉层 aria-hidden，语义交给 aria-label
+    el.setAttribute('aria-label', initial);
+    for (var k = 0; k < initial.length; k++) {
+      var ch = initial.charAt(k);
+      if (/\d/.test(ch)) {
+        var wrap = document.createElement('span');
+        wrap.className = 'dgt';
+        wrap.setAttribute('aria-hidden', 'true');
+        var strip = document.createElement('span');
+        strip.className = 'strip';
+        for (var n = 0; n <= 10; n++) {
+          var cell = document.createElement('i');
+          cell.textContent = n === 10 ? '0' : String(n);
+          strip.appendChild(cell);
+        }
+        strip.style.transition = 'none';
+        strip.style.transform = 'translateY(' + (-Number(ch)) + 'em)';
+        wrap.appendChild(strip);
+        el.appendChild(wrap);
+        this.digits.push({ strip: strip, val: Number(ch) });
+      } else {
+        var lit = document.createElement('span');
+        lit.className = 'lit';
+        lit.textContent = ch;
+        lit.setAttribute('aria-hidden', 'true');
+        el.appendChild(lit);
+        this.digits.push(null);
+      }
+    }
+    var self = this;
+    requestAnimationFrame(function () {
+      self.digits.forEach(function (d) { if (d) d.strip.style.transition = ''; });
+    });
+  }
+
+  RollingTime.prototype.set = function (str) {
+    this.el.setAttribute('aria-label', str);
+    for (var k = 0; k < str.length; k++) {
+      // 按「字符位」取列 —— 冒号也占一位，不能只在数字字符上自增下标，
+      // 否则冒号之后每位都错开一格（末位永远不动，前一位被写成后一位的值）
+      var col = this.digits[k];
+      if (!col) continue;
+      var next = Number(str.charAt(k));
+      if (next === col.val) continue;
+      var wrapForward = next === 0 && col.val === 9;
+      if (wrapForward) {
+        col.strip.style.transform = 'translateY(-10em)';   // 滚到补的那一格（视觉上就是 0）
+        col.val = 0;
+        setTimeout(function (s) {
+          s.style.transition = 'none';
+          s.style.transform = 'translateY(0em)';            // 两格字一样 → 接缝不可见
+          void s.offsetWidth;
+          s.style.transition = '';
+        }.bind(null, col.strip), ROLL_MS + 40);
+      } else {
+        col.strip.style.transform = 'translateY(' + (-next) + 'em)';
+        col.val = next;
+      }
+    }
+  };
+
+  var nowEl = document.querySelector('[data-clock="now"]');
+  var afterEl = document.querySelector('[data-clock="after"]');
+  var roll = new RollingTime(afterEl, '10:24');
+  var cur = { h: 10, m: 24 };
+  var stateEl = document.getElementById('tstate');
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+  function paint(newH, newM) {
+    cur.h = ((newH % 24) + 24) % 24;
+    cur.m = ((newM % 60) + 60) % 60;
+    var s = pad(cur.h) + ':' + pad(cur.m);
+    nowEl.textContent = s;     // 「现在」：整段换字
+    roll.set(s);               // 「改后」：按位滚
+    stateEl.textContent = s;
+  }
+
+  document.getElementById('t1').addEventListener('click', function () {
+    var m = cur.m + 1, h = cur.h + Math.floor(m / 60);
+    paint(h, m % 60);
+  });
+  document.getElementById('t10').addEventListener('click', function () {
+    var m = cur.m + 10, h = cur.h + Math.floor(m / 60);
+    paint(h, m % 60);
+  });
+  document.getElementById('t955').addEventListener('click', function () { paint(9, 59); });
+  document.getElementById('treset').addEventListener('click', function () { paint(10, 24); });
+
+  initTracks();
+})();
+</script>
+</body>
+</html>

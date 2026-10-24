@@ -29,8 +29,27 @@
     /* 2026-10-10 十改：全界面字体换 MiSans（内嵌四档子集，见 web/fonts/）；缺字由系统栈兜底 */
     --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
     --font-mono: 'MiSans', 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+    /* ─── 动效令牌（2026-10-24）：三条时长 × 三条曲线 ───
+       规则：交互反馈走 normal + ease-out，颜色/描边/阴影走 fast + ease-snap，位移/展开/行重排走 slow + ease-out。
+       别再往规则里写裸数值（.15s ease 这类）。
+       进度条是专例：它表示真实时间在流逝，必须 linear、时长跟推送间隔走（见 .pomo-track / .mc-prog 那两条，故意不套令牌）。 */
+    --dur-fast: 120ms;
+    --dur-normal: 200ms;
+    --dur-slow: 320ms;
+    --ease-out: cubic-bezier(.22, 1, .36, 1);
+    --ease-snap: cubic-bezier(.2, 0, 0, 1);
+    --ease-spring: cubic-bezier(.34, 1.3, .64, 1);
   }
   *, *::before, *::after { box-sizing: border-box; }
+  /* 减少动态效果：只关动，不藏内容 —— 所有终态立即呈现（勾仍然是勾，只是不再描线/弹）
+     注：条宽补间、数字滚动由 JS 各自读同一个媒体查询降级 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      transition-duration: 1ms !important;
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+    }
+  }
   /* 透明窗口：底层模糊由系统 Acrylic 提供 */
   /* 等比缩放（2026-09-28 尺寸档位制）：本文件卡面 CSS 一律用 rem，根字号由 JS 按
      「窗口高 ÷ 该卡中档高」设置 → 小/中/大三档都是同一张设计稿的等比缩放，
@@ -59,7 +78,7 @@
     border-radius: 1rem;
     overflow: hidden;                  /* 裁掉磨砂层模糊外溢的软边 */
     background: none;
-    transition: border-color 0.15s ease;
+    transition: border-color var(--dur-fast) var(--ease-snap);
     cursor: default;
   }
   .card > * { position: relative; z-index: 2; }   /* 内容始终在玻璃之上 */
@@ -204,9 +223,19 @@
   /* ─── 时钟卡 ─── */
   .clock-body { align-items: center; justify-content: center; gap: 0.125rem; }   /* 第四轮收拢 6→4（2026-10-10 用户「几个元素都往中间凑一点」）→ 第五轮 4→2（2026-10-10 用户「下面两行贴紧一点」：下对墨迹隙 11→9 设计 px；上对隙靠 .clock-date margin-top 1→3 补回，设计值不变） */
   .clock-time {
+    /* 不写 height：显式 height:1em 会被量化到 1/64px（59.984 而非 60），
+       整栈居中后农历行会跟着上移 1px（台架实测 193→191）。height:auto 让容器等于列高，与改前逐像素一致。 */
+    display: flex; align-items: center;
     font-family: var(--font-mono); font-variant-numeric: tabular-nums;
     font-size: 4.5rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: var(--fg);
   }
+  /* 数字列（2026-10-24；时钟 + 番茄倒计时共用）：每位一列，位移由 JS rAF 驱动。
+     列宽交给字形自身（tabular-nums 等宽），别写 1ch —— 实测 1ch 与真字幅不等，整串会宽出一截。 */
+  .roll { display: flex; align-items: center; justify-content: center; }
+  .roll .dgt { display: inline-block; height: 1em; overflow: hidden; }
+  .roll .strip { display: block; will-change: transform; }
+  .roll .strip i { display: block; height: 1em; line-height: 1; font-style: normal; text-align: center; }
+  .roll .lit { display: inline-block; }
   .clock-date { font-size: 1.125rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 0.1875rem; }
     /* 13→16 设计 px（2026-10-01 用户「下面两行小字改大一点」）→ 16→18（2026-10-10 用户「下面两行字稍微调大一点」）；
        tnum @2026-10-10 MiSans（日期数字等宽，跨天宽度不跳）。
@@ -342,7 +371,7 @@
     font-family: var(--font-body); font-size: 1rem; line-height: 1;
     color: color-mix(in oklch, var(--fg) 55%, transparent);
     background: transparent; border: 0;
-    transition: color 0.15s ease;
+    transition: color var(--dur-fast) var(--ease-snap);
   }
   .pm-flank:hover { color: var(--fg); }
   .pm-flank:active { color: color-mix(in oklch, var(--fg) 80%, transparent); }
@@ -366,7 +395,7 @@
   .pm-btn {
     flex: 1; height: 1.5625rem; border-radius: 0.375rem; display: grid; place-items: center;
     font-family: var(--font-body); font-size: 0.875rem; font-weight: 400; letter-spacing: normal;   /* 2026-10-08：12→13px（= .pm-step 同档）提清晰度，去字距；13→14px @2026-10-10 第六轮（用户「暂停/重设笔画比较多 不清楚」：1x 8x nearest 对比定稿；700 显块、字距/阴影均无效——按钮不吃 text-shadow 是 Chromium 表单控件行为）；600→400 @2026-10-11 第七轮（用户「取消加粗看能不能看清」：MiSans 真字重 400=Regular，1x 8x nearest 对比——400 笔画分离最好、500 次之、600 最糊） */
-    user-select: none; transition: background 0.15s ease, border-color 0.15s ease;
+    user-select: none; transition: background var(--dur-fast) var(--ease-snap), border-color var(--dur-fast) var(--ease-snap);
   }
   /* 2026-09-28 用户要求：主按钮不再上强调色，与 ghost 完全一致（卡片里只留进度条用强调色）
      2026-10-08 字重也统一为 600（原 ghost 500 对中文静默回落 400，与主按钮实际渲染的 700 摆一起太乱）
@@ -436,7 +465,7 @@
     width: 2.125rem; height: 1.875rem; border-radius: 0.5rem; display: grid; place-items: center;
     /* 2026-10-09 三轮：32×28 → 34×30（用户「按钮…整体再大一点」） */
     color: var(--fg); background: transparent; border: 1px solid color-mix(in oklch, var(--fg) 26%, transparent);
-    transition: background 0.15s ease, border-color 0.15s ease;
+    transition: background var(--dur-fast) var(--ease-snap), border-color var(--dur-fast) var(--ease-snap);
   }
   .mc-btn:hover { background: var(--fg-soft); border-color: color-mix(in oklch, var(--fg) 44%, transparent); }
   .mc-btn svg { width: 1.375rem; height: 1.375rem; stroke-width: 2.2; }   /* 2026-10-09 三轮：20→22px、描边 1.9→2.2（用户「线条再粗一点」） */
@@ -444,16 +473,30 @@
 
   /* ─── 日历卡（OD 卡片稿 卡 8：240×180 · 全月视图 · 周一起始 · 今日高亮） ─── */
   .card-cal { padding: 0.625rem 0.75rem; }
-  .cal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+  /* .cal-body 自身定位：`.card > *` 给的 z-index:2 在这里成立（独立层叠上下文），
+     今日块的 z-index:-1 才能垫在数字下、白纱上。翻月动画作用在 .cal-page，不动这一层。 */
+  .cal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.25rem; position: relative; }
+  /* 翻月动画只作用在日期页（星期行 + 日号 + 今日块）；标题与 ‹ › 在 .cal-head 里不参与。
+     will-change 让这层始终是层叠上下文：今日块的 z-index:-1 不会在动画开始/结束时换包含块。 */
+  .cal-page { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.25rem; will-change: transform, opacity; }
   .cal-head { display: flex; align-items: center; justify-content: space-between; }
   .cal-title { font-size: 1rem; font-weight: 600; letter-spacing: 0.01em; line-height: 1.3; }
   .cal-nav { display: flex; gap: 0.125rem; }
   .cal-navbtn {
     width: 1.25rem; height: 1.25rem; border-radius: 0.375rem; padding: 0; display: grid; place-items: center;
     color: var(--muted); background: transparent; border: 0;
-    transition: background 0.15s ease, color 0.15s ease;
+    transition: background var(--dur-fast) var(--ease-snap), color var(--dur-fast) var(--ease-snap), transform var(--dur-fast) var(--ease-snap);
   }
   .cal-navbtn:hover { background: var(--fg-soft); color: var(--fg); }
+  .cal-navbtn:active { transform: scale(0.86); }   /* 按住时的按压反馈 */
+  /* 点按动效（2026-10-24）：翻月只动 .cal-page，按钮节点不再随翻月重建 →
+     这个 class 只在点击时加一次，不会出现「重建后从 0 重放」。 */
+  .cal-navbtn.tap { animation: calTap 200ms var(--ease-out); }
+  @keyframes calTap {
+    0% { transform: scale(0.86); }
+    55% { transform: scale(1.06); }
+    100% { transform: scale(1); }
+  }
   .cal-navbtn svg { width: 0.75rem; height: 0.75rem; }
   .cal-wd { display: grid; grid-template-columns: repeat(7, 1fr); font-size: 0.8125rem; line-height: 1.4; color: var(--muted); text-align: center; }   /* 2026-10-11 用户「一二三四五六日字体改大一点」：0.6875(11px)→0.8125(13px)。仍低于日号 14px 保层级；台架 4/5/6 行月份不裁切 */
   .cal-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(7, 1fr); grid-auto-rows: 1fr; align-items: center; }
@@ -481,17 +524,26 @@
      最多 4 行；超过 → 3 行 + 「还有 N 项」；未完成在上、完成沉底划线。 */
   .card-todo { padding: 0.625rem 0.75rem; }
   .td-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: 0.25rem; }
-  .td-row { display: flex; align-items: center; gap: 0.5rem; height: 1.3125rem; border-radius: 0.375rem; }
+  .td-row { display: flex; align-items: center; gap: 0.5rem; height: 1.3125rem; border-radius: 0.375rem; transition: transform var(--dur-slow) var(--ease-out); }
   .td-row:hover { background: var(--fg-soft); }   /* 整行可点的提示 */
   .td-ck {
     flex: 0 0 auto; width: 1.0625rem; height: 1.0625rem; border-radius: 999px;
     border: 1px solid color-mix(in oklch, var(--fg) 34%, transparent);
     display: grid; place-items: center; color: var(--fg);
+    transition: background-color var(--dur-normal) var(--ease-snap), border-color var(--dur-normal) var(--ease-snap);
   }
-  .td-ck svg { width: 0.625rem; height: 0.625rem; display: none; }
+  /* 勾改成「描出来」（2026-10-24）：SVG 常在 DOM 里，靠 stroke-dashoffset 画线，不再用 display 切换。
+     路径实际长 17.13，dasharray 给 26 → 未选中时整段虚线落在 gap 里（完全不可见）。
+     注意：这条是 CSS transition，前提是勾选不再整段重建（todoPaint 走路更新）；重建时新元素直接落到目标态，不存在「从 0 重放」。 */
+  .td-ck svg { width: 0.625rem; height: 0.625rem; display: block; }
+  .td-ck svg path { stroke-dasharray: 26; stroke-dashoffset: 26; transition: stroke-dashoffset 280ms var(--ease-out); }
   .td-row.done .td-ck { background: var(--accent); border-color: transparent; }
-  .td-row.done .td-ck svg { display: block; }
-  .td-t { flex: 1; min-width: 0; font-size: 0.9375rem; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 弹一下只在「用户刚勾上」时发生（todoPaint 加 .just-done 再摘掉）：重建出来的已完成行不重弹 */
+  .td-row.just-done .td-ck { animation: ckPop var(--dur-slow) var(--ease-out); }
+  .td-row.done .td-ck svg path { stroke-dashoffset: 0; }
+  /* 只有「勾上」弹一下：取消勾选是撤回动作，弹一下像奖励 */
+  @keyframes ckPop { 0% { transform: scale(.9); } 55% { transform: scale(1.04); } 100% { transform: scale(1); } }
+  .td-t { flex: 1; min-width: 0; font-size: 0.9375rem; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color var(--dur-normal) var(--ease-snap); }
   .td-row.done .td-t { color: var(--muted); text-decoration: line-through; }
   .td-more { height: 1.3125rem; display: flex; align-items: center; padding-left: 1.5625rem; font-size: 0.8125rem; color: var(--muted); }
   .td-empty-l { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.125rem; }
@@ -923,15 +975,139 @@
     } catch (e) { return ''; }
   }
 
+  /* ── 逐位滚动数字（2026-10-24；时钟 + 番茄倒计时共用）──
+     每列 12 格：首位补一个 9（给倒计时的 0→9 进位）、末位补一个 0（给正向的 9→0 进位）。
+     两个方向都能连续滚过一格再瞬归到真格，不会从 9 直接闪到 0。index = 数字 + 1。
+     位移一律 rAF 驱动 translate3d：卡面重建时无记忆 CSS 动画会从 0 重放（ui-motion 铁律 §一.1）；
+     正常态走各自 Paint() 的走路更新（不重建），重建时新列直接落到目标位，不回零。 */
+  var rollEls = [];                                   // 页面里所有滚动数字容器（时钟 / 番茄倒计时）
+  var rollRaf = 0;
+  var rollRM = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  function rollReduced() { return !!(rollRM && rollRM.matches); }
+
+  function clockTimeStr(d) {
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+  function clockDateStr(d) {
+    return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日 ' +
+      ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()];
+  }
+  function rollCellsHtml() {
+    var s = '<i>9</i>';
+    for (var n = 0; n <= 9; n++) s += '<i>' + n + '</i>';
+    return s + '<i>0</i>';
+  }
+  function rollDigitsHtml(t) {
+    var html = '';
+    for (var i = 0; i < t.length; i++) {
+      var ch = t.charAt(i);
+      if (ch >= '0' && ch <= '9') {
+        html += '<span class="dgt" aria-hidden="true"><span class="strip" data-cur="' + ch +
+          '" style="transform:translate3d(0,' + (-(Number(ch) + 1)) + 'em,0)">' + rollCellsHtml() + '</span></span>';
+      } else {
+        html += '<span class="lit" aria-hidden="true">' + ch + '</span>';
+      }
+    }
+    return html;
+  }
+  function rollBind(el) {
+    if (!el) return null;
+    var strips = el.querySelectorAll('.dgt .strip');
+    el.__cols = [];
+    for (var i = 0; i < strips.length; i++) {
+      var v = (Number(strips[i].getAttribute('data-cur')) || 0) + 1;
+      el.__cols.push({ s: strips[i], cur: v, to: v, from: v, digit: v - 1, t0: 0, anim: false, wrapTo: -1 });
+    }
+    // 清掉已脱离文档的旧容器（番茄钟每次切态都重建，不清理会越攒越多）
+    rollEls = rollEls.filter(function (x) { return x.__cols && document.contains(x); });
+    if (rollEls.indexOf(el) < 0) rollEls.push(el);
+    return el;
+  }
+  function rollTick(now) {
+    var busy = false;
+    for (var e = 0; e < rollEls.length; e++) {
+      var el = rollEls[e];
+      if (!el.__cols || !document.contains(el)) continue;
+      var ms = el.__ms || 300;
+      for (var i = 0; i < el.__cols.length; i++) {
+        var c = el.__cols[i];
+        if (!c.anim) continue;
+        var u = Math.min(1, (now - c.t0) / ms);
+        var k = 1 - Math.pow(1 - u, 4);        // easeOutQuart：起步快、收尾缓（≈ --ease-out）
+        var idx = c.from + (c.to - c.from) * k;
+        c.cur = idx;
+        c.s.style.transform = 'translate3d(0,' + (-idx).toFixed(4) + 'em,0)';
+        if (u >= 1) {
+          c.anim = false;
+          if (c.wrapTo >= 0) {                 // 滚到补的那一格（字形与真格相同）→ 瞬归，接缝不可见
+            c.cur = c.wrapTo; c.to = c.wrapTo;
+            c.s.style.transform = 'translate3d(0,' + (-c.wrapTo) + 'em,0)';
+            c.wrapTo = -1;
+          }
+          c.digit = c.to - 1;
+          c.s.setAttribute('data-cur', c.digit);
+        } else busy = true;
+      }
+    }
+    rollRaf = busy ? requestAnimationFrame(rollTick) : 0;
+  }
+  /* dir = +1 数字往大走（时钟）/ −1 往小走（倒计时）——决定进位从补格哪一侧滚过去 */
+  function rollSet(el, t, ms, dir) {
+    el.setAttribute('aria-label', t);
+    el.setAttribute('data-t', t);
+    el.__ms = ms || 300;
+    var cols = el.__cols || [];
+    var now = performance.now(), busy = false, di = 0;
+    for (var i = 0; i < t.length; i++) {
+      var ch = t.charAt(i);
+      if (ch < '0' || ch > '9') continue;
+      var c = cols[di++];
+      if (!c) continue;
+      var d = Number(ch);
+      if (d === c.digit && !c.anim) continue;      // 这一位没变
+      if (rollReduced()) {                         // 减少动态效果：直接落位，不滚
+        c.cur = d + 1; c.to = d + 1; c.digit = d; c.anim = false; c.wrapTo = -1;
+        c.s.style.transform = 'translate3d(0,' + (-(d + 1)) + 'em,0)';
+        c.s.setAttribute('data-cur', d);
+        continue;
+      }
+      c.from = c.cur; c.t0 = now; c.anim = true;
+      if (dir < 0 && d > c.digit) {                // 倒计时 0→9：从首位补的 9 滚过去
+        c.to = 0; c.wrapTo = d + 1;
+      } else if (dir > 0 && d < c.digit) {         // 时钟 9→0：从末位补的 0 滚过去
+        c.to = 11; c.wrapTo = d + 1;
+      } else {
+        c.to = d + 1; c.wrapTo = -1;
+      }
+      busy = true;
+    }
+    if (busy && !rollRaf) rollRaf = requestAnimationFrame(rollTick);
+  }
+  /* 走路更新：只动变了的位；日期/农历条件写入，不整段重建 */
+  function clockPaint() {
+    if (curState !== 'normal') return false;
+    var el = bodyEl.querySelector('.clock-time');
+    if (!el || !el.__cols) return false;
+    var d = new Date();
+    var t = clockTimeStr(d);
+    if (el.getAttribute('data-t') !== t) rollSet(el, t, 300, 1);
+    var de = bodyEl.querySelector('.clock-date');
+    var ds = clockDateStr(d);
+    if (de && de.textContent !== ds) de.textContent = ds;
+    var lunar = lunarOf(d);
+    var le = bodyEl.querySelector('.clock-lunar');
+    if (!!le !== !!lunar) return false;        // 农历行有/无变化（跨月）→ 交回重建
+    if (le && le.textContent !== lunar) le.textContent = lunar;
+    return true;
+  }
+
   function renderClock() {
     var d = new Date();
-    var wk = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()];
-    var time = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
-    var date = d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + wk;
+    var time = clockTimeStr(d);
     var lunar = lunarOf(d);
     var inner =
-      '<div class="clock-time num">' + time + '</div>' +
-      '<div class="clock-date">' + date + '</div>' +
+      '<div class="clock-time num roll" data-t="' + time + '" aria-label="' + time + '">' + rollDigitsHtml(time) + '</div>' +
+      '<div class="clock-date">' + clockDateStr(d) + '</div>' +
       (lunar ? '<div class="clock-lunar">' + esc(lunar) + '</div>' : '');
     // 时钟永远有数据：异常态仅在本进程时钟源失效时出现（当前不会），保留结构与设计稿一致
     return '<div class="card-body clock-body' + (curState === 'error' ? ' dim' : '') + '">' + inner + '</div>';
@@ -1067,7 +1243,7 @@
         '<span class="pm-num">' + pomo.dur + '</span>' +
         '<button type="button" class="pm-flank" data-act="plus" aria-label="增加 5 分钟">+</button>' +
       '</div>' +
-      '<div class="pm-time num">' + mmss(remain) + '</div>' +
+      '<div class="pm-time num roll" data-t="' + mmss(remain) + '" aria-label="' + mmss(remain) + '">' + rollDigitsHtml(mmss(remain)) + '</div>' +
       '<div class="pomo-track"><div class="bar" role="img" aria-label="专注进度 ' + Math.round(pct) + '%"><i class="pm-fill" style="width:' + pct.toFixed(1) + '%"></i></div></div>' +
       '<div class="pmc-acts">' +
         '<button type="button" class="pm-btn primary pm-start" data-act="start">开始</button>' +
@@ -1083,10 +1259,19 @@
     var body = bodyEl.querySelector('.pomo-body');
     if (!body || force || body.dataset.mode !== mode) {
       bodyEl.innerHTML = renderPomo();
+      rollBind(bodyEl.querySelector('.pm-time'));   // 重建后新列已在目标位，不回零
       return;
     }
     var remain = mode === 'set' ? pomoTotal() : pomoRemain();
-    var t = body.querySelector('.pm-time'); if (t) t.textContent = mmss(remain);
+    var t = body.querySelector('.pm-time');
+    if (t) {
+      var s = mmss(remain);
+      if (t.getAttribute('data-t') !== s) {
+        // 倒计时：dir=-1（往小走），200ms —— 每秒一次滚动，时长必须明显短于 1s，不然永远在动
+        if (t.__cols) rollSet(t, s, 200, -1);
+        else t.textContent = s;
+      }
+    }
     var d = body.querySelector('.pm-num'); if (d) d.textContent = pomo.dur;
     var ph = body.querySelector('.pm-phase'); if (ph) ph.textContent = pomoPhase(mode);
     var fi = body.querySelector('.pm-fill'); if (fi) fi.style.width = pomoPct(mode, remain).toFixed(1) + '%';
@@ -1132,7 +1317,7 @@
     var b = t.closest('[data-act]');
     if (!b) return;
     if (kind === 'Pomodoro') pomoAct(b.dataset.act);
-    else if (kind === 'Calendar') calNav(b.dataset.act);
+    else if (kind === 'Calendar') calTap(b);
     else if (kind === 'Music' && window.__TAURI__ && window.__TAURI__.core) {
       // 记住方向：卡上按 ⏮/⏭ → 下一次封面翻转按对应方向（2026-10-09 用户）
       if (b.dataset.act === 'previous') mDir = -1;
@@ -1361,18 +1546,70 @@
 
   /* ── 日历卡（OD 卡 8：全月视图 · 周一起始 · 今日高亮 · ‹ › 翻月） ── */
   var calY = 0, calM = 0;   // 0/0 = 跟随今天；翻月后固定在被翻的月份（跨天刷新时保留）
+  var calFlipDir = 0;       // 下一次日历重建的翻页方向：+1 下月 / −1 上月（0 = 不动画）
+  var calAnim = 0;          // 翻月动画的 rAF 句柄
   function calNav(act) {
     var d = new Date();
     if (!calY) { calY = d.getFullYear(); calM = d.getMonth(); }
     if (act === 'prev') { calM--; if (calM < 0) { calM = 11; calY--; } }
     else if (act === 'next') { calM++; if (calM > 11) { calM = 0; calY++; } }
     else return;
-    render(true);
+    calFlipDir = act === 'next' ? 1 : -1;   // 只有用户翻月才设方向；跨天刷新走 0（不动画）
+    // 走路更新：只换标题 + 日期页；标题栏的 ‹ › 节点保持不动（按压反馈才不会被重建截断）
+    if (calPaint()) {
+      calFlip(calFlipDir);
+      calFlipDir = 0;
+      lastRenderAt = Date.now();
+    } else {
+      render(true);   // 首帧结构还没建（极端情况）才整段重建
+    }
   }
-  function renderCalendar() {
-    var now = new Date();
-    var y = calY || now.getFullYear();
-    var m = calY ? calM : now.getMonth();
+
+  /* 按钮点按动效：只由点击触发，按钮节点不重建 → class 不会在重建时重放 */
+  function calTap(btn) {
+    btn.classList.remove('tap');
+    void btn.offsetWidth;
+    btn.classList.add('tap');
+    setTimeout(function () { btn.classList.remove('tap'); }, 240);
+    calNav(btn.dataset.act);
+  }
+
+  /* 翻月动效：新页从「翻页方向」滑入 + 淡入（200ms ease-out；克制档：位移 16px、无回弹）。
+     ⚠️ 今日蓝块是 SVG 覆盖层、几何由 syncCalChip 按布局盒写死（亚像素对位）——所以动画
+     **只作用在 .cal-page（星期行 + 日号 + 块）**上：块和数字在同一个坐标系里一起动，逐帧仍然贴合；
+     千万别去补间 rect 的 x/y（那正是当初块位置不准的根源）。
+     ⚠️ 标题与 ‹ › 按钮在 .cal-head 里，**不参与翻月动画**（2026-10-24 用户要求）：
+     按钮只保留自己的点按动效（.cal-navbtn.tap）。
+     用 rAF 驱动而不是 CSS keyframes：卡面重建不会留下「从 0 重放」的动画（本项目动效铁律）。 */
+  var CAL_FLIP_MS = 200, CAL_FLIP_DX = 16;
+  function calFlip(dir) {
+    if (!dir) return;
+    var el = bodyEl.querySelector('.cal-page');
+    if (!el) return;
+    // 系统「减少动态效果」：直接落到终态（与 CSS 那条 reduced-motion 同口径）
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    if (calAnim) { cancelAnimationFrame(calAnim); calAnim = 0; }
+    var from = dir > 0 ? CAL_FLIP_DX : -CAL_FLIP_DX;
+    el.style.opacity = '0.2';
+    el.style.translate = from.toFixed(2) + 'px 0';
+    var t0 = 0;
+    function step(now) {
+      if (!t0) t0 = now;
+      var u = Math.min(1, (now - t0) / CAL_FLIP_MS);
+      var e = 1 - Math.pow(1 - u, 4);                        // easeOutQuart ≈ --ease-out（同时钟滚动）
+      el.style.opacity = (0.2 + 0.8 * e).toFixed(3);
+      el.style.translate = (from * (1 - e)).toFixed(2) + 'px 0';
+      if (u < 1) { calAnim = requestAnimationFrame(step); return; }
+      // 收尾写数值、不摘属性（摘属性会在动画尾巴上触发一次样式重算，见 Dock 动效的教训）
+      calAnim = 0;
+      el.style.opacity = '1';
+      el.style.translate = '0px 0';
+      syncCalChip();                                          // 防御：收尾再对一次块位置
+    }
+    calAnim = requestAnimationFrame(step);
+  }
+  // 日期页（星期行 + 日号 + 今日块画布）；翻月时只换这一段
+  function calPageHtml(y, m, now) {
     var offset = (new Date(y, m, 1).getDay() + 6) % 7;          // 周一起始
     var days = new Date(y, m + 1, 0).getDate();
     var total = Math.ceil((offset + days) / 7) * 7;             // 5 或 6 行
@@ -1384,19 +1621,43 @@
       var n = cell.getDate();
       cells += '<span class="cal-d' + (out ? ' other' : '') + (isToday ? ' today' : '') + '">' + (isToday ? '<i>' + n + '</i>' : n) + '</span>';
     }
+    return '<div class="cal-wd"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>' +
+      '<div class="cal-grid">' + cells + '</div>' +
+      // 今日块画布：整页大小，rect 由 syncCalChip 按 today 的布局盒写入（亚像素）
+      // rx 由 JS 按根字号换算（SVG 几何属性对 rem 支持不稳，写死 px 更保险）
+      '<svg class="cal-chip-svg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        '<rect rx="7" ry="7" fill="var(--accent)" width="0" height="0"/>' +
+      '</svg>';
+  }
+
+  /* 走路更新：标题文字 + 日期页；‹ › 按钮节点不重建。
+     返回 false = 结构不在（首帧/异常态），交回 render(true)。 */
+  function calPaint() {
+    if (kind !== 'Calendar') return false;
+    var body = bodyEl.querySelector('.cal-body');
+    var page = body && body.querySelector('.cal-page');
+    var title = body && body.querySelector('.cal-title');
+    if (!body || !page || !title) return false;
+    var now = new Date();
+    var y = calY || now.getFullYear();
+    var m = calY ? calM : now.getMonth();
+    title.textContent = y + '年' + (m + 1) + '月';
+    page.innerHTML = calPageHtml(y, m, now);
+    syncCalChip();
+    return true;
+  }
+
+  function renderCalendar() {
+    var now = new Date();
+    var y = calY || now.getFullYear();
+    var m = calY ? calM : now.getMonth();
     return '<div class="card-body cal-body">' +
       '<div class="cal-head"><span class="cal-title">' + y + '年' + (m + 1) + '月</span>' +
         '<span class="cal-nav">' +
           '<button type="button" class="cal-navbtn" data-act="prev" aria-label="上个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></svg></button>' +
           '<button type="button" class="cal-navbtn" data-act="next" aria-label="下个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 6l6 6-6 6"/></svg></button>' +
         '</span></div>' +
-      '<div class="cal-wd"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>' +
-      '<div class="cal-grid">' + cells + '</div>' +
-      // 今日块画布：整卡大小，rect 由 syncCalChip 按 today 的布局盒写入（亚像素）
-      // rx 由 JS 按根字号换算（SVG 几何属性对 rem 支持不稳，写死 px 更保险）
-      '<svg class="cal-chip-svg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
-        '<rect rx="7" ry="7" fill="var(--accent)" width="0" height="0"/>' +
-      '</svg>' +
+      '<div class="cal-page">' + calPageHtml(y, m, now) + '</div>' +
     '</div>';
   }
 
@@ -1434,12 +1695,80 @@
     }).catch(function () { TDO = TDO || []; render(true); });
   }
   window.__todoRefresh = function () { todoLoad(); };   // 参数面板保存后 Rust eval 这个钩子
+  window.__setTodo = function (items) { TDO = items || []; render(true); };   // 诊断钩子：离线台架注入条目（浏览器里没有 get_config 时用）
+  // 未完成在上、完成沉底（稳定排序、保留原数组下标给 todo_toggle 用）
+  function todoOrder(items) {
+    var order = items.map(function (t, i) { return i; });
+    order.sort(function (a, b) { return (items[a].done ? 1 : 0) - (items[b].done ? 1 : 0) || a - b; });
+    return order;
+  }
+  function todoShown(items) { return todoOrder(items).slice(0, items.length > 4 ? 3 : 4); }
+
+  /* 走路更新（2026-10-24）：勾选只改类名 + FLIP 重排，不整段重建。
+     重建的代价：勾的描线断档、盒子动画重放、行位移没有过程（而且已完成的行每次 render 都会重弹一次）。 */
+  function todoPaint() {
+    if (curState !== 'normal' || !TDO || !TDO.length) return false;
+    var rowsEl = bodyEl.querySelector('.td-rows');
+    if (!rowsEl) return false;
+    var shown = todoShown(TDO);
+    var rows = rowsEl.querySelectorAll('.td-row');
+    if (rows.length !== shown.length) return false;              // 条目增删 → 交回重建
+    var want = [];
+    for (var i = 0; i < shown.length; i++) {
+      var t = TDO[shown[i]];
+      if (!t) return false;
+      want.push(shown[i] + (t.done ? '1' : '0'));
+    }
+    // 文案按 data-idx 逐行对（不能按位置对：沉底后顺序本来就会变），变了就交回重建
+    for (var q = 0; q < rows.length; q++) {
+      var it = TDO[+rows[q].dataset.idx];
+      if (!it || rows[q].querySelector('.td-t').textContent !== it.text) return false;
+    }
+    var cur = [];
+    for (var j = 0; j < rows.length; j++) cur.push(rows[j].dataset.idx + (rows[j].classList.contains('done') ? '1' : '0'));
+    if (cur.join(',') === want.join(',')) return true;           // 已经一致：一个字都不动
+    // FLIP：记旧位 → 改态 + 按目标顺序重排 → 反向位移 → 下一帧归零
+    var top0 = {};
+    for (var k = 0; k < rows.length; k++) top0[rows[k].dataset.idx] = rows[k].getBoundingClientRect().top;
+    var moved = [];
+    for (var m = 0; m < shown.length; m++) {
+      var idx = shown[m];
+      var row = rowsEl.querySelector('.td-row[data-idx="' + idx + '"]');
+      if (!row) return false;
+      var done = !!TDO[idx].done;
+      if (row.classList.contains('done') !== done) {
+        row.classList.toggle('done', done);
+        if (done) {                                              // 只有刚勾上的才弹一下
+          row.classList.add('just-done');
+          (function (r) { setTimeout(function () { r.classList.remove('just-done'); }, 420); })(row);
+        }
+      }
+      rowsEl.appendChild(row);
+    }
+    // ⚠️ 必须整轮重排结束后再量新位：appendChild 是逐个搬，搬的过程中量到的是中间态
+    //（实测会得出反向位移，行会先弹到错的位置再走回来）
+    for (var n2 = 0; n2 < shown.length; n2++) {
+      var row2 = rowsEl.querySelector('.td-row[data-idx="' + shown[n2] + '"]');
+      if (!row2) continue;
+      var dd = top0[shown[n2]] - row2.getBoundingClientRect().top;
+      if (dd) { row2.style.transition = 'none'; row2.style.transform = 'translateY(' + dd + 'px)'; moved.push(row2); }
+    }
+    if (moved.length) {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          for (var n = 0; n < moved.length; n++) { moved[n].style.transition = ''; moved[n].style.transform = ''; }
+        });
+      });
+    }
+    return true;
+  }
   function todoToggle(idx) {
     if (!TDO || !TDO[idx]) return;
     TDO[idx].done = !TDO[idx].done;   // 本地先行（即时反馈），随后以落盘结果为准
-    render(true);
+    if (!todoPaint()) render(true);
+    if (!window.__TAURI__ || !window.__TAURI__.core) return;   // 浏览器/预览里没有宿主：本地先行已经生效
     window.__TAURI__.core.invoke('todo_toggle', { id: cardId, index: idx }).then(function (items) {
-      if (items) { TDO = items; render(true); }
+      if (items) { TDO = items; if (!todoPaint()) render(true); }
     }).catch(function () {});
   }
   function renderTodo() {
@@ -1447,10 +1776,8 @@
     if (!items.length) {
       return '<div class="card-body"><div class="empty td-empty-l">暂无待办<span>在主界面 · 参数 里添加</span></div></div>';
     }
-    // 未完成在上、完成沉底（稳定排序、保留原数组下标给 todo_toggle 用）
-    var order = items.map(function (t, i) { return i; });
-    order.sort(function (a, b) { return (items[a].done ? 1 : 0) - (items[b].done ? 1 : 0) || a - b; });
-    var shown = order.slice(0, items.length > 4 ? 3 : 4);
+    // 未完成在上、完成沉底（排序见 todoOrder；与 todoPaint 共用，两处口径必须一致）
+    var shown = todoShown(items);
     var more = items.length - shown.length;
     var html = '';
     shown.forEach(function (i) {
@@ -1513,6 +1840,16 @@
         lastRenderAt = Date.now();
         return;
       }
+      // 时钟同理：只改变了的数字位（整段重建会打断数字滚动）
+      if (kind === 'Clock' && !force && clockPaint()) {
+        lastRenderAt = Date.now();
+        return;
+      }
+      // 日历同理：标题与 ‹ › 按钮不重建（翻月动画/按压反馈都挂在原节点上）
+      if (kind === 'Calendar' && !force && calPaint()) {
+        lastRenderAt = Date.now();
+        return;
+      }
       html =
         kind === 'Performance' ? renderPerf() :
         kind === 'Disks' ? renderDisks() :
@@ -1524,7 +1861,12 @@
     }
     bodyEl.innerHTML = html;
     if (kind === 'Performance' && st === 'normal') perfPaint();   // 重建/首帧：把条挂到补间上（按记忆落位，不回零）
-    if (kind === 'Calendar') syncCalChip();   // 块位置按布局盒（亚像素）写入 SVG 层
+    if (kind === 'Clock' && st === 'normal') rollBind(bodyEl.querySelector('.clock-time'));   // 重建/首帧：抓列（html 里已写到目标位，不回零）
+    if (kind === 'Calendar') {
+      syncCalChip();                                              // 块位置按布局盒（亚像素）写入 SVG 层
+      if (st === 'normal' && calFlipDir) calFlip(calFlipDir);      // 只有用户点 ‹ › 才带方向
+      calFlipDir = 0;
+    }
     // 音乐卡：封面 dataURL（Rust 缓存）同步注入两层——.mc-cover 那层在 1px 边框底下（防蓝圈），.mc-art 是主图层
     if (kind === 'Music' && msnap && msnap.cover) {
       var cvb = bodyEl.querySelector('.mc-cover');
@@ -1649,7 +1991,7 @@
     var calDay0 = new Date().toDateString();
     setInterval(function () {
       var s = new Date().toDateString();
-      if (s !== calDay0) { calDay0 = s; render(true); }
+      if (s !== calDay0) { calDay0 = s; if (!calPaint()) render(true); }
     }, 30000);
   }
 
@@ -1687,6 +2029,15 @@
   cardEl.addEventListener('mouseleave', function () {
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
   });
+  }
+
+  /* ── 主界面卡堆（deck=1）：卡面是独立文档，滚轮事件不会冒泡到父页 →
+     这里转成消息交给父页翻页。卡片库缩略图不带 deck=1，不受影响。 */
+  if (previewMode && params.get('deck') === '1') {
+    window.addEventListener('wheel', function (e) {
+      if (!e.deltaY) return;
+      try { parent.postMessage({ __mcDeckWheel: e.deltaY }, '*'); } catch (err) {}
+    }, { passive: true });
   }
 
   render(true);

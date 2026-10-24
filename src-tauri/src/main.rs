@@ -181,6 +181,45 @@ fn screen_size() -> (i32, i32) {
     unsafe { (GetSystemMetrics(0), GetSystemMetrics(1)) }
 }
 
+/// 主界面「位置」滑条 / Dock 位置轨道的量程（逻辑 px）：
+/// · `x/y/w/h` = 所有显示器并集的包围盒（卡片 XY 滑条用；负坐标的副屏也覆盖）
+/// · `pw/ph` = 主屏尺寸（Dock 轨道按主屏宽度画）
+/// 混合 DPI 下按主屏缩放换算包围盒 —— 滑条只求「行程够用」，精确落点仍由
+/// `card_move` 的逻辑坐标决定，不做逐屏换算。
+#[tauri::command]
+fn desk_geometry(app: AppHandle) -> serde_json::Value {
+    let mons = display::monitors();
+    let primary = app.primary_monitor().ok().flatten();
+    let s = primary.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+    let (pw, ph) = primary
+        .as_ref()
+        .map(|m| {
+            (
+                m.size().width as f64 / m.scale_factor(),
+                m.size().height as f64 / m.scale_factor(),
+            )
+        })
+        .unwrap_or((1920.0, 1080.0));
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (m, _) in &mons {
+        x0 = x0.min(m.0);
+        y0 = y0.min(m.1);
+        x1 = x1.max(m.2);
+        y1 = y1.max(m.3);
+    }
+    if mons.is_empty() {
+        (x0, y0, x1, y1) = (0, 0, 1920, 1080);
+    }
+    serde_json::json!({
+        "x": (x0 as f64 / s).round() as i32,
+        "y": (y0 as f64 / s).round() as i32,
+        "w": (((x1 - x0) as f64) / s).round() as i32,
+        "h": (((y1 - y0) as f64) / s).round() as i32,
+        "pw": pw.round() as i32,
+        "ph": ph.round() as i32,
+    })
+}
+
 /// 极简 base64（只为把壁纸塞进 data URL，避免引 crate）
 pub(crate) fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -454,6 +493,26 @@ async fn card_update(
     }
     sync_cards(&app, &cfg);
     Ok(cfg)
+}
+
+/// 位置面板的滑条：只改这一张卡的位置（滑条连发时别跑 `sync_cards`）。
+/// 与 `card_update` 同一套逻辑坐标口径；窗口 Moved 事件会把真值再写回 config
+/// 并推 `glass_pos`（主界面据此回填 X/Y）。
+#[tauri::command]
+fn card_move(app: AppHandle, id: String, pos: [f32; 2]) -> Result<(), String> {
+    let mut cfg = Config::load();
+    let Some(card) = cfg.cards.iter_mut().find(|c| c.id == id) else {
+        return Err("card not found".into());
+    };
+    card.pos = pos;
+    cfg.save()?;
+    if let Some(w) = app.get_webview_window(&card_label(&id)) {
+        let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+            pos[0] as f64,
+            pos[1] as f64,
+        )));
+    }
+    Ok(())
 }
 
 /// 主界面「桌面卡片」页的图钉：固定/取消固定位置。
@@ -3060,7 +3119,9 @@ fn main() {
             dock_set_desktop_icons,
             dock_desktop_icons_state,
             save_config,
+            desk_geometry,
             card_update,
+            card_move,
             card_locate,
             card_pin,
             todo_toggle,
