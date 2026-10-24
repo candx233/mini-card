@@ -12,6 +12,7 @@ mod dock;
 mod dock_drop;
 mod guide;
 mod media;
+mod tray_menu;
 mod update;
 mod weather;
 
@@ -363,7 +364,8 @@ async fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
     let b = cfg.settings.glass_blur;
     let dark = !matches!(cfg.settings.theme, config::Theme::Light);
     for (label, w) in app.webview_windows() {
-        if label.starts_with("card-") || label == dock_label() {
+        // tray-menu（G 段自绘托盘菜单）也吃主题推送 —— 它只定义 __setTheme，另两个是 eval 里判空跳过的
+        if label.starts_with("card-") || label == dock_label() || label == tray_menu::LABEL {
             let _ = w.eval(&format!(
                 "window.__setGlass && window.__setGlass({a}); window.__setBlur && window.__setBlur({b}); \
                  window.__setTheme && window.__setTheme({});",
@@ -2851,6 +2853,28 @@ fn ensure_main(app: &AppHandle) -> Option<WebviewWindow> {
     Some(win)
 }
 
+/// G 段（0.1.2）：自绘托盘菜单的菜单项动作。
+/// 顺序 = **先执行动作、再关窗**（tray-menu-plan 坑 #4）：`show_main` 会抢焦点，
+/// 顺带触发菜单的 blur 关闭；显式再关一次让顺序确定（关两次无副作用）。
+/// async：动作里可能建主窗（同步命令建窗会跟消息循环互等 → IPC 冻死）。
+#[tauri::command]
+async fn menu_pick(app: AppHandle, id: String) -> Result<(), String> {
+    match id.as_str() {
+        "show" => show_main(&app),
+        "quit" => quit(&app),
+        _ => {}
+    }
+    tray_menu::hide(&app);
+    Ok(())
+}
+
+/// G 段（0.1.2）：关闭自绘托盘菜单（ESC / 点在菜单盒外的透明区）
+#[tauri::command]
+async fn menu_close(app: AppHandle) -> Result<(), String> {
+    tray_menu::hide(&app);
+    Ok(())
+}
+
 /// 主窗生命周期日志（%TEMP%\minicard-mainwin.log）：只记关键事件与错误。
 /// 主窗「用时建、闲时销毁」是新机制，出支持问题先看这里（以前 .ok()? 会把失败吞掉）。
 pub(crate) fn mlog(s: &str) {
@@ -2881,33 +2905,31 @@ fn sleep_main(app: &AppHandle) {
 }
 
 fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "退出 Mini Card", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit_item])?;
-
+    // 0.1.2 G 段：右键菜单改**自绘**（`tray_menu.rs` + `web/menu.html`）。
+    // 原来挂的 Windows 原生菜单（muda → TrackPopupMenu）已移除：它的文字左侧有 46px 固定空槽、
+    // 行高与悬停高亮几何全是系统度量，没有 CSS 可写 —— 悬停时高亮左半截是空的（docs/tray-menu-plan.md）。
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .tooltip("Mini Card")
-        .menu(&menu)
-        // Windows 习惯：左键单击图标 = 直接开主界面，右键才弹菜单（默认左键也弹菜单，要关掉）
-        .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button,
                 button_state: MouseButtonState::Up,
+                rect,
                 ..
             } = event
             {
-                show_main(tray.app_handle());
-            }
-        })
-        .on_menu_event(|app, event| {
-            match event.id().0.as_str() {
-                "show" => show_main(app),
-                "quit" => quit(&app.clone()),
-                _ => {}
+                match button {
+                    // Windows 习惯：左键单击 = 直接开主界面（先把菜单收起 —— 托盘点击不改前台，菜单等不到失焦）
+                    MouseButton::Left => {
+                        tray_menu::hide(tray.app_handle());
+                        show_main(tray.app_handle());
+                    }
+                    // 右键 = 开 / 收自绘菜单（toggle）；位置按图标矩形现算（物理 px → 逻辑，见 tray_menu）
+                    MouseButton::Right => tray_menu::toggle(tray.app_handle(), rect),
+                    _ => {}
+                }
             }
         });
 
@@ -3057,7 +3079,9 @@ fn main() {
             update_install,
             win_min,
             win_max,
-            win_close
+            win_close,
+            menu_pick,
+            menu_close
         ])
         .setup(move |app| {
             guide::prepare(); // 先备好拖动辅助线窗口（隐藏）
@@ -3077,6 +3101,8 @@ fn main() {
             // 「图标必须在首次显示前设好」这条顺序约束也收在 ensure_main 内部。
             show_main(&handle);
             build_tray(app)?;
+            // G 段（0.1.2）：托盘菜单「用时建、闲时回收」—— 隐藏 30s 后由回收线程销毁窗口
+            tray_menu::spawn_reaper(handle.clone());
 
             // 主窗「最小化 = 闲置」看门狗：win_min 命令、任务栏最小化、Win+D 显示桌面三条路
             // 都只表现为 IsIconic，没有统一事件可听 —— 30s 轮询，连续两拍仍最小化（≈60s）
