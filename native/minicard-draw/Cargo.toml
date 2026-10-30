@@ -1,0 +1,19 @@
+[package]
+name = "minicard-draw"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "mini-card 自绘绘制层：文本 / 玻璃 / 颜色 / 图元"
+
+[dependencies]
+minicard-shell = { path = "../minicard-shell" }
+windows = { version = "0.62.2", default-features = false, features = [
+  "Foundation",
+  "Win32_Foundation",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+] }
+windows-numerics = "0.3.1"

@@ -1,0 +1,651 @@
+//! M0 spike —— mini-card 性能卡用 Rust 自绘（Direct2D + DirectWrite + DirectComposition）。
+//!
+//! 判据见 `docs/rust-renderer-plan.md` §6 M0：真机透明玻璃 / 字体锐度 / 指标。
+//! 用法：
+//!   m0-spike.exe --x 516 --y 309 [--w 240 --h 120] [--font <ttf>] [--glass 30] [--blur 30]
+//!                [--no-glass] [--exit-after 5000] [--owner]
+//!   （不激活窗口；左键拖动整卡；右键关闭；--exit-after 毫秒后自杀，便于脚本化取数）
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod anim;
+mod card;
+mod data;
+mod desktop;
+mod gfx;
+mod glass;
+mod log;
+mod mem;
+mod text;
+
+use std::path::PathBuf;
+use std::time::Instant;
+
+use windows::core::{w, Result};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
+use windows::Win32::Graphics::Gdi::{HBRUSH, ValidateRect};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::Media::timeBeginPeriod;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{
+    GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows::Win32::UI::WindowsAndMessaging::*;
+use anim::Tween;
+
+const TIMER_TICK: usize = 1;
+
+
+struct Args {
+    x: i32,
+    y: i32,
+    w: f32,
+    h: f32,
+    font: PathBuf,
+    glass: f32,
+    blur: f32,
+    no_glass: bool,
+    exit_after: Option<u64>,
+    /// 壁纸原图（BGRA raw）：给了就走「按壁纸算玻璃」，否则截屏
+    wall_raw: Option<PathBuf>,
+    wall_w: u32,
+    wall_h: u32,
+    /// 显示器逻辑尺寸（DIP）；默认按主屏 1920×1080
+    mon: (f32, f32),
+    dump: Option<PathBuf>,
+    debug_alpha: bool,
+    /// 冻结数值（cpu,ram,gpu）→ 用于与 WebView2 版逐像素对比
+    freeze: Option<(f32, f32, Option<f32>)>,
+    /// 文本原点吸附整像素（浏览器在 100% DPI 下不做亚像素文字定位）
+    snap_text: bool,
+    /// 诊断：跳过采样（只重绘上一帧数据），用来把 PDH 的成本单独摘出来
+    no_sample: bool,
+    /// 插到桌面锚点正上方（壁纸之上、普通窗口之下）
+    desktop_layer: bool,
+    /// 取证宿主窗（DWM 缩略图）的位置与尺寸
+    viewer: Option<(i32, i32, i32, i32)>,
+    /// 动效演示：每秒换一个目标值，条宽按 card.html 的梯形曲线补间
+    animate: bool,
+    /// 连续帧落盘目录（动效取证）
+    dump_seq: Option<PathBuf>,
+}
+
+impl Args {
+    fn parse() -> Self {
+        let mut a = Self {
+            x: 300,
+            y: 300,
+            w: 240.0,
+            h: 120.0,
+            font: PathBuf::from(r"..\assets\fonts\MiSans-Regular.ttf"),
+            glass: 30.0,
+            blur: 30.0,
+            no_glass: false,
+            exit_after: None,
+            wall_raw: None,
+            wall_w: 0,
+            wall_h: 0,
+            mon: (1920.0, 1080.0),
+            dump: None,
+            debug_alpha: false,
+            freeze: None,
+            snap_text: false,
+            no_sample: false,
+            desktop_layer: false,
+            viewer: None,
+            animate: false,
+            dump_seq: None,
+        };
+        let argv: Vec<String> = std::env::args().skip(1).collect();
+        let mut i = 0;
+        while i < argv.len() {
+            let next = |i: &mut usize| -> String {
+                *i += 1;
+                argv.get(*i).cloned().unwrap_or_default()
+            };
+            match argv[i].as_str() {
+                "--x" => a.x = next(&mut i).parse().unwrap_or(a.x),
+                "--y" => a.y = next(&mut i).parse().unwrap_or(a.y),
+                "--w" => a.w = next(&mut i).parse().unwrap_or(a.w),
+                "--h" => a.h = next(&mut i).parse().unwrap_or(a.h),
+                "--font" => a.font = PathBuf::from(next(&mut i)),
+                "--glass" => a.glass = next(&mut i).parse().unwrap_or(a.glass),
+                "--blur" => a.blur = next(&mut i).parse().unwrap_or(a.blur),
+                "--no-glass" => a.no_glass = true,
+                "--exit-after" => a.exit_after = next(&mut i).parse().ok(),
+                "--wall-raw" => a.wall_raw = Some(PathBuf::from(next(&mut i))),
+                "--wall-w" => a.wall_w = next(&mut i).parse().unwrap_or(0),
+                "--wall-h" => a.wall_h = next(&mut i).parse().unwrap_or(0),
+                "--mon" => {
+                    let s = next(&mut i);
+                    let mut it = s.split(['x', ',']).filter_map(|v| v.parse::<f32>().ok());
+                    if let (Some(w), Some(h)) = (it.next(), it.next()) {
+                        a.mon = (w, h);
+                    }
+                }
+                "--dump" => a.dump = Some(PathBuf::from(next(&mut i))),
+                "--debug-alpha" => a.debug_alpha = true,
+                "--snap-text" => a.snap_text = true,
+                "--no-sample" => a.no_sample = true,
+                "--desktop" => a.desktop_layer = true,
+                "--animate" => a.animate = true,
+                "--dump-seq" => a.dump_seq = Some(PathBuf::from(next(&mut i))),
+                "--viewer" => {
+                    let s = next(&mut i);
+                    let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
+                    if let (Some(x), Some(y), Some(w), Some(h)) = (it.next(), it.next(), it.next(), it.next()) {
+                        a.viewer = Some((x, y, w, h));
+                    }
+                }
+                "--freeze" => {
+                    let s = next(&mut i);
+                    let v: Vec<Option<f32>> = s
+                        .split(',')
+                        .map(|p| {
+                            let p = p.trim();
+                            if p == "-" || p == "none" {
+                                None
+                            } else {
+                                p.parse::<f32>().ok()
+                            }
+                        })
+                        .collect();
+                    let get = |i: usize| v.get(i).copied().flatten();
+                    a.freeze = Some((get(0).unwrap_or(0.0), get(1).unwrap_or(0.0), get(2)));
+                }
+                other => mlog!("未知参数 {other}"),
+            }
+            i += 1;
+        }
+        a
+    }
+}
+
+struct App {
+    gfx: gfx::Gfx,
+    te: text::TextEngine,
+    pal: card::Palette,
+    tokens: card::Tokens,
+    glass_bmp: Option<ID2D1Bitmap1>,
+    glass_rect: D2D_RECT_F,
+    sampler: data::Sampler,
+    snap: data::Snapshot,
+    t0: Instant,
+    first_frame: bool,
+    exit_after: Option<u64>,
+    frames: u32,
+    freeze: Option<(f32, f32, Option<f32>)>,
+    /// 每秒 tick 的耗时累计（微秒）：采样 / 绘制
+    acc_sample_us: f64,
+    acc_paint_us: f64,
+    ticks: u32,
+    /// 文本原点吸附整像素（浏览器在 100% DPI 下不做亚像素文字定位）
+    snap_text: bool,
+    /// 诊断：跳过采样（只重绘上一帧数据），用来把 PDH 的成本单独摘出来
+    no_sample: bool,
+    animate: bool,
+    /// 每行一条补间（None = 该行没有条）
+    tweens: Vec<Option<Tween>>,
+    last_frame: Option<Instant>,
+    frame_dt: Vec<f32>,
+    frame_draw_us: Vec<f32>,
+}
+
+impl App {
+    fn rows(&self) -> Vec<card::Row> {
+        if self.animate {
+            let t = self.t0.elapsed().as_secs_f32();
+            let tau = std::f32::consts::TAU;
+            let c = 50.0 + 45.0 * (t * tau / 3.0).sin();
+            let r = 45.0 + 35.0 * (t * tau / 5.0).sin();
+            let g = 50.0 + 40.0 * (t * tau / 2.3).sin();
+            return vec![
+                card::Row { label: "CPU".into(), text: format!("{c:.0}%"), pct: Some(c) },
+                card::Row { label: "RAM".into(), text: format!("{r:.0}%"), pct: Some(r) },
+                card::Row { label: "GPU".into(), text: format!("{g:.0}%"), pct: Some(g) },
+            ];
+        }
+        if let Some((c, r, g)) = self.freeze {
+            let mut out = vec![
+                card::Row { label: "CPU".into(), text: format!("{c:.0}%"), pct: Some(c) },
+                card::Row { label: "RAM".into(), text: format!("{r:.0}%"), pct: Some(r) },
+            ];
+            out.push(match g {
+                Some(v) => card::Row { label: "GPU".into(), text: format!("{v:.0}%"), pct: Some(v) },
+                None => card::Row { label: "GPU".into(), text: "未检测到".into(), pct: None },
+            });
+            return out;
+        }
+        let s = &self.snap;
+        let cpu = s.cpu.round();
+        let ram = if s.mem_total > 0 {
+            (s.mem_used as f64 / s.mem_total as f64 * 100.0).round()
+        } else {
+            0.0
+        };
+        let mut out = vec![
+            card::Row { label: "CPU".into(), text: format!("{cpu:.0}%"), pct: Some(cpu) },
+            card::Row { label: "RAM".into(), text: format!("{ram:.0}%"), pct: Some(ram as f32) },
+        ];
+        if self.tokens.w > 0.0 {
+            out.push(match s.gpu {
+                Some(g) => card::Row { label: "GPU".into(), text: format!("{:.0}%", g.round()), pct: Some(g) },
+                None => card::Row { label: "GPU".into(), text: "未检测到".into(), pct: None },
+            });
+        }
+        out
+    }
+
+    fn animating(&self) -> bool {
+        let now = Instant::now();
+        self.tweens.iter().flatten().any(|t| t.live(now))
+    }
+
+    /// 一帧：统计间隔 → 重绘 → 画完若没行程了就打印统计
+    fn frame_tick(&mut self) {
+        let now = Instant::now();
+        if let Some(prev) = self.last_frame {
+            let dt = now.duration_since(prev).as_secs_f32() * 1000.0;
+            if self.frame_dt.len() < 600 {
+                self.frame_dt.push(dt);
+            }
+        }
+        self.last_frame = Some(now);
+        let t0 = Instant::now();
+        self.repaint();
+        let draw_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        if self.frame_draw_us.len() < 600 {
+            self.frame_draw_us.push(draw_ms * 1000.0);
+        }
+        if self.frame_dt.len() == 300 {
+            self.log_frame_stats("动效中");
+        }
+        if !self.animating() {
+            self.last_frame = None;
+            self.log_frame_stats("动效收尾");
+        }
+    }
+
+    fn log_frame_stats(&mut self, tag: &str) {
+        let mut dts = std::mem::take(&mut self.frame_dt);
+        let mut draws = std::mem::take(&mut self.frame_draw_us);
+        if dts.is_empty() {
+            return;
+        }
+        dts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        draws.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean = dts.iter().sum::<f32>() / dts.len() as f32;
+        let p = |v: &Vec<f32>, q: f32| v[((v.len() - 1) as f32 * q) as usize];
+        let over = dts.iter().filter(|d| **d > 20.0).count();
+        mlog!(
+            "{tag}：{} 帧  间隔 均值 {:.2} ms / p95 {:.2} / max {:.2}（≈{:.1} fps，>20ms {} 帧）；帧内 CPU 绘制 p50 {:.3} ms / p95 {:.3} ms；Present 等待 {:.2} ms",
+            dts.len(),
+            mean,
+            p(&dts, 0.95),
+            dts[dts.len() - 1],
+            1000.0 / mean,
+            over,
+            p(&draws, 0.50) / 1000.0,
+            p(&draws, 0.95) / 1000.0,
+            self.gfx.t_present.get()
+        );
+    }
+
+    fn repaint(&mut self) {
+        let mut rows = self.rows();
+        // 条宽走补间（文字立刻显示目标值，只有条是连续的 —— 与 card.html 一致）
+        let now = Instant::now();
+        for (i, row) in rows.iter_mut().enumerate() {
+            let tgt = match row.pct {
+                Some(v) => v,
+                None => continue,
+            };
+            if self.tweens.len() <= i {
+                self.tweens.push(None);
+            }
+            let slot = self.tweens.get_mut(i).unwrap();
+            match slot {
+                None => *slot = Some(Tween::new(tgt, tgt, now)),   // 首见：直接落位
+                Some(tw) => {
+                    if (tw.to - tgt).abs() > 0.001 {
+                        // 从当前显示值起步 → 位置连续；时长跟推送节奏走
+                        let from = tw.value(now);
+                        *tw = Tween::new(from, tgt, now);
+                    }
+                    row.pct = Some(tw.value(now));
+                }
+            }
+        }
+        let glass = self.glass_bmp.as_ref().map(|b| (b, self.glass_rect));
+        if let Err(e) = card::paint(&self.gfx, &self.te, &self.pal, &self.tokens, &rows, glass, self.snap_text) {
+            mlog!("paint 失败: {e:?}");
+            return;
+        }
+        self.frames += 1;
+
+        if !self.first_frame {
+            self.first_frame = true;
+            mlog!(
+                "首帧上屏 {:.1} ms（进程启动→Present 返回），窗口 {}×{}，dpi {}",
+                self.t0.elapsed().as_secs_f64() * 1000.0,
+                self.tokens.w,
+                self.tokens.h,
+                self.gfx.dpi
+            );
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    let t0 = Instant::now();
+    let log_path = std::env::temp_dir().join("minicard-m0.log");
+    log::init(&log_path);
+    let args = Args::parse();
+
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        mem::log("启动");
+
+        let hinst = GetModuleHandleW(None)?;
+        let cls = w!("MiniCardM0Spike");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinst.into(),
+            lpszClassName: cls,
+            hbrBackground: HBRUSH::default(),
+            ..Default::default()
+        };
+        let atom = RegisterClassW(&wc);
+        if atom == 0 {
+            mlog!("RegisterClassW 失败: {:?}", windows::core::Error::from_thread());
+            return Err(windows::core::Error::from_thread());
+        }
+
+        let dpi_hint = GetDpiForSystem();
+        let w_px = (args.w * dpi_hint as f32 / 96.0).round() as i32;
+        let h_px = (args.h * dpi_hint as f32 / 96.0).round() as i32;
+
+        // 无重定向表面 + 不激活 + 工具窗 + 置顶：内容完全由 DComp 提供（真逐像素 alpha）
+        let ex_style = WS_EX_NOREDIRECTIONBITMAP
+            | WS_EX_NOACTIVATE
+            | WS_EX_TOOLWINDOW
+            | WS_EX_TOPMOST;
+        let hwnd = CreateWindowExW(
+            ex_style,
+            cls,
+            w!("MiniCard M0 · 自绘性能卡"),
+            WS_POPUP,
+            args.x,
+            args.y,
+            w_px,
+            h_px,
+            None,
+            None,
+            Some(hinst.into()),
+            None,
+        )?;
+
+        let dpi = {
+            let d = GetDpiForWindow(hwnd);
+            if d == 0 {
+                dpi_hint
+            } else {
+                d
+            }
+        } as f32;
+        let w_px = (args.w * dpi / 96.0).round() as u32;
+        let h_px = (args.h * dpi / 96.0).round() as u32;
+        SetWindowPos(hwnd, None, args.x, args.y, w_px as i32, h_px as i32, SWP_NOZORDER | SWP_NOACTIVATE)?;
+
+        let tokens = card::Tokens::perf(args.w, args.h);
+        mem::log("建窗后");
+        let mut gfx = gfx::Gfx::new(hwnd, w_px, h_px, dpi, tokens.radius)?;
+        mem::log("D3D11+D2D+DComp 后");
+        gfx.dump = args.dump.clone();
+        if let Some(d) = &args.dump_seq {
+            std::fs::create_dir_all(d).ok();
+            gfx.dump_seq = Some(d.clone());
+            gfx.dump_seq_left.set(400);
+        }
+
+        // 玻璃：窗口还没 show，此刻截屏拿到的就是「窗口背后那块壁纸」
+        let mut glass_bmp = None;
+        let mut glass_rect = D2D_RECT_F::default();
+        if !args.no_glass {
+            let pad_px = ((args.blur * 3.0).max(60.0) * dpi / 96.0).round() as i32;
+            let from_wall = args.wall_raw.as_ref().and_then(|p| {
+                let bgra = std::fs::read(p).ok()?;
+                if args.wall_w == 0 || args.wall_h == 0 {
+                    mlog!("--wall-raw 需要同时给 --wall-w/--wall-h");
+                    return None;
+                }
+                Some(glass::Wall { bgra, w: args.wall_w, h: args.wall_h })
+            });
+            let captured = match from_wall {
+                Some(wall) => {
+                    let t = Instant::now();
+                    let cap = glass::from_wallpaper(
+                        &wall,
+                        args.mon,
+                        (args.x as f32, args.y as f32),
+                        (args.w as u32, args.h as u32),
+                        pad_px as f32,
+                        args.blur * dpi / 96.0,
+                    );
+                    mlog!(
+                        "壁纸切片 {}×{}（{}×{} → cover，显示器 {:?}，卡位 {},{})，含模糊 {:.1} ms",
+                        cap.w, cap.h, wall.w, wall.h, args.mon, args.x, args.y,
+                        t.elapsed().as_secs_f64() * 1000.0
+                    );
+                    Ok(cap)
+                }
+                None => glass::capture(args.x - pad_px, args.y - pad_px, w_px as i32 + pad_px * 2, h_px as i32 + pad_px * 2)
+                    .map(|mut cap| { let t = Instant::now(); glass::blur(&mut cap, args.blur * dpi / 96.0); mlog!("截屏 {}×{}，模糊 {:.1} ms", cap.w, cap.h, t.elapsed().as_secs_f64() * 1000.0); cap }),
+            };
+            mem::log("玻璃准备后");
+            match captured {
+                Ok(cap) => {
+                    match gfx.bitmap_from_bgra(&cap.bgra, cap.w, cap.h) {
+                        Ok(b) => {
+                            let pad_dip = pad_px as f32 * 96.0 / dpi;
+                            glass_rect = D2D_RECT_F {
+                                left: -pad_dip,
+                                top: -pad_dip,
+                                right: args.w + pad_dip,
+                                bottom: args.h + pad_dip,
+                            };
+                            glass_bmp = Some(b);
+                        }
+                        Err(e) => mlog!("玻璃位图创建失败: {e:?}"),
+                    }
+                }
+                Err(e) => mlog!("截屏失败: {e:?}"),
+            }
+        }
+
+        let te = text::TextEngine::new(&args.font, "MiSans")?;
+        mem::log("字体载入后");
+        mlog!(
+            "字体 MiSans 载入：ascent {:.4}em / descent {:.4}em / upem {}",
+            te.ascent,
+            te.descent,
+            te.upem
+        );
+
+        mem::log("资源就绪");
+        let mut app = Box::new(App {
+            gfx,
+            te,
+            pal: card::Palette::new(args.glass, args.debug_alpha),
+            tokens,
+            glass_bmp,
+            glass_rect,
+            sampler: data::Sampler::new(),
+            snap: data::Snapshot::default(),
+            t0,
+            first_frame: false,
+            exit_after: args.exit_after.or(if args.dump.is_some() { Some(2500) } else { None }),
+            frames: 0,
+            freeze: args.freeze,
+            animate: args.animate,
+            tweens: Vec::new(),
+            last_frame: None,
+            frame_dt: Vec::new(),
+            frame_draw_us: Vec::new(),
+            acc_sample_us: 0.0,
+            acc_paint_us: 0.0,
+            ticks: 0,
+            snap_text: args.snap_text,
+            no_sample: args.no_sample,
+        });
+        app.snap = app.sampler.sample();
+        app.repaint();
+
+        let ptr = Box::into_raw(app);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if args.desktop_layer {
+            match desktop::insert_above_desktop(hwnd) {
+                Ok(anchor) => {
+                    let (above, below) = desktop::neighbors(hwnd);
+                    mlog!(
+                        "已插到桌面锚点正上方：anchor={:?}（{}），z 序上一窗=«{}» 下一窗=«{}»",
+                        anchor.0,
+                        "Progman/WorkerW+DefView",
+                        above,
+                        below
+                    );
+                }
+                Err(e) => mlog!("插桌面层失败: {e:?}"),
+            }
+        }
+        if let Some((vx, vy, vw, vh)) = args.viewer {
+            match desktop::spawn_viewer(hwnd, vw, vh, vx, vy) {
+                Ok(v) => mlog!("取证宿主窗 {:?} 已开，显示卡片的 DWM 缩略图", v.0),
+                Err(e) => mlog!("宿主窗失败: {e:?}"),
+            }
+        }
+        {
+            let mut r = windows::Win32::Foundation::RECT::default();
+            let _ = GetWindowRect(hwnd, &mut r);
+            mlog!(
+                "show 后窗口 rect = {},{},{},{}  visible={}",
+                r.left, r.top, r.right, r.bottom,
+                IsWindowVisible(hwnd).as_bool()
+            );
+        }
+        SetTimer(Some(hwnd), TIMER_TICK, 1000, None);
+
+        // 帧循环：静止期阻塞等消息（零成本），动效期自己按 60fps 节流
+        // （不用 DwmFlush / DXGI 帧延时对象：本机这两条都不节流，实测会跑到 200fps 白烧 CPU）
+        let _ = timeBeginPeriod(1);
+        let mut next_frame = Instant::now();
+        let mut msg = MSG::default();
+        'outer: loop {
+            let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+            if p.is_null() {
+                break;
+            }
+            let animating = (*p).animating();
+            if !animating {
+                if GetMessageW(&mut msg, None, 0, 0).0 <= 0 {
+                    break;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            } else {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    if msg.message == WM_QUIT {
+                        break 'outer;
+                    }
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+                if p.is_null() {
+                    break;
+                }
+                (*p).frame_tick();
+                next_frame += std::time::Duration::from_micros(16_667);
+                let now = Instant::now();
+                if next_frame > now {
+                    std::thread::sleep(next_frame - now);
+                } else {
+                    next_frame = now; // 落后就重新对齐，不追帧
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let app_ptr = || GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+
+    match msg {
+        WM_TIMER if wp.0 == TIMER_TICK => {
+            let p = app_ptr();
+            if !p.is_null() {
+                let app = &mut *p;
+                let t0 = Instant::now();
+                if !app.no_sample {
+                    app.snap = app.sampler.sample();
+                }
+                let t1 = Instant::now();
+                app.repaint();
+                app.acc_sample_us += t0.elapsed().as_secs_f64() * 1e6;
+                app.acc_paint_us += t1.elapsed().as_secs_f64() * 1e6;
+                app.ticks += 1;
+                if app.ticks == 30 {
+                    mlog!(
+                        "每 tick 均值（30 拍）：采样 {:.0} µs，绘制+Present {:.0} µs",
+                        app.acc_sample_us / 30.0,
+                        app.acc_paint_us / 30.0
+                    );
+                    app.ticks = 0;
+                    app.acc_sample_us = 0.0;
+                    app.acc_paint_us = 0.0;
+                }
+                if let Some(ms) = app.exit_after {
+                    if app.t0.elapsed().as_millis() as u64 >= ms {
+                        mlog!("--exit-after 到点，退出（共 {} 帧）", app.frames);
+                        let _ = DestroyWindow(hwnd);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_NCHITTEST => LRESULT(2), // HTCAPTION：整卡可拖动（M0 不接磁吸）
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
+            if msg == WM_RBUTTONDOWN {
+                let _ = DestroyWindow(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            let _ = ValidateRect(Some(hwnd), None);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        WM_CLOSE => {
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            let p = app_ptr();
+            if !p.is_null() {
+                drop(Box::from_raw(p));
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            }
+            PostQuitMessage(0);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+

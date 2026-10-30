@@ -1,0 +1,19 @@
+[package]
+name = "minicard-cards"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "mini-card 各卡视图（9 种）"
+
+[dependencies]
+minicard-core = { path = "../minicard-core" }
+minicard-draw = { path = "../minicard-draw" }
+minicard-shell = { path = "../minicard-shell" }
+windows = { version = "0.62.2", default-features = false, features = [
+  "Foundation",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi_Common",
+] }
+windows-numerics = "0.3.1"
