@@ -16,6 +16,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_METRICS,
     DWRITE_TEXT_RANGE,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_TEXT_METRICS,
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
@@ -32,7 +33,7 @@ pub struct TextEngine {
     typo: Option<IDWriteTypography>,
     /// 缓存：文本格式（size/lineBox/align）与文本布局（align/text）—— 每帧重建 format/layout 是主要 CPU 开销
     fmt_cache: RefCell<HashMap<(u32, u32, u8), IDWriteTextFormat>>,
-    lay_cache: RefCell<HashMap<(u8, String), IDWriteTextLayout>>,
+    lay_cache: RefCell<HashMap<(u8, String, u32, u32), IDWriteTextLayout>>,
 }
 
 impl TextEngine {
@@ -182,7 +183,7 @@ impl TextEngine {
         height: f32,
         tabular: bool,
     ) -> Result<IDWriteTextLayout> {
-        let key = (align, text.to_owned());
+        let key = (align, text.to_owned(), width.to_bits(), height.to_bits());
         if let Some(l) = self.lay_cache.borrow().get(&key) {
             return Ok(l.clone());
         }
@@ -198,5 +199,38 @@ impl TextEngine {
     #[allow(dead_code)]
     pub fn family_pcwstr(&self) -> PCWSTR {
         PCWSTR(self.family.as_ptr())
+    }
+}
+
+/// 布局层的度量来源：线上用的就是这一份（测试里换成假字体）。
+///
+/// 宽高口径与绘制一致 —— 同一个 `format_cached`（行盒已钉死）＋ `layout_cached`，
+/// 所以「量出来的高」和「画出来的高」天然一致，不会差半个行距。
+impl crate::layout::Measurer for TextEngine {
+    fn text(&mut self, t: &crate::layout::TextSpec, max_w: f32) -> (f32, f32) {
+        let fmt = match self.format_cached(t.size, t.line_h, 0) {
+            Ok(f) => f,
+            Err(_) => return (0.0, t.line_h),
+        };
+        // max_w <= 0 = 不限宽：给个足够大的盒子，让单行自然排开
+        let (w, h) = if max_w > 0.0 {
+            (max_w, 4096.0)
+        } else {
+            (4096.0, t.line_h * 1.5)
+        };
+        match self.layout_cached(0, &fmt, &t.s, w, h, false) {
+            Ok(l) => unsafe {
+                let mut m = DWRITE_TEXT_METRICS::default();
+                match l.GetMetrics(&mut m) {
+                    Ok(()) => (m.width, m.height),
+                    Err(_) => (0.0, t.line_h),
+                }
+            },
+            Err(_) => (0.0, t.line_h),
+        }
+    }
+
+    fn ascent(&mut self, t: &crate::layout::TextSpec) -> f32 {
+        self.ascent * t.size
     }
 }
