@@ -5,8 +5,10 @@
 //! 玻璃靠 WCA Acrylic（失焦不掉，DWM backdrop 失焦会回白——实测），
 //! 数据靠 1s 采样线程 emit 推送。
 
-mod config;
-mod data;
+// 配置与采样快照已抽到 `native/minicard-core`（自绘卡进程共用同一份实现）。
+// `pub use` 而不是 `mod`：`crate::config::…` / `crate::data::…` 的引用一处都不用改。
+pub use minicard_core::{config, data};
+
 mod display;
 mod dock;
 mod dock_drop;
@@ -303,20 +305,8 @@ fn desk_geometry(app: AppHandle) -> serde_json::Value {
 }
 
 /// 极简 base64（只为把壁纸塞进 data URL，避免引 crate）
-pub(crate) fn base64_encode(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    for c in data.chunks(3) {
-        let n = ((c[0] as u32) << 16)
-            | ((*c.get(1).unwrap_or(&0) as u32) << 8)
-            | (*c.get(2).unwrap_or(&0) as u32);
-        out.push(T[((n >> 18) & 63) as usize] as char);
-        out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if c.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
-    }
-    out
-}
+// base64 已随 config/data/weather/media 一起进 `minicard-core`（自绘卡进程也要用）
+pub use minicard_core::base64_encode;
 
 /// 当前壁纸文件路径（SPI_GETDESKWALLPAPER）。
 /// 磨砂自绘的底图：系统那条 backdrop-filter / WCA 在 Win11 22H2+ 已失效，
@@ -480,17 +470,19 @@ async fn save_config(app: AppHandle, cfg: Config) -> Result<(), String> {
         apply_z_mode(&app, mode);
     }
     // 玻璃厚度/模糊强度实时推给所有卡片（设置页那两个滑块以前只喂给已失效的 WCA，等于没用）；主题同理。
-    // 强调色**不推**：主界面的强调色只改主界面，卡片正常态保持白色（用户 2026-09-24 要求）。
+    // 强调色也推：卡面上的勾选框 / 今日块 / 进度条吃同一套颜色，主界面换了卡面就跟着换（2026-10-29）。
     let a = cfg.settings.glass_alpha;
     let b = cfg.settings.glass_blur;
+    let ac = cfg.settings.accent;
     let dark = !matches!(cfg.settings.theme, config::Theme::Light);
     for (label, w) in app.webview_windows() {
         // tray-menu（G 段自绘托盘菜单）也吃主题推送 —— 它只定义 __setTheme，另两个是 eval 里判空跳过的
         if label.starts_with("card-") || label == dock_label() || label == tray_menu::LABEL {
             let _ = w.eval(&format!(
-                "window.__setGlass && window.__setGlass({a}); window.__setBlur && window.__setBlur({b}); \
+                "window.__setAccent && window.__setAccent([{},{},{}]); \
+                 window.__setGlass && window.__setGlass({a}); window.__setBlur && window.__setBlur({b}); \
                  window.__setTheme && window.__setTheme({});",
-                dark
+                ac[0], ac[1], ac[2], dark
             ));
         }
     }
@@ -870,18 +862,35 @@ fn hotkey_enable(app: AppHandle, on: bool) -> Result<(), String> {
     sync_hotkey(&app)
 }
 
+/// 主窗是否最大化。前端标题栏的 ◻ 图标靠它同步 —— 能改这个状态的路不止按钮：
+/// 双击拖拽条、Win+↑/↓、系统菜单都会改，所以 Resized 里反向推一枪（见 setup 的 on_window_event）。
+static MAIN_MAXED: AtomicBool = AtomicBool::new(false);
+
 #[tauri::command]
 fn win_min(window: WebviewWindow) {
     let _ = window.minimize();
 }
 
+/// 最大化/还原切换。**返回切换后的真值**（不是「我打算切成什么」），前端据此换图标。
 #[tauri::command]
-fn win_max(window: WebviewWindow) {
+fn win_max(window: WebviewWindow) -> bool {
     if matches!(window.is_maximized(), Ok(true)) {
         let _ = window.unmaximize();
     } else {
         let _ = window.maximize();
     }
+    window.is_maximized().unwrap_or(false)
+}
+
+#[tauri::command]
+fn win_is_max(window: WebviewWindow) -> bool {
+    window.is_maximized().unwrap_or(false)
+}
+
+/// 左侧栏底部那一个版本号：从 package_info 取，别在前端硬编码（发版时只改 tauri.conf）。
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 /// 关闭按钮：按 config 决定「关闭到托盘（= 主窗休眠，释放 webview）」或退出；落一次窗口位置。
@@ -1887,7 +1896,7 @@ fn create_card(app: &AppHandle, cfg: &Config, card: &CardInstance) {
     let kind = serde_json::to_string(&card.kind)
         .unwrap_or_else(|_| "\"Performance\"".into());
     let url = format!(
-        "card.html?kind={}&id={}&glass={}&blur={}&dark={}&pinned={}&gpu={}&warn={}&rate={}",
+        "card.html?kind={}&id={}&glass={}&blur={}&dark={}&pinned={}&gpu={}&warn={}&rate={}&accent={},{},{}",
         kind.trim_matches('"'),
         card.id,
         cfg.settings.glass_alpha,
@@ -1898,7 +1907,11 @@ fn create_card(app: &AppHandle, cfg: &Config, card: &CardInstance) {
         if card.warn90 { 1 } else { 0 },
         // 刷新间隔必须走 URL：以前只在 card_update 里 eval __setRate，
         // 重启后卡片退回内置默认（实测六卡 __getRate() 全为 0，天气按 30s 而不是配置的 30min）
-        card.refresh_ms
+        card.refresh_ms,
+        // 强调色同理走 URL：首帧就是主界面那套颜色，不用等 save_config 的推送（新加的卡也一样）
+        cfg.settings.accent[0],
+        cfg.settings.accent[1],
+        cfg.settings.accent[2]
     );
     let win = match WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title(format!("MiniCard · {}", card.kind.display_name()))
@@ -2403,16 +2416,19 @@ fn push_dock_drop(w: &WebviewWindow, index: Option<usize>) {
     let _ = w.eval(&js);
 }
 
-/// Dock 的 URL 参数：尺寸档 / 放大强度 / 玻璃两参 / 明暗
+/// Dock 的 URL 参数：尺寸档 / 放大强度 / 玻璃两参 / 明暗 / 强调色
 fn dock_url(d: &config::Dock, s: &config::Settings) -> String {
     format!(
-        "dock.html?size={}&mag={}&glass={}&blur={}&dark={}&pinned={}",
+        "dock.html?size={}&mag={}&glass={}&blur={}&dark={}&pinned={}&accent={},{},{}",
         d.size,
         d.mag,
         s.glass_alpha,
         s.glass_blur,
         if matches!(s.theme, config::Theme::Light) { 0 } else { 1 },
-        if d.pinned { 1 } else { 0 }
+        if d.pinned { 1 } else { 0 },
+        s.accent[0],
+        s.accent[1],
+        s.accent[2]
     )
 }
 
@@ -3187,6 +3203,13 @@ fn main() {
                     quit(&window.app_handle().clone());
                 }
             }
+            // 最大化状态变化（按钮 / 双击拖拽条 / Win+↑↓ / 系统菜单都算）→ 推给前端换 ◻ 图标
+            if let tauri::WindowEvent::Resized(_) = event {
+                let m = window.is_maximized().unwrap_or(false);
+                if MAIN_MAXED.swap(m, Ordering::Relaxed) != m {
+                    let _ = window.emit("win_state", serde_json::json!({ "maximized": m }));
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -3230,7 +3253,9 @@ fn main() {
             update_install,
             win_min,
             win_max,
+            win_is_max,
             win_close,
+            app_version,
             menu_pick,
             menu_close
         ])

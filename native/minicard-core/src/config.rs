@@ -400,6 +400,11 @@ pub struct Config {
     /// `Config::default()`（= SIZE_VERSION）去补缺失字段，那样老 config 会被当成已迁移，迁移永不触发。
     #[serde(default = "size_version_legacy")]
     pub size_version: u32,
+    /// 界面几何迁移版本：< UI_VERSION 时把 main_window 按字号比例放大一档（只做一次）。
+    /// 与 size_version 同理必须字段级 default —— 结构体级的 `#[serde(default)]` 会拿
+    /// `Config::default()`（= UI_VERSION）补缺字段，老 config 就永远迁不动。
+    #[serde(default = "ui_version_legacy")]
+    pub ui_version: u32,
 }
 
 /// 老 config 缺 `size_version` 时按 0 处理（= 需要迁移一次）
@@ -407,8 +412,26 @@ fn size_version_legacy() -> u32 {
     0
 }
 
+/// 老 config 缺 `ui_version` 时按 0 处理（= 需要迁移一次）
+fn ui_version_legacy() -> u32 {
+    0
+}
+
 /// 当前尺寸迁移版本
 pub const SIZE_VERSION: u32 = 4;
+
+/// 主窗默认尺寸。界面字号整档上调（正文 13→14px）时，外壳/控件/间距一起放大一档，
+/// 窗口也跟着长 —— 928×628 → 992×672（+6.9%，与字号同比例）。
+/// 改这里必须同时改 tauri.conf.json 的 width/height 并递增 UI_VERSION（老 config 靠它迁移）。
+pub const MAIN_W: f32 = 992.0;
+pub const MAIN_H: f32 = 672.0;
+
+/// 旧版主窗尺寸（字号 13px 时代）：迁移时按它算放大比例
+const MAIN_W_LEGACY: f32 = 928.0;
+const MAIN_H_LEGACY: f32 = 628.0;
+
+/// 界面几何迁移版本：< UI_VERSION 时把 main_window 按字号比例放大一档（只做一次）
+pub const UI_VERSION: u32 = 1;
 
 impl Default for Config {
     fn default() -> Self {
@@ -441,8 +464,9 @@ impl Default for Config {
             ],
             settings: Settings::default(),
             dock: Dock::default(),
-            main_window: [520.0, 250.0, 928.0, 628.0],
+            main_window: [520.0, 250.0, MAIN_W, MAIN_H],
             size_version: SIZE_VERSION,
+            ui_version: UI_VERSION,
         }
     }
 }
@@ -471,6 +495,19 @@ impl Config {
             || cfg.main_window[1] < -1000.0
         {
             cfg.main_window = Self::default().main_window;
+        }
+        // 界面几何迁移（只做一次）：主窗随字号同比例放大，按原中心扩张 —— 位置基本不动，
+        // 不会因为「往右下长」把窗口顶出屏幕右边。
+        if cfg.ui_version < UI_VERSION {
+            let (w0, h0) = (cfg.main_window[2], cfg.main_window[3]);
+            let w = (w0 * MAIN_W / MAIN_W_LEGACY).round();
+            let h = (h0 * MAIN_H / MAIN_H_LEGACY).round();
+            cfg.main_window[0] = (cfg.main_window[0] - (w - w0) / 2.0).round();
+            cfg.main_window[1] = (cfg.main_window[1] - (h - h0) / 2.0).round();
+            cfg.main_window[2] = w;
+            cfg.main_window[3] = h;
+            cfg.ui_version = UI_VERSION;
+            let _ = cfg.save();
         }
         // 尺寸迁移（只做一次）：老 config 里的任意尺寸 → 该卡类型的固定尺寸（2026-10-02 起尺寸定死）。
         if cfg.size_version < SIZE_VERSION {

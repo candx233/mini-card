@@ -1,11 +1,13 @@
 [package]
 name = "mini-card"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "mini-card main shell (Tauri 2 migration)"
 license = "GPL-3.0-only"
 
 [dependencies]
+# 卡片端共享内核（config / data）；自绘卡进程也用它，见 docs/TODO-012-renderer.md A 段
+minicard-core = { path = "../native/minicard-core" }
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1965,11 +1965,12 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "mini-card"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
  "image",
+ "minicard-core",
  "raw-window-handle",
  "serde",
  "serde_json",
@@ -1985,6 +1986,19 @@ dependencies = [
  "windows-core 0.62.2",
  "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "minicard-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "toml 1.1.6+spec-1.1.0",
+ "ureq",
+ "windows 0.62.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

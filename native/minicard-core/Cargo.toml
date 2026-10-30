@@ -1,0 +1,22 @@
+[package]
+name = "minicard-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "mini-card 卡片端共享内核：配置 / 采样 / 天气 / SMTC（Tauri 外壳与自绘外壳共用）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1.6"
+sysinfo = "0.39.6"
+ureq = "3.4.2"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Performance"] }
+windows = { version = "0.62.2", default-features = false, features = [
+  "Foundation",
+  "Foundation_Collections",
+  "Media_Control",
+  "Storage_Streams",
+  "Win32_System_Com",
+  "Win32_System_Ole",
+] }
