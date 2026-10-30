@@ -22,6 +22,9 @@
     --tshadow: oklch(0 0 0 / 0.45);
     --border:  oklch(1 0 0 / 0.10);
     --accent:  oklch(0.685 0.168 256.0);
+    /* 实色强调块（勾选框、今日块）里的字色：浅强调色（粉/白）时 __setAccent 换成深字，
+       否则白勾压粉底只有 2:1。默认近白 = 改版前的观感。 */
+    --on-accent: oklch(0.985 0 0);
     --warn:    oklch(0.740 0.155 60.0);
     /* 主按钮文字色（番茄钟 .pm-btn.primary 用）与控件 hover 底：卡片稿里的 --bg / --fg-soft */
     --bg:      oklch(0.210 0.025 255.0);
@@ -479,8 +482,17 @@
   /* 翻月动画只作用在日期页（星期行 + 日号 + 今日块）；标题与 ‹ › 在 .cal-head 里不参与。
      will-change 让这层始终是层叠上下文：今日块的 z-index:-1 不会在动画开始/结束时换包含块。 */
   .cal-page { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.25rem; will-change: transform, opacity; }
-  .cal-head { display: flex; align-items: center; justify-content: space-between; }
-  .cal-title { font-size: 1rem; font-weight: 600; letter-spacing: 0.01em; line-height: 1.3; }
+  .cal-head { display: flex; align-items: center; justify-content: space-between; gap: 0.375rem; }
+  /* 标题与「今日节日」同占左半边：有节日显示、没有就是空 span —— 不新增行高，
+     240×180 的卡里 6 行月份已经把纵向余量吃光（.cal-grid 是 1fr 行）。 */
+  .cal-lead { display: flex; align-items: baseline; gap: 0.4375rem; min-width: 0; }
+  .cal-title { font-size: 1rem; font-weight: 600; letter-spacing: 0.01em; line-height: 1.3; white-space: nowrap; }
+  .cal-holiday {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 0.8125rem; font-weight: 500; line-height: 1.3;
+    /* 和 --fg 混一档：深色主题偏亮、浅色主题偏暗，两边都够读（纯 accent 在浅底上会糊） */
+    color: color-mix(in oklch, var(--accent) 66%, var(--fg));
+  }
   .cal-nav { display: flex; gap: 0.125rem; }
   .cal-navbtn {
     width: 1.25rem; height: 1.25rem; border-radius: 0.375rem; padding: 0; display: grid; place-items: center;
@@ -517,7 +529,7 @@
   /* 层序：z-index:-1 让块落在 .cal-body（自身 z-index:2 → 独立层叠上下文）的内容之下、
      卡片白纱之上 —— 块要「垫在数字下面」而不是盖住数字。 */
   .cal-chip-svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; z-index: -1; pointer-events: none; }
-  .cal-d.today i { color: var(--fg); font-weight: 600; }   /* 背景交给 .cal-chip-svg（2026-10-10 用户「还是用之前的颜色」：原强调色） */
+  .cal-d.today i { color: var(--on-accent); font-weight: 600; }   /* 背景交给 .cal-chip-svg（2026-10-10 用户「还是用之前的颜色」：原强调色） */
   .card-cal button { pointer-events: auto; cursor: pointer; }
 
   /* ─── 待办卡（OD 卡片稿 卡 9：240×120 · 勾选在卡内 / 编辑在参数面板） ───
@@ -527,17 +539,19 @@
   .td-row { display: flex; align-items: center; gap: 0.5rem; height: 1.3125rem; border-radius: 0.375rem; transition: transform var(--dur-slow) var(--ease-out); }
   .td-row:hover { background: var(--fg-soft); }   /* 整行可点的提示 */
   .td-ck {
-    flex: 0 0 auto; width: 1.0625rem; height: 1.0625rem; border-radius: 999px;
+    /* 直径取偶数（18px）：17px 时圆心落在半设备像素、实色底被吸附，勾走真亚像素 →
+       定量居中但看着「挂偏」；偶数直径两边同相位。 */
+    flex: 0 0 auto; width: 1.125rem; height: 1.125rem; border-radius: 999px;
     border: 1px solid color-mix(in oklch, var(--fg) 34%, transparent);
     display: grid; place-items: center; color: var(--fg);
     transition: background-color var(--dur-normal) var(--ease-snap), border-color var(--dur-normal) var(--ease-snap);
   }
   /* 勾改成「描出来」（2026-10-24）：SVG 常在 DOM 里，靠 stroke-dashoffset 画线，不再用 display 切换。
-     路径实际长 17.13，dasharray 给 26 → 未选中时整段虚线落在 gap 里（完全不可见）。
+     路径实际长 20.4，dasharray 给 26 → 未选中时整段虚线落在 gap 里（完全不可见）。
      注意：这条是 CSS transition，前提是勾选不再整段重建（todoPaint 走路更新）；重建时新元素直接落到目标态，不存在「从 0 重放」。 */
-  .td-ck svg { width: 0.625rem; height: 0.625rem; display: block; }
+  .td-ck svg { width: 0.875rem; height: 0.875rem; display: block; }   /* 2026-10-29 勾放大 10→14px：原来只占圆 41%，显小 */
   .td-ck svg path { stroke-dasharray: 26; stroke-dashoffset: 26; transition: stroke-dashoffset 280ms var(--ease-out); }
-  .td-row.done .td-ck { background: var(--accent); border-color: transparent; }
+  .td-row.done .td-ck { background: var(--accent); border-color: transparent; color: var(--on-accent); }
   /* 弹一下只在「用户刚勾上」时发生（todoPaint 加 .just-done 再摘掉）：重建出来的已完成行不重弹 */
   .td-row.just-done .td-ck { animation: ckPop var(--dur-slow) var(--ease-out); }
   .td-row.done .td-ck svg path { stroke-dashoffset: 0; }
@@ -545,7 +559,7 @@
   @keyframes ckPop { 0% { transform: scale(.9); } 55% { transform: scale(1.04); } 100% { transform: scale(1); } }
   .td-t { flex: 1; min-width: 0; font-size: 0.9375rem; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color var(--dur-normal) var(--ease-snap); }
   .td-row.done .td-t { color: var(--muted); text-decoration: line-through; }
-  .td-more { height: 1.3125rem; display: flex; align-items: center; padding-left: 1.5625rem; font-size: 0.8125rem; color: var(--muted); }
+  .td-more { height: 1.3125rem; display: flex; align-items: center; padding-left: 1.625rem;   /* = 圆 18 + gap 8，与上行文字左缘对齐 */ font-size: 0.8125rem; color: var(--muted); }
   .td-empty-l { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.125rem; }
   .td-empty-l span { font-size: 0.6875rem; opacity: 0.85; }
   .card-todo .td-row { pointer-events: auto; cursor: pointer; }
@@ -683,9 +697,26 @@
   var PINNED = params.get('pinned') === '1';
   window.__setPinned = function (v) { PINNED = !!v; };
   window.__getPinned = function () { return PINNED; };   // 诊断用只读钩子
+  /* 强调色：主界面「外观 · 强调色」由 Rust 推过来，建卡 URL 也带一份（首帧就上色）。
+     实色块里的字/勾默认保持白色（粉底白字就是这个设计要的观感）；只有纯白这类近白强调色
+     会白字看不见，才翻成深字。浅色主题沿用改版前的 --fg（深字）。 */
+  var ACCENT_RGB = [76, 154, 255], DARK_THEME = true;
+  function paintOnAccent() {
+    var lin = [], i, v;
+    for (i = 0; i < 3; i++) {
+      v = Math.max(0, Math.min(255, Number(ACCENT_RGB[i]) || 0)) / 255;
+      lin.push(v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
+    }
+    var lum = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+    // 只在「近白强调色」和「浅色主题」下换深字；粉/蓝/绿等一律白字
+    var darkInk = lum > 0.72 || !DARK_THEME;
+    document.documentElement.style.setProperty('--on-accent', darkInk ? 'oklch(0.22 0.02 258)' : 'oklch(0.985 0 0)');
+  }
   window.__setAccent = function (rgb) {
-    if (!rgb) return;
-    document.documentElement.style.setProperty('--accent', 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')');
+    if (!rgb || rgb.length !== 3) return;
+    ACCENT_RGB = [+rgb[0], +rgb[1], +rgb[2]];
+    document.documentElement.style.setProperty('--accent', 'rgb(' + ACCENT_RGB.join(',') + ')');
+    paintOnAccent();
   };
   window.__setTheme = function (dark) {
     // 只切文字/描边的明暗（深色设计稿是默认值；浅色给一版可读的反色）
@@ -695,6 +726,8 @@
     s.setProperty('--muted', r ? r.muted : 'oklch(0.85 0.02 261.1)');
     s.setProperty('--tshadow', r ? 'oklch(1 0 0 / 0.6)' : 'oklch(0 0 0 / 0.45)');
     s.setProperty('--border', r ? r.border : 'oklch(1 0 0 / 0.10)');
+    DARK_THEME = !!dark;
+    paintOnAccent();              // 浅色主题：实色块统一换深字
   };
   window.__flash = function () {
     cardEl.classList.remove('flash');
@@ -1185,15 +1218,93 @@
     if (kb >= 1) return [String(Math.round(kb)), 'KB/s'];
     return ['0', 'B/s'];
   }
+  /* ── 网络卡数值补间（2026-10-29 定案「C 计数补间」；同日二改：一律在「字节/秒」空间补）──
+     速率卡是仪表：数字从旧值数到新值（320ms、easeOutQuart）后静止。
+     补间做在**原始 bps** 上、每帧再用 fmtRate 格式化 → 换单位（KB/s↔MB/s↔GB/s）时也在数，
+     不会出现「其它都数、一换单位就瞬跳」的割裂。三条边界：
+     ① 目标没变不重启时间轴（重启 = 速度断档）；② 重建时把「当前补间值」写进 HTML（netPair），
+     新节点不回零、不先闪目标，没走完就接着走；③ 文本一律条件写，rAF 走完即停（静止零成本）。 */
+  var netState = {};                 // { up|down: {from, tgt, t0, ms} }（数值单位 = 字节/秒）
+  var netItems = [], netRaf = 0;
+  var NET_MS = 320;
+  /* 曲线走「梯形速度」（与性能卡条宽同一套 barEase）：起步 v=0、主体匀速、收尾渐停。
+     别换成 easeOut 系（t=0 斜率最大）——大跳时头一帧就吃掉六成行程，观感仍然像瞬跳。 */
+  function netEase(u) { return barEase(u); }
+  function netValue(st, now) {
+    if (!st || !st.ms) return st ? st.tgt : 0;
+    var u = (now - st.t0) / st.ms;
+    return u >= 1 ? st.tgt : st.from + (st.tgt - st.from) * netEase(u);
+  }
+  function netSet(key, bps) {
+    var tgt = Math.max(0, Number(bps) || 0), now = performance.now(), st = netState[key];
+    if (!st) { netState[key] = { from: tgt, tgt: tgt, t0: now, ms: 0 }; return; }   // 首见：直接落位
+    if (st.tgt === tgt) return;                                  // 目标没变：别重启时间轴
+    st.from = netValue(st, now);                                 // 从当前显示值起步 → 数值连续
+    st.tgt = tgt; st.t0 = now; st.ms = rollReduced() ? 0 : NET_MS;
+  }
+  function netPut(it, now) {         // 写一行（数字/单位都条件写；单位随数值自己跨档）
+    var f = fmtRate(netValue(netState[it.key], now));
+    if (it.numEl.textContent !== f[0]) it.numEl.textContent = f[0];
+    if (it.unitEl.textContent !== f[1]) it.unitEl.textContent = f[1];
+  }
+  function netTick() {
+    netRaf = 0;
+    var now = performance.now(), live = 0;
+    for (var i = 0; i < netItems.length; i++) {
+      var it = netItems[i], st = netState[it.key];
+      if (!st || !it.numEl.isConnected) continue;                // 重建残留（netBind 会重挂）
+      netPut(it, now);
+      if (st.ms && now - st.t0 + 0.5 >= st.ms) { st.ms = 0; st.from = st.tgt; }   // 收尾：落位并停表
+      else if (st.ms) live++;
+    }
+    if (live) netRaf = requestAnimationFrame(netTick);
+  }
+  /* 整段重建时写进 HTML 的「数字 + 单位」= 当前补间值（防「先闪到目标再跳回来」） */
+  function netPair(key, bps) {
+    var st = netState[key];
+    return fmtRate(st && st.ms ? netValue(st, performance.now()) : bps);
+  }
+  /* 重建/首帧：抓两行、直接落到当前补间值（不重放动画）；没走完就接着走 */
+  function netBind() {
+    var rows = bodyEl.querySelectorAll('.net-row'), now = performance.now(), live = 0;
+    netItems = [];
+    for (var i = 0; i < rows.length && i < 2; i++) {
+      var numEl = rows[i].querySelector('.numbox'), unitEl = rows[i].querySelector('.net-val i');
+      if (!numEl || !unitEl) continue;
+      var it = { key: i === 0 ? 'up' : 'down', numEl: numEl, unitEl: unitEl };
+      netItems.push(it);
+      var st = netState[it.key];
+      if (!st) continue;
+      netPut(it, now);
+      if (st.ms) live++;
+    }
+    if (live && !netRaf) netRaf = requestAnimationFrame(netTick);
+  }
+  /* normal 态走路更新：只条件写两行文本，补间交给 netTick；结构不对返回 false 交回整段重建 */
+  function netPaint() {
+    if (curState !== 'normal' || !snap) return false;
+    if (netItems.length !== 2 || !netItems[0].numEl.isConnected) netBind();
+    if (netItems.length !== 2) return false;
+    var n = snap.net || { rx: 0, tx: 0 }, now = performance.now();
+    var raws = [n.tx, n.rx];
+    for (var i = 0; i < 2; i++) {
+      netSet(netItems[i].key, raws[i]);
+      netPut(netItems[i], now);
+    }
+    if (!netRaf && (netState.up.ms || netState.down.ms)) netRaf = requestAnimationFrame(netTick);
+    return true;
+  }
+
   function renderNet() {
     var n = snap.net || { rx: 0, tx: 0 };
-    var up = fmtRate(n.tx), down = fmtRate(n.rx);
+    var up = netPair('up', n.tx), down = netPair('down', n.rx);
     // 2026-10-01 第三版：标签只留箭头（文字放左时 25px 数值放不下，见 .net-val 注释）
     // 2026-10-10 十改：字体换 MiSans 后「.」字宽天然收窄（点两侧 ≈2~3px，见 .net-val 注释），撤销 i.dv 包装
+    // 2026-10-29：数字包 .numbox（走路更新只改这一个文本节点），单位仍走 .net-val i
     function line(arr, v) {
-      var num = v[0];
       return '<div class="net-row"><span class="net-lab" aria-hidden="true">' + arr +
-        '</span><span class="net-val num">' + num + '<i>' + v[1] + '</i></span></div>';
+        '</span><span class="net-val num"><span class="numbox">' + v[0] +
+        '</span><i>' + v[1] + '</i></span></div>';
     }
     return '<div class="card-body net-rows' + (curState === 'error' ? ' dim' : '') + '">' +
       line('↑', up) + line('↓', down) + '</div>';
@@ -1547,6 +1658,93 @@
   }
   window.__musicPush = onMusic;   // 诊断钩子：CDP 注入假快照测切歌动画/晚到封面（2026-10-09）
 
+  /* ── 今日节日（日历卡标题行；有则显示、无则留空） ──
+     农历 = 1900–2099 压缩年表（每年的闰月 + 12 个月大小），逐日换算到今天。
+     表取自 ISC 许可的 solarLunar/lunarInfo（已按 cnlunar / zhdate 修正 2057、2097 两处）；
+     换算对 1950–2099 每一天与参考实现逐日比对 0 差异，七个传统节日对 1901–2098 全中。
+     只算「今天」一天并按日期缓存，调用点在 calPaint / renderCalendar —— 不进每秒热路径。 */
+  var LUNAR_INFO = [
+    0x04bd8, 0x04ae0, 0x0a570, 0x054d5, 0x0d260, 0x0d950, 0x16554, 0x056a0, 0x09ad0, 0x055d2,   // 1900–1909
+    0x04ae0, 0x0a5b6, 0x0a4d0, 0x0d250, 0x1d255, 0x0b540, 0x0d6a0, 0x0ada2, 0x095b0, 0x14977,   // 1910–1919
+    0x04970, 0x0a4b0, 0x0b4b5, 0x06a50, 0x06d40, 0x1ab54, 0x02b60, 0x09570, 0x052f2, 0x04970,   // 1920–1929
+    0x06566, 0x0d4a0, 0x0ea50, 0x06e95, 0x05ad0, 0x02b60, 0x186e3, 0x092e0, 0x1c8d7, 0x0c950,   // 1930–1939
+    0x0d4a0, 0x1d8a6, 0x0b550, 0x056a0, 0x1a5b4, 0x025d0, 0x092d0, 0x0d2b2, 0x0a950, 0x0b557,   // 1940–1949
+    0x06ca0, 0x0b550, 0x15355, 0x04da0, 0x0a5b0, 0x14573, 0x052b0, 0x0a9a8, 0x0e950, 0x06aa0,   // 1950–1959
+    0x0aea6, 0x0ab50, 0x04b60, 0x0aae4, 0x0a570, 0x05260, 0x0f263, 0x0d950, 0x05b57, 0x056a0,   // 1960–1969
+    0x096d0, 0x04dd5, 0x04ad0, 0x0a4d0, 0x0d4d4, 0x0d250, 0x0d558, 0x0b540, 0x0b6a0, 0x195a6,   // 1970–1979
+    0x095b0, 0x049b0, 0x0a974, 0x0a4b0, 0x0b27a, 0x06a50, 0x06d40, 0x0af46, 0x0ab60, 0x09570,   // 1980–1989
+    0x04af5, 0x04970, 0x064b0, 0x074a3, 0x0ea50, 0x06b58, 0x05ac0, 0x0ab60, 0x096d5, 0x092e0,   // 1990–1999
+    0x0c960, 0x0d954, 0x0d4a0, 0x0da50, 0x07552, 0x056a0, 0x0abb7, 0x025d0, 0x092d0, 0x0cab5,   // 2000–2009
+    0x0a950, 0x0b4a0, 0x0baa4, 0x0ad50, 0x055d9, 0x04ba0, 0x0a5b0, 0x15176, 0x052b0, 0x0a930,   // 2010–2019
+    0x07954, 0x06aa0, 0x0ad50, 0x05b52, 0x04b60, 0x0a6e6, 0x0a4e0, 0x0d260, 0x0ea65, 0x0d530,   // 2020–2029
+    0x05aa0, 0x076a3, 0x096d0, 0x04afb, 0x04ad0, 0x0a4d0, 0x1d0b6, 0x0d250, 0x0d520, 0x0dd45,   // 2030–2039
+    0x0b5a0, 0x056d0, 0x055b2, 0x049b0, 0x0a577, 0x0a4b0, 0x0aa50, 0x1b255, 0x06d20, 0x0ada0,   // 2040–2049
+    0x14b63, 0x09370, 0x049f8, 0x04970, 0x064b0, 0x168a6, 0x0ea50, 0x06aa0, 0x1a6c4, 0x0aae0,   // 2050–2059
+    0x092e0, 0x0d2e3, 0x0c960, 0x0d557, 0x0d4a0, 0x0da50, 0x05d55, 0x056a0, 0x0a6d0, 0x055d4,   // 2060–2069
+    0x052d0, 0x0a9b8, 0x0a950, 0x0b4a0, 0x0b6a6, 0x0ad50, 0x055a0, 0x0aba4, 0x0a5b0, 0x052b0,   // 2070–2079
+    0x0b273, 0x06930, 0x07337, 0x06aa0, 0x0ad50, 0x14b55, 0x04b60, 0x0a570, 0x054e4, 0x0d160,   // 2080–2089
+    0x0e968, 0x0d520, 0x0daa0, 0x16aa6, 0x056d0, 0x04ae0, 0x0a9d4, 0x0a2d0, 0x0d150, 0x0f252,   // 2090–2099
+  ];
+  var LUNAR_YDAYS = [];
+  (function () {
+    for (var i = 0; i < LUNAR_INFO.length; i++) {
+      var info = LUNAR_INFO[i], leap = info & 0xf, days = 29 * 12;
+      for (var b = 0x8000; b > 0x8; b >>= 1) if (info & b) days++;
+      if (leap) days += (info & 0x10000) ? 30 : 29;
+      LUNAR_YDAYS.push(days);
+    }
+  })();
+  // 距 1900-01-31（农历正月初一）off 天 → { y, m, d, leap }
+  function lunarFromOffset(off) {
+    var i = 0;
+    while (i < LUNAR_INFO.length - 1 && off >= LUNAR_YDAYS[i]) { off -= LUNAR_YDAYS[i]; i++; }
+    var info = LUNAR_INFO[i], leap = info & 0xf, list = [], m;
+    for (m = 1; m <= 12; m++) list.push([m, (info & (0x10000 >> m)) ? 30 : 29, 0]);
+    if (leap) list.splice(leap, 0, [leap, (info & 0x10000) ? 30 : 29, 1]);   // 闰月排在同月之后
+    for (m = 0; m < list.length; m++) {
+      if (off < list[m][1]) return { y: 1900 + i, m: list[m][0], d: off + 1, leap: !!list[m][2] };
+      off -= list[m][1];
+    }
+    return null;
+  }
+  function solarToLunar(y, mo, d) {
+    if (y < 1900 || y > 2099) return null;
+    var off = Math.round((Date.UTC(y, mo - 1, d) - Date.UTC(1900, 0, 31)) / 86400000);
+    return off < 0 ? null : lunarFromOffset(off);
+  }
+  var FEST_SOLAR = { '1-1': '元旦', '2-14': '情人节', '3-8': '妇女节', '3-12': '植树节', '4-1': '愚人节',
+    '5-1': '劳动节', '5-4': '青年节', '6-1': '儿童节', '7-1': '建党节', '8-1': '建军节',
+    '9-10': '教师节', '10-1': '国庆节', '12-24': '平安夜', '12-25': '圣诞节' };
+  var FEST_LUNAR = { '1-1': '春节', '1-15': '元宵节', '2-2': '龙抬头', '5-5': '端午节',
+    '7-7': '七夕节', '8-15': '中秋节', '9-9': '重阳节', '12-8': '腊八节', '12-23': '小年' };
+  // 位次节日：母亲节 = 5 月第 2 个周日、父亲节 = 6 月第 3 个周日、感恩节 = 11 月第 4 个周四
+  function nthWeekday(y, mo, wd, n) {
+    return 1 + ((wd - new Date(y, mo - 1, 1).getDay() + 7) % 7) + (n - 1) * 7;
+  }
+  function holidayOf(dt) {
+    var y = dt.getFullYear(), mo = dt.getMonth() + 1, d = dt.getDate();
+    var L = solarToLunar(y, mo, d);
+    var nx = new Date(y, mo - 1, d + 1);
+    var LN = solarToLunar(nx.getFullYear(), nx.getMonth() + 1, nx.getDate());
+    if (LN && LN.m === 1 && LN.d === 1) return '除夕';        // 明天正月初一 → 今天除夕
+    if (L && !L.leap && FEST_LUNAR[L.m + '-' + L.d]) return FEST_LUNAR[L.m + '-' + L.d];
+    if (mo === 5 && d === nthWeekday(y, 5, 0, 2)) return '母亲节';
+    if (mo === 6 && d === nthWeekday(y, 6, 0, 3)) return '父亲节';
+    if (mo === 11 && d === nthWeekday(y, 11, 4, 4)) return '感恩节';
+    return FEST_SOLAR[mo + '-' + d] || '';
+  }
+  var holiKey = '', holiText = '';
+  function holidayToday() {
+    var now = new Date();
+    var key = now.getFullYear() + '-' + (now.getMonth() + 1) + '-' + now.getDate();
+    if (holiKey !== key) { holiKey = key; holiText = holidayOf(now); }
+    return holiText;
+  }
+  // 只在「当月视图」显示今天的节日：翻到别的月份，标题行留空（不然会和月份对不上）
+  function calHoliday(y, m, now) {
+    return (y === now.getFullYear() && m === now.getMonth()) ? holidayToday() : '';
+  }
+
   /* ── 日历卡（OD 卡 8：全月视图 · 周一起始 · 今日高亮 · ‹ › 翻月） ── */
   var calY = 0, calM = 0;   // 0/0 = 跟随今天；翻月后固定在被翻的月份（跨天刷新时保留）
   var calFlipDir = 0;       // 下一次日历重建的翻页方向：+1 下月 / −1 上月（0 = 不动画）
@@ -1644,7 +1842,11 @@
     var now = new Date();
     var y = calY || now.getFullYear();
     var m = calY ? calM : now.getMonth();
-    title.textContent = y + '年' + (m + 1) + '月';
+    var tt = y + '年' + (m + 1) + '月';
+    if (title.textContent !== tt) title.textContent = tt;      // 条件写入：没变别动文本节点
+    var holi = body.querySelector('.cal-holiday');
+    var label = calHoliday(y, m, now);
+    if (holi && holi.textContent !== label) holi.textContent = label;
     page.innerHTML = calPageHtml(y, m, now);
     syncCalChip();
     return true;
@@ -1655,13 +1857,20 @@
     var y = calY || now.getFullYear();
     var m = calY ? calM : now.getMonth();
     return '<div class="card-body cal-body">' +
-      '<div class="cal-head"><span class="cal-title">' + y + '年' + (m + 1) + '月</span>' +
-        '<span class="cal-nav">' +
-          '<button type="button" class="cal-navbtn" data-act="prev" aria-label="上个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></svg></button>' +
-          '<button type="button" class="cal-navbtn" data-act="next" aria-label="下个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 6l6 6-6 6"/></svg></button>' +
-        '</span></div>' +
+      calHeadHtml(y, m, now) +
       '<div class="cal-page">' + calPageHtml(y, m, now) + '</div>' +
     '</div>';
+  }
+  // 标题行：左 = 年/月 + 今日节日（有就显示、没有就空着），右 = ‹ ›
+  function calHeadHtml(y, m, now) {
+    var holi = calHoliday(y, m, now);
+    return '<div class="cal-head"><span class="cal-lead">' +
+        '<span class="cal-title">' + y + '年' + (m + 1) + '月</span>' +
+        '<span class="cal-holiday">' + esc(holi) + '</span>' +
+      '</span><span class="cal-nav">' +
+          '<button type="button" class="cal-navbtn" data-act="prev" aria-label="上个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></svg></button>' +
+          '<button type="button" class="cal-navbtn" data-act="next" aria-label="下个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 6l6 6-6 6"/></svg></button>' +
+        '</span></div>';
   }
 
   // 今日蓝块：整卡 SVG 覆盖层（亚像素定位；浏览器对实色背景做像素吸附，画不准）
@@ -1786,7 +1995,7 @@
     shown.forEach(function (i) {
       var t = items[i];
       html += '<div class="td-row' + (t.done ? ' done' : '') + '" data-idx="' + i + '" role="button">' +
-        '<i class="td-ck" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.8l4.2 4.2L19 7.4"/></svg></i>' +
+        '<i class="td-ck" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5.1 12.3l4.7 4.7L19.1 6.9"/></svg></i>' +
         '<span class="td-t">' + esc(t.text) + '</span></div>';
     });
     if (more > 0) html += '<div class="td-more">还有 ' + more + ' 项</div>';
@@ -1843,6 +2052,11 @@
         lastRenderAt = Date.now();
         return;
       }
+      // 网络卡同理：数值补间由 rAF 推进（整段重建会打断补间 + 白重排一次文本）
+      if (kind === 'NetRate' && !force && netPaint()) {
+        lastRenderAt = Date.now();
+        return;
+      }
       // 时钟同理：只改变了的数字位（整段重建会打断数字滚动）
       if (kind === 'Clock' && !force && clockPaint()) {
         lastRenderAt = Date.now();
@@ -1865,6 +2079,7 @@
     bodyEl.innerHTML = html;
     if (kind === 'Performance' && st === 'normal') perfPaint();   // 重建/首帧：把条挂到补间上（按记忆落位，不回零）
     if (kind === 'Clock' && st === 'normal') rollBind(bodyEl.querySelector('.clock-time'));   // 重建/首帧：抓列（html 里已写到目标位，不回零）
+    if (kind === 'NetRate' && st === 'normal') netBind();   // 重建/首帧：抓行 + 落到当前补间值（不回零）
     if (kind === 'Calendar') {
       syncCalChip();                                              // 块位置按布局盒（亚像素）写入 SVG 层
       if (st === 'normal' && calFlipDir) calFlip(calFlipDir);      // 只有用户点 ‹ › 才带方向

@@ -283,6 +283,14 @@
   }
   window.__setGlass = setGlass;
   setGlass(params.get('glass') || 30);
+  /* 强调色（主界面「外观 · 强调色」）：运行态的圆点、插入标线与右键菜单悬停底色跟着换 */
+  function setAccent(rgb) {
+    if (!rgb || rgb.length !== 3) return;
+    document.documentElement.style.setProperty('--accent', 'rgb(' + rgb.join(',') + ')');
+  }
+  window.__setAccent = setAccent;
+  var accParam = (params.get('accent') || '').split(',').map(Number);
+  if (accParam.length === 3 && accParam.every(function (v) { return isFinite(v); })) setAccent(accParam);
   window.__setTheme = function (dark) {
     var r = dark ? null : { fg: 'oklch(0.28 0.02 258)', muted: 'oklch(0.47 0.02 261)', border: 'oklch(0 0 0 / 0.10)' };
     var s = document.documentElement.style;
