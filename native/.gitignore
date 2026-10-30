@@ -1,0 +1,4 @@
+target/
+assets/*.ttf
+assets/fonts/*.ttf
+minicard-core/Cargo.lock
