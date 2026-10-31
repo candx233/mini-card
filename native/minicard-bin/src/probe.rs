@@ -149,3 +149,56 @@ pub fn shapes2(g: &Gfx, _te: &TextEngine, _w: f32, _h: f32) -> Result<()> {
     g.end()?;
     Ok(())
 }
+
+/// 第三张测试图：文字三态（省略号 / 裁剪 / 中文省略号）+ 抗锯齿取色。
+///
+/// 版面（240×240，全部 16px / 行高 18.4）：
+/// - A y=16  · 省略号 · 拉丁 26 字母，盒宽 100（x 10..110）
+/// - B y=60  · 裁剪   · 同一段文字，布局宽 200（自然宽），裁到 x 10..110
+/// - C y=104 · 省略号 · 中文「迷你卡片测试歌名很长很长」，盒宽 100
+/// - D y=148 · 抗锯齿 · 单个 `H`，用来抽查边缘像素是不是灰阶（R=G=B）
+pub fn text_sheet(g: &Gfx, te: &TextEngine, _w: f32, _h: f32) -> Result<()> {
+    use minicard_draw::text::Mode;
+
+    const SIZE: f32 = 16.0;
+    const LH: f32 = 18.4;
+    const LONG: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    g.begin()?;
+    g.push_clip()?;
+    set_color(g, WHITE)?;
+
+    let draw = |fmt_mode: Mode, text: &str, box_w: f32, x: f32, y: f32, tabular: bool| -> Result<()> {
+        let fmt = te.format_mode(SIZE, LH, 0, fmt_mode)?;
+        let lay = te.layout_mode(0, &fmt, text, box_w, LH, tabular, fmt_mode)?;
+        unsafe {
+            g.d2d.DrawTextLayout(
+                windows_numerics::Vector2 { X: x, Y: y },
+                &lay,
+                &g.brush,
+                windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+        }
+        Ok(())
+    };
+
+    // A：省略号
+    draw(Mode::Ellipsis, LONG, 100.0, 10.0, 16.0, false)?;
+    // B：裁剪（布局宽 200 = 自然宽，裁到 110）
+    {
+        minicard_draw::paint::push_clip(
+            g,
+            D2D_RECT_F { left: 10.0, top: 56.0, right: 110.0, bottom: 82.0 },
+        );
+        draw(Mode::Clip, LONG, 200.0, 10.0, 60.0, false)?;
+        minicard_draw::paint::pop_clip(g);
+    }
+    // C：中文省略号
+    draw(Mode::Ellipsis, "迷你卡片测试歌名很长很长", 100.0, 10.0, 104.0, false)?;
+    // D：抗锯齿抽查
+    draw(Mode::Clip, "H", 40.0, 10.0, 148.0, false)?;
+
+    g.pop_clip();
+    g.end()?;
+    Ok(())
+}

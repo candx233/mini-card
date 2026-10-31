@@ -137,11 +137,13 @@ pub struct TextSpec {
     pub line_h: f32,
     /// 100..=900
     pub weight: u16,
+    /// 是否允许自动换行（CSS `white-space:normal`）；默认 false = nowrap
+    pub wrap: bool,
 }
 
 impl TextSpec {
     pub fn new(s: impl Into<String>, size: f32, line_h: f32) -> Self {
-        Self { s: s.into(), size, line_h, weight: 400 }
+        Self { s: s.into(), size, line_h, weight: 400, wrap: false }
     }
 }
 
@@ -174,6 +176,13 @@ impl Node {
     }
     pub fn style(mut self, f: impl FnOnce(Style) -> Style) -> Self {
         self.style = f(self.style);
+        self
+    }
+    /// 允许换行（对应 CSS `white-space:normal`）
+    pub fn wrap(mut self, on: bool) -> Self {
+        if let Content::Text(t) = &mut self.content {
+            t.wrap = on;
+        }
         self
     }
     pub fn weight(mut self, w: u16) -> Self {

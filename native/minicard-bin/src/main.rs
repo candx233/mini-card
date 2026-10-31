@@ -234,11 +234,11 @@ impl App {
     fn repaint(&mut self) {
         // 形状探针：只画测试图，不跑卡片视图
         if let Some(name) = self.probe.clone() {
-            if name == "shapes" || name == "shapes2" {
-                let r = if name == "shapes" {
-                    probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h)
-                } else {
-                    probe::shapes2(&self.gfx, &self.te, self.tokens.w, self.tokens.h)
+            if name == "shapes" || name == "shapes2" || name == "text" {
+                let r = match name.as_str() {
+                    "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
+                    "shapes2" => probe::shapes2(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
+                    _ => probe::text_sheet(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
                 };
                 if let Err(e) = r {
                     mlog!("探针 paint 失败: {e:?}");
