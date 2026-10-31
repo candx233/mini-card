@@ -47,7 +47,7 @@ struct CardWin {
 }
 
 enum State {
-    Perf,
+    Perf { show_gpu: bool },
     Disks { warn90: bool },
     Clock(clock::Clock),
     Net(net::NetState),
@@ -85,44 +85,25 @@ fn mem_ratio(snap: &data::DataSnapshot) -> f32 {
     }
 }
 
-fn fmt_gb(bytes: u64) -> String {
-    let gb = bytes as f64 / 1_073_741_824.0;
-    if gb >= 100.0 {
-        format!("{gb:.0} GB")
-    } else {
-        format!("{gb:.1} GB")
-    }
-}
-
-/// 性能卡的三行（CPU / RAM / GPU），关掉 GPU 选项时只留两行
+/// 性能卡的行（CPU / RAM / GPU），关掉 GPU 选项时只留两行
 fn perf_rows(snap: &data::DataSnapshot, show_gpu: bool) -> Vec<perf::Row> {
+    // 口径同 card.html `perfRows()`：三行都是**百分比**，GPU 缺数据时写「未检测到」（不带 .num）
+    let cpu = snap.cpu.round();
+    let ram = mem_ratio(snap).round();
     let mut rows = vec![
-        perf::Row {
-            label: "CPU".into(),
-            text: format!("{:.0}%", snap.cpu),
-            pct: Some(snap.cpu),
-        },
-        perf::Row {
-            label: "RAM".into(),
-            text: format!(
-                "{} / {}",
-                fmt_gb(snap.mem_used).replace(".0 ", " "),
-                fmt_gb(snap.mem_total).replace(".0 ", " ")
-            ),
-            pct: Some(mem_ratio(snap)),
-        },
+        perf::Row { label: "CPU".into(), text: format!("{cpu:.0}%"), pct: Some(snap.cpu) },
+        perf::Row { label: "RAM".into(), text: format!("{ram:.0}%"), pct: Some(mem_ratio(snap)) },
     ];
     if show_gpu {
         match snap.gpus.first() {
-            Some(g) => rows.push(perf::Row {
-                label: "GPU".into(),
-                text: if g.usage > 0.0 || !g.name.is_empty() {
-                    format!("{:.0}%", g.usage)
-                } else {
-                    "未检测到".into()
-                },
-                pct: Some(g.usage),
-            }),
+            Some(g) => {
+                let usage = g.usage;
+                rows.push(perf::Row {
+                    label: "GPU".into(),
+                    text: format!("{:.0}%", usage.round()),
+                    pct: Some(usage),
+                })
+            }
             None => rows.push(perf::Row {
                 label: "GPU".into(),
                 text: "未检测到".into(),
@@ -295,7 +276,7 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
 
             let now = Instant::now();
             let state = match card.kind {
-                CardKind::Performance => State::Perf,
+                CardKind::Performance => State::Perf { show_gpu: card.show_gpu },
                 CardKind::Disks => State::Disks { warn90: card.warn90 },
                 CardKind::Clock => {
                     let mut c = clock::Clock::new();
@@ -404,8 +385,8 @@ fn draw_one(
     let glass_pair = win.glass.as_ref().map(|(b, r)| (b, *r));
     let snap_r = snap.read().unwrap();
     let animating = match (&mut win.state, win.kind) {
-        (State::Perf, _) => {
-            let rows = perf_rows(&snap_r, true);
+        (State::Perf { show_gpu }, _) => {
+            let rows = perf_rows(&snap_r, *show_gpu);
             let tk = perf::Tokens::perf(win.w, win.h);
             perf::paint(&win.gfx, te, pal, &tk, &rows, glass_pair, false)?;
             false

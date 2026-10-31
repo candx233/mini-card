@@ -361,12 +361,14 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
         // 宽度必须**恰好**等于盒子：多给 2px 在居中时会把文字推右 1px（实测 dx 趋势揭示的）
         let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, TextMode::Clip)?;
         // 今日数字要在 22 高的块里居中（普通格是 17.5 的行盒，直接画即可）
-        let (dx, dy) = if is_today {
-            let tw = te.measure(spec, 0.0).0;
-            ((pl.rect.w - tw) / 2.0, (pl.rect.h - spec.line_h) / 2.0)
+        // 横向居中由 `align=2` 完成；这里**只**补纵向（22 高的块里居中 17.5 的行盒）。
+        // 曾经这里又加了一次 `(w - tw)/2` —— 双重居中，把「31」推到蓝块外 ~5px。
+        let dy = if is_today {
+            (pl.rect.h - spec.line_h) / 2.0
         } else {
-            (0.0, 0.0)
+            0.0
         };
+        let dx = 0.0;
         unsafe {
             g.d2d.DrawTextLayout(
                 Vector2 { X: pl.rect.x + dx + g.text_dx, Y: pl.rect.y + dy + g.text_dy },
