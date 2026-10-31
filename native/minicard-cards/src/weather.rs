@@ -61,7 +61,8 @@ fn icon_paths(name: &str) -> (&'static str, (f32, f32), [(f32, f32, f32); 3], us
             1,
         ),
         "cloudSun" => (
-            "M12.23 6.74A2.9 2.9 0 1 1 16.8 9.87M15 3v1.4M11.8 4.4l1 1M18.2 4.4l-1 1M19.6 7.6h-1.4",
+            // 三段：太阳弧 / 光芒 / **云体**（第三段曾经漏掉，图标只剩一小块，实测 7×6px）
+            "M12.23 6.74A2.9 2.9 0 1 1 16.8 9.87M15 3v1.4M11.8 4.4l1 1M18.2 4.4l-1 1M19.6 7.6h-1.4M7.5 18h9a3.7 3.7 0 0 0 .6-7.35A5.5 5.5 0 0 0 7 9.6 4.2 4.2 0 0 0 7.5 18z",
             (-0.38, -1.5),
             [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)],
             0,
@@ -142,7 +143,7 @@ impl Tokens {
             radius: 1.0 * r,
             pad_v: 0.625 * r,
             pad_h: 1.0 * r,
-            stack_pt: 0.1667 * r,
+            stack_pt: 0.0625 * r,   // 实测：0.1667rem 会把内容压下去 1px（与 604 行的 padding-block 冲突，按实测取 1px）
             top_gap: 0.75 * r,
             city_fs: 1.25 * r,
             city_lh: 1.25 * r * 1.15,
@@ -493,5 +494,41 @@ mod tests {
         assert_eq!(deg(Some(-3.4)), "-3°");
         assert_eq!(deg(None), "--");
         assert_eq!(deg(Some(f32::NAN)), "--");
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use minicard_draw::path::Path;
+
+    /// 七个 WMO 图标的路径必须真能解析出足够多的线段 ——
+    /// 之前 cloudSun 只画出 7×6 px 的一小块，就是弧段没被解析出来。
+    #[test]
+    fn 七个图标都能解析出形体() {
+        for name in ["sun", "cloudSun", "cloud", "drizzle", "rain", "snow", "thunder"] {
+            let (d, _, circles, nc) = super::icon_paths(name);
+            let mut total = 0usize;
+            for seg in d.split('M').filter(|s| !s.is_empty()) {
+                let p = Path::svg(&format!("M{seg}"));
+                assert!(
+                    !p.cmds.is_empty(),
+                    "图标 {name} 的子路径 {seg:?} 解析为空"
+                );
+                total += p.cmds.len();
+            }
+            let len: f32 = d
+                .split('M')
+                .filter(|s| !s.is_empty())
+                .map(|s| Path::svg(&format!("M{s}")).length())
+                .sum();
+            assert!(total >= 4, "图标 {name} 只解析出 {total} 段");
+            // 圆体（太阳本体 / 雪粒）不在 path 里，按周长补上
+            let circ: f32 = circles.iter().take(nc).map(|c| 2.0 * std::f32::consts::PI * c.2).sum();
+            assert!(
+                len + circ > 25.0,
+                "图标 {name} 总长只有 {:.1}（viewBox 24 单位内应 >25，疑似漏了主体段）",
+                len + circ
+            );
+        }
     }
 }

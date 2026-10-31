@@ -41,6 +41,8 @@ pub struct TextEngine {
     pub ascent: f32,
     pub descent: f32,
     pub upem: u16,
+    /// 字集里实际有的字重（升序）—— CSS 口径选面要用
+    weights: Vec<u32>,
     /// 等宽数字（.num 的 font-variant-numeric: tabular-nums）
     typo: Option<IDWriteTypography>,
     /// 缓存：文本格式（size/lineBox/align/mode）与文本布局（align/text/宽/高/mode）
@@ -82,10 +84,23 @@ impl TextEngine {
                 });
             }
             let upem = m.designUnitsPerEm.max(1);
+            let weights = {
+                let n = family_obj.GetFontCount();
+                let mut ws = Vec::with_capacity(n as usize);
+                for i in 0..n {
+                    if let Ok(f) = family_obj.GetFont(i) {
+                        ws.push(f.GetWeight().0 as u32);
+                    }
+                }
+                ws.sort_unstable();
+                ws.dedup();
+                ws
+            };
             Ok(Self {
                 factory,
                 collection,
                 family: fam,
+                weights,
                 typo,
                 fmt_cache: RefCell::new(HashMap::new()),
                 lay_cache: RefCell::new(HashMap::new()),
@@ -157,10 +172,23 @@ impl TextEngine {
                 });
             }
             let upem = m.designUnitsPerEm.max(1);
+            let weights = {
+                let n = family_obj.GetFontCount();
+                let mut ws = Vec::with_capacity(n as usize);
+                for i in 0..n {
+                    if let Ok(f) = family_obj.GetFont(i) {
+                        ws.push(f.GetWeight().0 as u32);
+                    }
+                }
+                ws.sort_unstable();
+                ws.dedup();
+                ws
+            };
             Ok(Self {
                 factory,
                 collection,
                 family: fam,
+                weights,
                 typo,
                 fmt_cache: RefCell::new(HashMap::new()),
                 lay_cache: RefCell::new(HashMap::new()),
@@ -181,6 +209,41 @@ impl TextEngine {
         self.format_w(size, line_box, align, 400)
     }
 
+    /// 按 CSS Fonts 4 的口径把「想要的字重」映射到**实际可用的字面**。
+    ///
+    /// DWrite 的 `CreateTextFormat` 只按距离取最近面：`500` 会落到 Semibold（520），
+    /// 而浏览器（400–500 区间）是**优先往下找**、500 取 Medium。差这点字重，
+    /// 天气大字的「24°」就宽 4.5px（Semibold 数字/度数号本来就宽 4%）。
+    fn css_weight(&self, want: u16) -> u16 {
+        let ws = &self.weights;
+        if ws.is_empty() {
+            return want;
+        }
+        let w = want as u32;
+        let has = |x: u32| ws.contains(&x);
+        let pick = if (400..=500).contains(&w) {
+            // 400–500：先查 [w,500] 升序，再查 >500 升序，最后往下找
+            // CSS Fonts 4：先 [w,500] 升序，再 <w 降序，最后 >500 升序
+            (w..=500)
+                .find(|x| has(*x))
+                .or_else(|| ws.iter().copied().rev().find(|x| *x < w))
+                .or_else(|| ws.iter().copied().find(|x| *x > 500))
+        } else if w > 500 {
+            // >500 交给 DWrite 自己的「最近面」：字集里 600 只有 520 这一档（700 是另一支），
+            // 按 CSS「≥w 升序」会拿到 700，时钟/网速/音乐整片变粗（实测 p95 67/83）。
+            return want;
+        } else if w < 400 {
+            ws.iter()
+                .copied()
+                .rev()
+                .find(|x| *x <= w)
+                .or_else(|| ws.iter().copied().find(|x| *x > w))
+        } else {
+            None
+        };
+        pick.unwrap_or(w) as u16
+    }
+
     /// 带字重建格式（DWrite 的字重只能在 `CreateTextFormat` 时给，事后改不了）。
     pub fn format_w(
         &self,
@@ -190,10 +253,14 @@ impl TextEngine {
         weight: u16,
     ) -> Result<IDWriteTextFormat> {
         unsafe {
+            let face_w = self.css_weight(weight);
+            if std::env::var("MC_DBG_WEIGHT").is_ok() {
+                eprintln!("want {} → face {} / 可用 {:?}", weight, face_w, self.weights);
+            }
             let fmt = self.factory.CreateTextFormat(
                 &self.family,
                 &self.collection,
-                DWRITE_FONT_WEIGHT(weight as i32),
+                DWRITE_FONT_WEIGHT(face_w as i32),
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
                 size,

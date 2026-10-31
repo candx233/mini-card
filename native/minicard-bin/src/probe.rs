@@ -490,6 +490,9 @@ pub fn weather_sheet(
     use minicard_cards::weather::{Day, Tokens, Weather};
 
     let t = Tokens::weather(320.0, 240.0);
+    if debug_layout {
+        debug_weather_width(te);
+    }
     let w = Weather {
         city: "杭州".into(),
         temp: Some(24.4),
@@ -538,6 +541,27 @@ pub fn music_sheet(
 }
 
 /// 第十三张测试图：日历卡（240×180），2026-10（1 号周四，31 天 → 5 行），今天是 31 号。
+/// 天气大字逐段量宽（诊断用）
+fn debug_weather_width(te: &TextEngine) {
+    use minicard_draw::layout::TextSpec;
+    let mk = |s: &str, tabular: bool| TextSpec {
+        s: s.to_string(),
+        size: 68.0,
+        line_h: 62.56,
+        weight: 500,
+        wrap: false,
+        align: 0,
+        tabular,
+        spacing_em: 0.0,
+    };
+    for tab in [true, false] {
+        for s in ["24", "°", "24°"] {
+            let (w, h) = te.measure(&mk(s, tab), 0.0);
+            minicard_shell::mlog!("debug 天气字宽 tabular={tab} {:?} → {:.2} x {:.2}", s, w, h);
+        }
+    }
+}
+
 pub fn calendar_sheet(
     g: &Gfx,
     te: &TextEngine,

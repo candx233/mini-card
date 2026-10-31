@@ -27,7 +27,9 @@ DST = ROOT / "native" / "assets" / "fonts"
 #   500 Medium  → 只用于温度数字（.w-temp）与节日名（.cal-holiday，固定表）→ 只要界面文案
 WEIGHTS = {
     "Regular": ("MiSans-Regular.woff2", "MiSans-Regular.ttf", True),
-    "Medium": ("MiSans-Medium.woff2", "MiSans-Medium.ttf", False),
+    # Medium 也必须全量：`font-weight:400/500` 在 CSS 口径下会落到 Medium（见 TextEngine::css_weight），
+    # 窄子集里缺字（如「优」）DWrite 会去回退系统字体，字形和推进宽度都对不上，实测渲染成豆腐块。
+    "Medium": ("MiSans-Medium.woff2", "MiSans-Medium.ttf", True),
     "Semibold": ("MiSans-Semibold.woff2", "MiSans-Semibold.ttf", True),
 }
 
