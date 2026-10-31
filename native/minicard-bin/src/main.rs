@@ -252,7 +252,7 @@ impl App {
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
-                || name == "clock-roll"
+                || name == "clock-roll" || name == "net"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -264,6 +264,7 @@ impl App {
                             Ok(())
                         }
                     },
+                    "net" => probe::net_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "clock-roll" => probe::clock_roll(&self.gfx, &self.te, &self.pal, self.roll_ms),
                     "clock" => probe::clock_sheet(
                         &self.gfx,

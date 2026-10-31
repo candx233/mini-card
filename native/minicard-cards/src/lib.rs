@@ -2,4 +2,5 @@
 
 pub mod clock;
 pub mod disks;
+pub mod net;
 pub mod perf;

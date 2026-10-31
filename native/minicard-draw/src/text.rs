@@ -457,8 +457,22 @@ impl TextEngine {
         }
     }
 
+    /// 首行**基线到行盒顶**的距离。
+    ///
+    /// 不能直接用字体 ascent：行盒顶不等于 em 顶，中间隔着 half-leading
+    /// `(line_height - (ascent+descent)·size) / 2`。`line-height:1` 时它是**负的**
+    /// （MiSans 的字面框 1.326em 比行盒高），漏掉这一项会让基线对齐的兄弟节点
+    /// 整体下移 6.2px（网络卡单位「MB/s」就是这么偏的）。
     pub fn ascent_of(&self, t: &crate::layout::TextSpec) -> f32 {
-        self.ascent * t.size
+        let box_em = self.ascent + self.descent;
+        let half_leading = (t.line_h - box_em * t.size) / 2.0;
+        half_leading + self.ascent * t.size
+    }
+
+    /// 字体字面框（ascent, descent）的 em 比例 —— 行内元素（如单位 `<i>`）的盒子
+    /// 高度是字面框而不是行高，卡片算度量时需要。
+    pub fn font_box(&self) -> (f32, f32) {
+        (self.ascent, self.descent)
     }
 }
 

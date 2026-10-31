@@ -379,3 +379,33 @@ pub fn clock_roll(g: &Gfx, te: &TextEngine, pal: &minicard_draw::color::Palette,
     c.set(14, 27, now - Duration::from_millis(roll_ms));
     clock::paint(g, te, pal, &t, &c, "2026年10月31日 周六", "农历九月廿二", now, None)
 }
+
+/// 第八张测试图：网络卡（120×120，上 1.2MB/s、下 8.4MB/s —— 与参考桩同值）。
+pub fn net_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::net::{self, NetState, Tokens};
+    use std::time::Instant;
+
+    let (fa, fd) = te.font_box();
+    let t = Tokens::net(120.0, 120.0, fa, fd);
+    let now = Instant::now();
+    let st = NetState::new(1_258_291.0, 8_807_038.0, now);
+    if debug_layout {
+        let (un, uu) = net::fmt_rate(st.up.value(now));
+        let (dn, du) = net::fmt_rate(st.down.value(now));
+        minicard_shell::mlog!("net 值：{} {} / {} {}", un, uu, dn, du);
+        let tree = net::tree_hook(&t, &un, uu, &dn, du);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        net::dump_layout(&placed, 0);
+        minicard_shell::mlog!(
+            "tokens: r={:.3} pad_lr={:.3} arrow_w={:.3} arrow_fs={:.3} arrow_lh={:.3} arrow_shift={:.3} val_fs={:.3} unit_fs={:.3}",
+            t.r, t.pad_lr, t.arrow_w, t.arrow_fs, t.arrow_lh, t.arrow_shift, t.val_fs, t.unit_fs
+        );
+    }
+    net::paint(g, te, pal, &t, &st, now, None)
+}
