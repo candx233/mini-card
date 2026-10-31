@@ -405,3 +405,21 @@ mod tests {
         assert_eq!(it.progress(now + std::time::Duration::from_millis(600)), 0.0);
     }
 }
+
+/// 点击命中：返回**真实 items 下标**（行序走 `shown`，含「还有 N 项」截断口径）
+pub fn hit(te: &TextEngine, t: &Tokens, items: &[Item], x: f32, y: f32) -> Option<usize> {
+    let tr = tree(t, items);
+    let mut m: &TextEngine = te;
+    let pl = minicard_draw::layout::layout(&tr, (t.w, t.h), &mut m);
+    let id = minicard_draw::layout::hit_id(&pl, x, y)?;
+    let row = if (7300..7400).contains(&id) {
+        id - 7300
+    } else if (7100..7200).contains(&id) {
+        id - 7100
+    } else if (7200..7300).contains(&id) {
+        id - 7200
+    } else {
+        return None;
+    };
+    shown(items).get(row as usize).copied()
+}

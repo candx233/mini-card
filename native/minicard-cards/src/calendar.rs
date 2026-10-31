@@ -600,3 +600,20 @@ mod holiday_tests {
         assert_eq!(super::weekday(2026, 10, 1), 4); // 周四
     }
 }
+
+/// 日历可点区域（翻月）
+pub enum Hit {
+    Prev,
+    Next,
+}
+
+pub fn hit(te: &TextEngine, t: &Tokens, c: &Calendar, x: f32, y: f32) -> Option<Hit> {
+    let tr = tree(t, c);
+    let mut m: &TextEngine = te;
+    let pl = minicard_draw::layout::layout(&tr, (t.w, t.h), &mut m);
+    match minicard_draw::layout::hit_id(&pl, x, y)? {
+        9510 => Some(Hit::Prev),
+        9511 => Some(Hit::Next),
+        _ => None,
+    }
+}

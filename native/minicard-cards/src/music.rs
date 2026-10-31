@@ -410,3 +410,22 @@ mod tests {
         assert_eq!(zero.pct(), 0.0);
     }
 }
+
+/// 音乐卡可点区域
+pub enum Hit {
+    Prev,
+    Play,
+    Next,
+}
+
+pub fn hit(te: &TextEngine, t: &Tokens, m_: &Music, x: f32, y: f32) -> Option<Hit> {
+    let tr = tree(t, m_);
+    let mut m: &TextEngine = te;
+    let pl = minicard_draw::layout::layout(&tr, (t.w, t.h), &mut m);
+    match minicard_draw::layout::hit_id(&pl, x, y)? {
+        9300 => Some(Hit::Prev),
+        9301 => Some(Hit::Play),
+        9302 => Some(Hit::Next),
+        _ => None,
+    }
+}

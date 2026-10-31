@@ -799,3 +799,21 @@ mod tests {
         assert_close(p.children[0].rect.w, 34.0, "row 内容宽");
     }
 }
+
+/// 最深命中的节点 id。点落在节点外返回 None；没 id（id=0）就继续往下找。
+/// 与 `paint` 共用同一棵树 → 点哪儿就是画哪儿，不会出现「看得见点不着」。
+pub fn hit_id(pl: &Placed, x: f32, y: f32) -> Option<u32> {
+    if x < pl.rect.x || y < pl.rect.y || x >= pl.rect.x + pl.rect.w || y >= pl.rect.y + pl.rect.h {
+        return None;
+    }
+    for ch in pl.children.iter().rev() {
+        if let Some(id) = hit_id(ch, x, y) {
+            return Some(id);
+        }
+    }
+    if pl.id != 0 {
+        Some(pl.id)
+    } else {
+        None
+    }
+}

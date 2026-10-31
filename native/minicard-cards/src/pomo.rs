@@ -665,3 +665,26 @@ mod tests {
         assert!(p.animating(now));
     }
 }
+
+/// 番茄钟可点区域
+pub enum Hit {
+    /// −（缩短 5 分钟）
+    Minus,
+    /// +（延长 5 分钟）
+    Plus,
+    /// 底部动作按钮（0 开始 / 1 暂停-继续 / 2 重设 / 3 回到设定）
+    Act(u32),
+}
+
+pub fn hit(te: &TextEngine, t: &Tokens, p: &Pomo, now: Instant, x: f32, y: f32) -> Option<Hit> {
+    let tr = tree(t, p, p.mode, now);
+    let mut m: &TextEngine = te;
+    let pl = minicard_draw::layout::layout(&tr, (t.w, t.h), &mut m);
+    let id = minicard_draw::layout::hit_id(&pl, x, y)?;
+    match id {
+        6100 => Some(Hit::Minus),
+        6101 => Some(Hit::Plus),
+        _ if (6200..6300).contains(&id) => Some(Hit::Act(id - 6200)),
+        _ => None,
+    }
+}

@@ -7,17 +7,19 @@
 //! （D2D 设备上下文是窗口绑定的）。绘制层的笔刷/描边/位图缓存键都带上下文身份，
 //! 所以共享 TextEngine 不会串。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, Result};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use minicard_cards::{calendar, clock, disks, lunar, music, net, perf, pomo, todo, weather};
@@ -29,6 +31,25 @@ use minicard_draw::glass;
 use minicard_draw::text::TextEngine;
 use minicard_shell::gfx::Gfx;
 
+
+/// 窗口线程只往里塞事件，动作在主循环里做（这样能正常借用 wins/cfg，不用满地 static mut）
+enum UiEvent {
+    Click { hwnd: isize, x: i32, y: i32 },
+    DragEnd { hwnd: isize },
+}
+
+static EVENTS: Mutex<Vec<UiEvent>> = Mutex::new(Vec::new());
+
+struct Drag {
+    hwnd: isize,
+    cx: i32,
+    cy: i32,
+    wx: i32,
+    wy: i32,
+    moved: bool,
+}
+
+static DRAG: Mutex<Option<Drag>> = Mutex::new(None);
 
 /// 一张卡窗口 + 它自己的绘制状态
 struct CardWin {
@@ -46,6 +67,10 @@ struct CardWin {
     next_draw: Instant,
     /// 静置节拍（config 的 refresh_ms，钳到 200ms..60s）
     refresh: Duration,
+    /// 在 config.cards 里的下标（拖动/勾选要回写）
+    cfg_idx: usize,
+    /// 该窗口的 DPI（客户区像素 → 逻辑点）
+    dpi: f32,
 }
 
 enum State {
@@ -57,7 +82,7 @@ enum State {
     Todo(Vec<todo::Item>),
     Weather,
     Music,
-    Calendar(calendar::Calendar, u32),
+    Calendar(calendar::Calendar, i32, u32),
 }
 
 /// 本地时间的一小块：年/月/日/时/分/秒/星期（0=周日）
@@ -188,7 +213,7 @@ fn monitor_of(x: i32, y: i32) -> (f32, f32, f32, f32) {
     }
 }
 
-pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: bool, exit_after: Option<u64>) -> Result<()> {
+pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: bool, exit_after: Option<u64>) -> Result<()> {
     // 层级以 config 的 z_order 为准；`--live-topmost` 只是取证覆盖
     let z = if topmost {
         minicard_core::config::ZOrder::Top
@@ -196,6 +221,27 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
         cfg.settings.z_order
     };
     minicard_shell::mlog!("live：层级 {:?}", z);
+
+    // 单实例：两个 live 叠在同一位置时，点击会落到「上面那个进程」的窗口上，
+    // 排查起来像「点了没反应」。用命名互斥量挡掉。
+    {
+        use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+        use windows::Win32::System::Threading::CreateMutexW;
+        let name: Vec<u16> = "MiniCardNativeLiveSingleInstance ".encode_utf16().collect();
+        let h = unsafe { CreateMutexW(None, true, windows::core::PCWSTR(name.as_ptr())) };
+        match h {
+            Ok(m) => {
+                if windows::core::Error::from_thread().code() == ERROR_ALREADY_EXISTS.to_hresult() {
+                    let _ = unsafe { windows::Win32::Foundation::CloseHandle(m) };
+                    minicard_shell::mlog!("已有 live 实例在跑，退出");
+                    return Ok(());
+                }
+                // 句柄故意不关（HANDLE 没有 Drop），进程退出时由系统释放
+                let _keep = m;
+            }
+            Err(e) => minicard_shell::mlog!("单实例互斥量创建失败: {e:?}"),
+        }
+    }
 
     let snap: SharedSnap = data::spawn_sampler();
     let wshared = wx::SharedWeather::default();
@@ -231,7 +277,7 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
         let wall = load_wallpaper();
         let dpi_sys = GetDpiForSystem() as f32;
         let mut wins: Vec<CardWin> = Vec::new();
-        for card in cfg.cards.iter().filter(|c| c.enabled) {
+        for (cfg_idx, card) in cfg.cards.iter().enumerate().filter(|(_, c)| c.enabled) {
             let (win_w, win_h) = (card.size[0], card.size[1]);
             let w_px = (win_w * dpi_sys / 96.0).round() as i32;
             let h_px = (win_h * dpi_sys / 96.0).round() as i32;
@@ -325,7 +371,7 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
                 CardKind::Music => State::Music,
                 CardKind::Calendar => {
                     let (y, m, d, _, _, _) = now_parts();
-                    State::Calendar(calendar_of(y, m, d), d)
+                    State::Calendar(calendar_of(y, m, d), 0, d)
                 }
             };
             // Desktop 档：插到 Progman/WorkerW 锚点正上方（被普通窗口压住 = 与真卡同层）
@@ -345,6 +391,8 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
                 glass: glass_pair,
                 next_draw: Instant::now(),
                 refresh: Duration::from_millis(card.refresh_ms.clamp(200, 60_000)),
+                cfg_idx,
+                dpi,
             });
         }
         minicard_shell::mlog!("live：{} 张卡窗口", wins.len());
@@ -367,6 +415,19 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
                     break;
                 }
             }
+            // 窗口消息里只记事件；动作在这里做（能正常借用 wins/cfg/te）
+            let events: Vec<UiEvent> = { EVENTS.lock().unwrap().drain(..).collect() };
+            for ev in events {
+                match ev {
+                    UiEvent::Click { hwnd, x, y } => {
+                        click(&mut wins, &mut cfg, &te, &pal, HWND(hwnd as *mut _), x, y);
+                    }
+                    UiEvent::DragEnd { hwnd } => {
+                        drag_end(&mut wins, &mut cfg, &wall, blur, HWND(hwnd as *mut _));
+                    }
+                }
+            }
+
             let now = Instant::now();
             let (y, mo, d, hh, mm, _) = now_parts();
             let date = date_text(y, mo, d, now_parts().5);
@@ -529,11 +590,13 @@ fn draw_one(
             music::paint(&win.gfx, te, pal, &mk, &mw, glass_pair)?;
             mw.playing
         }
-        (State::Calendar(c, built_day), _) => {
-            // 跨月或跨天都要重建（今天是哪格、节日标签都会变）
-            if c.year != y || c.month != mo || *built_day != d {
-                *c = calendar_of(y, mo, d);
-                *built_day = d;
+        (State::Calendar(c, off, built_day), _) => {
+            let (cy, cm) = month_with_offset(y, mo, *off);
+            // 回到本月要跟着「今天」走；翻到别的月只在翻页时重建
+            let today_day = if *off == 0 { d } else { 0 };
+            if c.year != cy || c.month != cm || (*off == 0 && *built_day != d) {
+                *c = calendar_for(y, mo, *off, d);
+                *built_day = today_day;
             }
             let ck = calendar::Tokens::cal(win.w, win.h);
             calendar::paint(&win.gfx, te, pal, &ck, c, glass_pair)?;
@@ -543,8 +606,254 @@ fn draw_one(
     Ok(animating)
 }
 
+
+/// 目标月份（相对本月偏移）
+fn month_with_offset(y: i32, m: u32, off: i32) -> (i32, u32) {
+    let total = y * 12 + m as i32 - 1 + off;
+    (total.div_euclid(12), (total.rem_euclid(12) + 1) as u32)
+}
+
+/// 建某个月的日历（off==0 时把今天高亮，其它月不亮）
+fn calendar_for(y: i32, m: u32, off: i32, today: u32) -> calendar::Calendar {
+    let (cy, cm) = month_with_offset(y, m, off);
+    let days = calendar::days_in_month_of(cy, cm);
+    let wd1 = calendar::weekday(cy, cm, 1);
+    let mut c = calendar::Calendar::build(cy, cm, wd1, days, if off == 0 { today } else { 0 });
+    c.holiday = calendar::holiday(cy, cm, if off == 0 { today } else { 1 });
+    c
+}
+
+/// 点一下：按卡片类型派发
+fn click(
+    wins: &mut [CardWin],
+    cfg: &mut Config,
+    te: &TextEngine,
+    _pal: &Palette,
+    hwnd: HWND,
+    px: i32,
+    py: i32,
+) {
+    let Some(win) = wins.iter_mut().find(|w| w.hwnd == hwnd) else {
+        return;
+    };
+    // 客户区像素 → 逻辑点
+    let k = 96.0 / win.dpi.max(1.0);
+    let (x, y) = (px as f32 * k, py as f32 * k);
+    minicard_shell::mlog!("click {:?} at ({x:.1},{y:.1})", win.kind);
+    let now = Instant::now();
+    let (yy, mo, dd, _, _, _) = now_parts();
+
+    match &mut win.state {
+        State::Todo(items) => {
+            let tk = todo::Tokens::todo(win.w, win.h);
+            if let Some(i) = todo::hit(te, &tk, items, x, y) {
+                if let Some(it) = items.get_mut(i) {
+                    let done = !it.done;
+                    it.set_done(done, now);
+                    if let Some(card) = cfg.cards.get_mut(win.cfg_idx) {
+                        if let Some(td) = card.todo.get_mut(i) {
+                            td.done = done;
+                        }
+                    }
+                    save_cfg(cfg);
+                }
+            }
+        }
+        State::Pomo(p) => {
+            let tk = pomo::Tokens::pomo(win.w, win.h);
+            if let Some(h) = pomo::hit(te, &tk, p, now, x, y) {
+                match h {
+                    pomo::Hit::Minus => {
+                        p.dur = p.dur.saturating_sub(5).max(5);
+                        p.reset();
+                    }
+                    pomo::Hit::Plus => {
+                        p.dur = p.dur.saturating_add(5).min(120);
+                        p.reset();
+                    }
+                    pomo::Hit::Act(k) => match k {
+                        0 => p.start(now),
+                        1 => p.toggle(now),
+                        2 => p.reset(),
+                        3 => p.reset(),
+                        _ => {}
+                    },
+                }
+            }
+        }
+        State::Calendar(c, off, _) => {
+            let tk = calendar::Tokens::cal(win.w, win.h);
+            if let Some(h) = calendar::hit(te, &tk, c, x, y) {
+                *off += match h {
+                    calendar::Hit::Prev => -1,
+                    calendar::Hit::Next => 1,
+                };
+                *c = calendar_for(yy, mo, *off, dd);
+            }
+        }
+        State::Music => {
+            let m = media::snapshot();
+            let mw = match &m {
+                Some(s) => music::Music {
+                    title: s.title.clone(),
+                    artist: s.artist.clone(),
+                    playing: s.status == "playing",
+                    position_ms: s.position_ms as u64,
+                    duration_ms: s.duration_ms as u64,
+                },
+                None => music::Music {
+                    title: "歌名".into(),
+                    artist: "歌手".into(),
+                    playing: false,
+                    position_ms: 0,
+                    duration_ms: 0,
+                },
+            };
+            let mk = music::Tokens::music(win.w, win.h);
+            if let Some(h) = music::hit(te, &mk, &mw, x, y) {
+                let cmd = match h {
+                    music::Hit::Prev => "previous",
+                    music::Hit::Play => "toggle",
+                    music::Hit::Next => "next",
+                };
+                if let Err(e) = media::action(cmd) {
+                    minicard_shell::mlog!("音乐控制 {cmd} 失败: {e}");
+                }
+            }
+        }
+        _ => {}
+    }
+    // 立刻重绘一次（别等下一个节拍）
+    win.next_draw = Instant::now();
+}
+
+/// 拖完：写回 config 的位置，并按新位置重切玻璃
+fn drag_end(wins: &mut [CardWin], cfg: &mut Config, wall: &Option<glass::Wall>, blur: f32, hwnd: HWND) {
+    let Some(win) = wins.iter_mut().find(|w| w.hwnd == hwnd) else {
+        return;
+    };
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        return;
+    }
+    let (x, y) = (r.left, r.top);
+    if let Some(card) = cfg.cards.get_mut(win.cfg_idx) {
+        if card.pos != [x as f32, y as f32] {
+            card.pos = [x as f32, y as f32];
+            save_cfg(cfg);
+        }
+    }
+    reslice(win, wall, blur);
+    win.next_draw = Instant::now();
+}
+
+/// 按窗口当前屏幕位置重切玻璃位图
+fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
+    let Some(w) = wall else { return };
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(win.hwnd, &mut r) }.is_err() {
+        return;
+    }
+    let pad_px = ((blur * 3.0).max(60.0) * win.dpi / 96.0).round() as f32;
+    let mon = monitor_of(r.left, r.top);
+    let cap = glass::from_wallpaper(
+        w,
+        (mon.2, mon.3),
+        ((r.left as f32 - mon.0), (r.top as f32 - mon.1)),
+        (
+            (win.w * win.dpi / 96.0).round() as u32,
+            (win.h * win.dpi / 96.0).round() as u32,
+        ),
+        pad_px,
+        blur * win.dpi / 96.0,
+    );
+    match win.gfx.bitmap_from_bgra(&cap.bgra, cap.w, cap.h) {
+        Ok(b) => {
+            let pad_dip = pad_px * 96.0 / win.dpi;
+            win.glass = Some((
+                b,
+                D2D_RECT_F {
+                    left: -pad_dip,
+                    top: -pad_dip,
+                    right: win.w + pad_dip,
+                    bottom: win.h + pad_dip,
+                },
+            ));
+        }
+        Err(e) => minicard_shell::mlog!("重切玻璃失败: {e:?}"),
+    }
+}
+
+fn save_cfg(cfg: &Config) {
+    if let Err(e) = cfg.save() {
+        minicard_shell::mlog!("config 保存失败: {e}");
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_LBUTTONDOWN => {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let mut r = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut r);
+            let _ = SetCapture(hwnd);
+            *DRAG.lock().unwrap() = Some(Drag {
+                hwnd: hwnd.0 as isize,
+                cx: pt.x,
+                cy: pt.y,
+                wx: r.left,
+                wy: r.top,
+                moved: false,
+            });
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let mut g = DRAG.lock().unwrap();
+            if let Some(d) = g.as_mut() {
+                if d.hwnd == hwnd.0 as isize {
+                    let mut pt = POINT::default();
+                    let _ = GetCursorPos(&mut pt);
+                    let (dx, dy) = (pt.x - d.cx, pt.y - d.cy);
+                    if !d.moved && dx.abs() + dy.abs() > 4 {
+                        d.moved = true;
+                    }
+                    if d.moved {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            d.wx + dx,
+                            d.wy + dy,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let d = DRAG.lock().unwrap().take();
+            let _ = ReleaseCapture();
+            if let Some(d) = d {
+                if d.hwnd == hwnd.0 as isize {
+                    if d.moved {
+                        let _ = EVENTS.lock().unwrap().push(UiEvent::DragEnd { hwnd: hwnd.0 as isize });
+                    } else {
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let _ = ScreenToClient(hwnd, &mut pt);
+                        let _ = EVENTS.lock().unwrap().push(UiEvent::Click {
+                            hwnd: hwnd.0 as isize,
+                            x: pt.x,
+                            y: pt.y,
+                        });
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
             PostQuitMessage(0);
             LRESULT(0)
