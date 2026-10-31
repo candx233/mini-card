@@ -211,10 +211,11 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             weight: 400,
             wrap: false,
             align: 0,
+            // 实测 tabular 更接近浏览器（比例数字反而差 13.5 vs 11.6）：
+            // CSS 没写 font-variant-numeric，但 MiSans 的默认数字本来就接近等宽
             tabular: true,
             spacing_em: 0.0,
-        })
-        ;
+        });
         let pct_txt = Node::text(TextSpec {
             s: format!("{}%", pct),
             size: t.pct_fs,
