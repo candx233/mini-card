@@ -444,3 +444,37 @@ pub fn pomo_sheet(
     }
     pomo::paint_static(g, te, pal, &t, &p, now)
 }
+
+/// 第十张测试图：待办卡（240×120），6 项 2 完成 → 显示 3 行 + 「还有 3 项」。
+pub fn todo_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::todo::{self, Item, Tokens};
+    use std::time::Instant;
+
+    let t = Tokens::todo(240.0, 120.0);
+    let items = vec![
+        Item::new("改完自绘九张卡", false),
+        Item::new("跑一遍像素对表", false),
+        Item::new("把勾选动画录下来", true),
+        Item::new("整理施工单", false),
+        Item::new("给用户过一遍", true),
+        Item::new("提交并打 tag", false),
+    ];
+    let now = Instant::now();
+    if debug_layout {
+        minicard_shell::mlog!("todo 项={} 显示={:?}", items.len(), todo::shown(&items));
+        let tree = todo::tree_hook(&t, &items);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        todo::dump_layout(&placed, 0);
+        minicard_shell::mlog!(
+            "tokens: pad_v={:.2} pad_h={:.2} row_h={:.2} gap={:.2} ck={:.2} text_fs={:.2}",
+            t.pad_v, t.pad_h, t.row_h, t.row_gap, t.ck_d, t.text_fs
+        );
+    }
+    todo::paint(g, te, pal, &t, &items, now, None)
+}

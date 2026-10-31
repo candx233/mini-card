@@ -3,6 +3,11 @@
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 /// oklch → sRGB（CSS Color 4 口径：OKLab 矩阵 → 线性 sRGB → 传输曲线）
+/// 8 bit sRGB → D2D 颜色（直通 alpha 1.0）。强调色来自 config，可能是任意 RGB。
+pub fn srgb8(r: u8, g: u8, b: u8) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
+}
+
 pub fn oklch(l: f32, c: f32, h_deg: f32, a: f32) -> D2D1_COLOR_F {
     let h = h_deg.to_radians();
     let (aa, bb) = (c * h.cos(), c * h.sin());
@@ -45,6 +50,10 @@ pub struct Palette {
     pub badge_border: D2D1_COLOR_F,
     /// `color-mix(in oklch, var(--fg) 55%, transparent)`：番茄钟的 −/+ 与禁用态
     pub fg55: D2D1_COLOR_F,
+    /// `--accent`：强调色（待办勾选底、日历今天）。由调用方按 config 的 accent 传进来。
+    pub accent: D2D1_COLOR_F,
+    /// `--on-accent`：压在强调色上的字色
+    pub on_accent: D2D1_COLOR_F,
 }
 
 impl Palette {
@@ -65,6 +74,8 @@ impl Palette {
             track12: D2D1_COLOR_F { a: 0.12, ..fg },
             badge_bg: D2D1_COLOR_F { a: 0.07, ..fg },
             fg55: D2D1_COLOR_F { a: 0.55, ..fg },
+            accent: srgb8(76, 154, 255),
+            on_accent: oklch(0.985, 0.0, 0.0, 1.0),
             badge_border: D2D1_COLOR_F { a: 0.24, ..fg },
         }
     }
