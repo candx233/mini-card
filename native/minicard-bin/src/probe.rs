@@ -353,9 +353,10 @@ pub fn clock_sheet(
     let mut c = Clock::new();
     c.snap(14, 26);
     let date = "2026年10月31日 周六";
-    let lunar = "农历九月廿二";
+    // 农历走真换算（原来是写死的字符串）
+    let lunar = minicard_cards::lunar::lunar_text(2026, 10, 31).unwrap_or_default();
     if debug_layout {
-        let tree = clock::tree_hook(&t, date, lunar);
+        let tree = clock::tree_hook(&t, &date, &lunar);
         let mut m: &TextEngine = te;
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
         clock::dump_layout(&placed, 0);
@@ -364,7 +365,7 @@ pub fn clock_sheet(
             t.r, t.pad_lr, t.pad_tb, t.gap, t.body_pb, t.date_mt, t.time_fs, t.time_lh, t.date_fs, t.date_lh
         );
     }
-    clock::paint(g, te, pal, &t, &c, date, lunar, std::time::Instant::now(), None)
+    clock::paint(g, te, pal, &t, &c, &date, &lunar, std::time::Instant::now(), None)
 }
 
 /// 滚动中途的一帧：从 14:26 跳到 14:27，并把时间轴拨到滚动开始后 120ms。
