@@ -242,6 +242,56 @@ pub fn draw_round(
     Ok(())
 }
 
+
+/// 旋转着画（音乐卡封面转动）。圆角遮罩与位图**在同一个变换下**推入层，
+/// 所以遮罩跟着转 —— 否则转起来会看到「圆角不转、图像在方框里转」的穿帮。
+pub fn draw_round_rotated(
+    g: &Gfx,
+    bmp: &ID2D1Bitmap1,
+    src: D2D_RECT_F,
+    dst: D2D_RECT_F,
+    radius: f32,
+    angle_rad: f32,
+) -> Result<()> {
+    let center = windows_numerics::Vector2 {
+        X: (dst.left + dst.right) / 2.0,
+        Y: (dst.top + dst.bottom) / 2.0,
+    };
+    unsafe {
+        let mut old = windows_numerics::Matrix3x2::default();
+        g.d2d.GetTransform(&mut old);
+        let rot = crate::paint::rotation_rad(angle_rad, center.X, center.Y);
+        let m = rot * old;
+        g.d2d.SetTransform(&m);
+        let r = draw_round(g, bmp, src, dst, radius);
+        g.d2d.SetTransform(&old);
+        r
+    }
+}
+
+/// 把一张图按角度画到 dst（不裁圆角，给需要方形旋转的场合）。
+pub fn draw_rotated(
+    g: &Gfx,
+    bmp: &ID2D1Bitmap1,
+    src: D2D_RECT_F,
+    dst: D2D_RECT_F,
+    angle_rad: f32,
+) -> Result<()> {
+    let center = windows_numerics::Vector2 {
+        X: (dst.left + dst.right) / 2.0,
+        Y: (dst.top + dst.bottom) / 2.0,
+    };
+    unsafe {
+        let mut old = windows_numerics::Matrix3x2::default();
+        g.d2d.GetTransform(&mut old);
+        let m = crate::paint::rotation_rad(angle_rad, center.X, center.Y) * old;
+        g.d2d.SetTransform(&m);
+        let r = draw(g, bmp, src, dst);
+        g.d2d.SetTransform(&old);
+        r
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +403,23 @@ mod tests {
         assert!(decode(&[]).is_err(), "空输入应报错");
         assert!(decode(b"not an image").is_err(), "垃圾数据应报错");
         assert!(decode_data_url("data:image/png;base64,bm90IGFuIGltYWdl").is_err());
+    }
+
+    #[test]
+    fn 旋转按弧度进_九十度就是转四分之一圈() {
+        let m = crate::paint::rotation_rad(std::f32::consts::FRAC_PI_2, 0.0, 0.0);
+        // D2D 行向量口径、y 向下：θ=90° → M11=cos=0、M12=sin=1、M21=-1、M22=0
+        assert!(m.M11.abs() < 1e-5, "M11={}", m.M11);
+        assert!((m.M12 - 1.0).abs() < 1e-5, "M12={}（≈1 说明真的是 90°，不是 90/57.3）", m.M12);
+        assert!((m.M21 + 1.0).abs() < 1e-5, "M21={}", m.M21);
+        assert!(m.M22.abs() < 1e-5, "M22={}", m.M22);
+        // 绕点旋转：中心点的位移应为 0
+        let c = crate::paint::rotation_rad(std::f32::consts::FRAC_PI_2, 50.0, 80.0);
+        // 把中心点 (50,80) 用行向量变换回去，应原地不动
+        let (x, y) = (50.0, 80.0);
+        let tx = x * c.M11 + y * c.M21 + c.M31;
+        let ty = x * c.M12 + y * c.M22 + c.M32;
+        assert!((tx - 50.0).abs() < 1e-4 && (ty - 80.0).abs() < 1e-4, "中心被移动了 ({tx},{ty})");
     }
 
     #[test]

@@ -222,3 +222,87 @@ pub fn image_sheet(g: &Gfx, cover: &std::path::Path) -> Result<()> {
     g.end()?;
     Ok(())
 }
+
+/// 第五张测试图（连拍）：运动中的字形 / 旋转 / 亚像素条。
+///
+/// 版面（240×240）：
+/// ① 封面 (20,8)-(110,98) 每帧转 0.1 rad —— 目视用（圆角遮罩跟着转的穿帮在这里看）
+/// ② 白长条 中心 (175,50)、120×18，每帧转 0.1 rad（放在右上角，测量窗里不混别的元素） —— **数值用**：长条的朝向由协方差主轴量，
+///    比「彩色象限质心」稳（质心会被方形框的裁切偏差带跑）
+/// ③ 文字「运动中的字形」每帧右移 2px（y 110..136）
+/// ④ 圆角条 (10,200) 宽 20 + 0.37px/帧
+pub fn motion(
+    g: &Gfx,
+    te: &TextEngine,
+    cover: Option<&std::path::Path>,
+    frame: u32,
+) -> Result<()> {
+    use minicard_draw::image;
+    use windows_numerics::Matrix3x2;
+
+    let f = frame as f32;
+    g.begin()?;
+    g.push_clip()?;
+
+    // ① 旋转封面（圆角遮罩与位图同一变换）
+    if let Some(p) = cover {
+        if let Ok(img) = image::decode_file(p) {
+            let bmp = image::bitmap(g, &img)?;
+            let dst = D2D_RECT_F { left: 10.0, top: 8.0, right: 90.0, bottom: 88.0 };
+            let src = image::cover_src(&img, dst.right - dst.left, dst.bottom - dst.top);
+            image::draw_round_rotated(g, &bmp, src, dst, 18.0, f * 0.1)?;
+        }
+    }
+
+    // ② 旋转白长条（数值判据用）
+    set_color(g, WHITE)?;
+    unsafe {
+        let mut old = Matrix3x2::default();
+        g.d2d.GetTransform(&mut old);
+        let m = minicard_draw::paint::rotation_rad(f * 0.1, 175.0, 50.0) * old;
+        g.d2d.SetTransform(&m);
+    }
+    fill_round(
+        g,
+        D2D_RECT_F { left: 115.0, top: 41.0, right: 235.0, bottom: 59.0 },
+        9.0,
+    )?;
+    unsafe {
+        let mut old = Matrix3x2::default();
+        g.d2d.GetTransform(&mut old);
+        // 复位回上面的基准（begin 之后是单位阵）
+        g.d2d.SetTransform(&Matrix3x2 {
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 0.0,
+            M32: 0.0,
+        });
+        let _ = old;
+    }
+
+    // ③ 平移文字
+    let fmt = te.format_mode(20.0, 23.0, 0, minicard_draw::text::Mode::Clip)?;
+    let lay = te.layout_mode(0, &fmt, "运动中的字形", 200.0, 23.0, false, minicard_draw::text::Mode::Clip)?;
+    unsafe {
+        g.d2d.DrawTextLayout(
+            windows_numerics::Vector2 { X: 10.0 + f * 2.0, Y: 110.0 },
+            &lay,
+            &g.brush,
+            windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+    }
+
+    // ④ 亚像素条
+    let w = 20.0 + f * 0.37;
+    fill_round(
+        g,
+        D2D_RECT_F { left: 10.0, top: 200.0, right: 10.0 + w, bottom: 210.0 },
+        5.0,
+    )?;
+
+    g.pop_clip();
+    g.end()?;
+    Ok(())
+}

@@ -187,6 +187,18 @@ pub fn stroke_path(g: &Gfx, p: &Path, width: f32, round: bool) -> Result<()> {
     Ok(())
 }
 
+/// 绕点旋转（**弧度**进，内部换成度）。
+///
+/// 坑：`windows_numerics::Matrix3x2::rotation_around` 文档写的是 `angle`，但底层直接调
+/// `D2D1MakeRotateMatrix(d2d1.dll)`，那个 API 的单位是**度**。喂弧度会得到 1/57.3 的转动量
+/// —— 0.3 rad 看上去只转了 0.3°，画面上几乎不动，很容易误判成「变换没生效」。
+pub fn rotation_rad(angle_rad: f32, cx: f32, cy: f32) -> windows_numerics::Matrix3x2 {
+    windows_numerics::Matrix3x2::rotation_around(
+        angle_rad.to_degrees(),
+        windows_numerics::Vector2 { X: cx, Y: cy },
+    )
+}
+
 /// 轴向裁剪入栈（音乐卡跑马灯、文字溢出裁切）；必须与 `pop_clip` 成对。
 pub fn push_clip(g: &Gfx, rect: D2D_RECT_F) {
     unsafe {

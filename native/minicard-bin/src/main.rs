@@ -231,6 +231,10 @@ impl App {
     }
 
     fn animating(&self) -> bool {
+        // 连拍探针要按 60fps 跑满（否则帧循环停在等消息上、只出零星几帧）
+        if self.probe.as_deref() == Some("motion") {
+            return true;
+        }
         let now = Instant::now();
         self.tweens.iter().flatten().any(|t| t.live(now))
     }
@@ -238,7 +242,9 @@ impl App {
     fn repaint(&mut self) {
         // 形状探针：只画测试图，不跑卡片视图
         if let Some(name) = self.probe.clone() {
-            if name == "shapes" || name == "shapes2" || name == "text" || name == "image" {
+            if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
+                || name == "motion"
+            {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
                     "shapes2" => probe::shapes2(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -249,6 +255,12 @@ impl App {
                             Ok(())
                         }
                     },
+                    "motion" => probe::motion(
+                        &self.gfx,
+                        &self.te,
+                        self.cover.as_deref(),
+                        self.frames,
+                    ),
                     _ => probe::text_sheet(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
                 };
                 if let Err(e) = r {
@@ -517,6 +529,7 @@ fn main() -> Result<()> {
         );
         mem::log("字体载入后");
 
+        let animate_probe = args.probe.as_deref() == Some("motion");
         let mut app = Box::new(App {
             gfx,
             te,
@@ -530,7 +543,7 @@ fn main() -> Result<()> {
             exit_after: args.exit_after.or(if args.dump.is_some() { Some(2500) } else { None }),
             frames: 0,
             freeze: args.freeze,
-            animate: args.animate,
+            animate: args.animate || animate_probe,
             tweens: Vec::new(),
             last_frame: None,
             frame_dt: Vec::new(),
