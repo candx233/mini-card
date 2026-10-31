@@ -186,6 +186,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             wrap: false,
             align: 2, // 居中
             tabular: false,
+            spacing_em: 0.0,
         })
         .id(2000 + i as u32);
 
@@ -211,6 +212,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             wrap: false,
             align: 0,
             tabular: true,
+            spacing_em: 0.0,
         })
         ;
         let pct_txt = Node::text(TextSpec {
@@ -221,6 +223,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             wrap: false,
             align: 1,
             tabular: true,
+            spacing_em: 0.0,
         })
         .id(3000 + i as u32);
         let rowline = Node::new(Dir::Row)

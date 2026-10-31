@@ -158,7 +158,16 @@ fn tree(t: &Tokens, rows: &[Row]) -> Node {
 }
 
 fn text_spec(s: &str, size: f32, line_h: f32, align: u8) -> TextSpec {
-    TextSpec { s: s.to_string(), size, line_h, weight: 400, wrap: false, align, tabular: false }
+    TextSpec {
+        s: s.to_string(),
+        size,
+        line_h,
+        weight: 400,
+        wrap: false,
+        align,
+        tabular: false,
+        spacing_em: 0.0,
+    }
 }
 
 /// 画一棵排好版的树。

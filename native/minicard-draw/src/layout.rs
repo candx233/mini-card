@@ -159,11 +159,22 @@ pub struct TextSpec {
     pub align: u8,
     /// 等宽数字（CSS `font-variant-numeric: tabular-nums`）
     pub tabular: bool,
+    /// 字距，单位 em（CSS `letter-spacing: -0.02em` → -0.02）
+    pub spacing_em: f32,
 }
 
 impl TextSpec {
     pub fn new(s: impl Into<String>, size: f32, line_h: f32) -> Self {
-        Self { s: s.into(), size, line_h, weight: 400, wrap: false, align: 0, tabular: false }
+        Self {
+            s: s.into(),
+            size,
+            line_h,
+            weight: 400,
+            wrap: false,
+            align: 0,
+            tabular: false,
+            spacing_em: 0.0,
+        }
     }
 }
 
@@ -209,6 +220,13 @@ impl Node {
     pub fn align_text(mut self, a: u8) -> Self {
         if let Content::Text(t) = &mut self.content {
             t.align = a;
+        }
+        self
+    }
+    /// 字距（em）
+    pub fn spacing(mut self, em: f32) -> Self {
+        if let Content::Text(t) = &mut self.content {
+            t.spacing_em = em;
         }
         self
     }

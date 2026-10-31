@@ -339,3 +339,29 @@ pub fn disks_sheet(
     }
     disks::paint(g, te, pal, &t, &list, None, true, false)
 }
+
+/// 第七张测试图：时钟卡（240×120，静止态；日期取固定串以便与浏览器对比）。
+pub fn clock_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::clock::{self, Clock, Tokens};
+
+    let t = Tokens::clock(240.0, 120.0);
+    let mut c = Clock::new();
+    c.snap(14, 26);
+    let date = "2026年10月31日 星期六";
+    if debug_layout {
+        let tree = clock::tree_hook(&t, date);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        clock::dump_layout(&placed, 0);
+        minicard_shell::mlog!(
+            "tokens: r={:.3} pad_lr={:.3} pad_tb={:.3} gap={:.3} body_pb={:.3} date_mt={:.3} time_fs={:.3} time_lh={:.3} date_fs={:.3} date_lh={:.3}",
+            t.r, t.pad_lr, t.pad_tb, t.gap, t.body_pb, t.date_mt, t.time_fs, t.time_lh, t.date_fs, t.date_lh
+        );
+    }
+    clock::paint(g, te, pal, &t, &c, date, std::time::Instant::now(), None)
+}

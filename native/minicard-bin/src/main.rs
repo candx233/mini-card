@@ -247,7 +247,7 @@ impl App {
         // 形状探针：只画测试图，不跑卡片视图
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
-                || name == "motion" || name == "disks"
+                || name == "motion" || name == "disks" || name == "clock"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -259,6 +259,12 @@ impl App {
                             Ok(())
                         }
                     },
+                    "clock" => probe::clock_sheet(
+                        &self.gfx,
+                        &self.te,
+                        &self.pal,
+                        self.debug_layout,
+                    ),
                     "disks" => probe::disks_sheet(
                         &self.gfx,
                         &self.te,
@@ -530,7 +536,19 @@ fn main() -> Result<()> {
         }
         mem::log("玻璃准备后");
 
-        let te = TextEngine::new(&args.font, "MiSans")?;
+        // 按字重装真字面：只装 Regular 时 600 是 DWrite 合成加粗，advance 与字形都会偏
+        let dir = args.font.parent().unwrap_or(std::path::Path::new("."));
+        let mut files: Vec<std::path::PathBuf> = ["MiSans-Regular.ttf", "MiSans-Medium.ttf", "MiSans-Semibold.ttf"]
+            .iter()
+            .map(|n| dir.join(n))
+            .filter(|p| p.exists())
+            .collect();
+        if files.is_empty() {
+            files.push(args.font.clone());
+        }
+        let refs: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
+        let te = TextEngine::new_weights(&refs, "MiSans")?;
+        mlog!("字体：{} 个字面", refs.len());
         mlog!(
             "字体 MiSans 载入：ascent {:.4}em / descent {:.4}em / upem {}",
             te.ascent,
