@@ -457,6 +457,30 @@ impl TextEngine {
         }
     }
 
+    /// 自定义文字栅格化参数：`gamma` 与 `enhanced_contrast` 决定抗锯齿的中间调曲线。
+    ///
+    /// 默认参数下 D2D 的灰阶抗锯齿在字形边缘掉得比 Chrome 快（同一处斜坡：
+    /// 参考 242→164→40，自绘 242→222→44），整卡像素差里最大的一块就是这一项。
+    /// 用 `--gamma/--contrast` 可以量化扫一遍。
+    pub fn rendering_params(
+        &self,
+        gamma: f32,
+        enhanced_contrast: f32,
+    ) -> windows::core::Result<windows::Win32::Graphics::DirectWrite::IDWriteRenderingParams> {
+        use windows::Win32::Graphics::DirectWrite::{
+            DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        };
+        unsafe {
+            self.factory.CreateCustomRenderingParams(
+                gamma,
+                enhanced_contrast,
+                0.0,
+                DWRITE_PIXEL_GEOMETRY_FLAT,
+                DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+            )
+        }
+    }
+
     /// 首行**基线到行盒顶**的距离。
     ///
     /// 不能直接用字体 ascent：行盒顶不等于 em 顶，中间隔着 half-leading

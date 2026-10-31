@@ -65,6 +65,8 @@ struct Args {
     debug_layout: bool,
     roll_ms: u64,
     pomo_remain: u64,
+    gamma: f32,
+    contrast: f32,
 }
 
 impl Args {
@@ -96,6 +98,9 @@ impl Args {
             debug_layout: false,
             roll_ms: 120,
             pomo_remain: 0,
+            gamma: 0.0,
+            contrast: 0.0,
+            // (duplicate gamma/contrast removed)
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -135,6 +140,8 @@ impl Args {
                 "--debug-layout" => a.debug_layout = true,
                 "--roll-ms" => a.roll_ms = next(&mut i).parse().unwrap_or(120),
                 "--pomo-remain" => a.pomo_remain = next(&mut i).parse().unwrap_or(0),
+                "--gamma" => a.gamma = next(&mut i).parse().unwrap_or(0.0),
+                "--contrast" => a.contrast = next(&mut i).parse().unwrap_or(0.0),
                 "--viewer" => {
                     let s = next(&mut i);
                     let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
@@ -597,6 +604,17 @@ fn main() -> Result<()> {
             roll_ms: args.roll_ms,
             pomo_remain: args.pomo_remain,
         });
+
+    // 文字栅格化参数（只有显式给了 --gamma 才动，默认沿用系统）
+    if args.gamma > 0.0 {
+        match app.te.rendering_params(args.gamma, args.contrast) {
+            Ok(rp) => {
+                let _ = app.gfx.d2d.SetTextRenderingParams(&rp);
+            }
+            Err(e) => crate::mlog!("文字参数设置失败: {e:?}"),
+        }
+    }
+
         app.repaint();
 
         let ptr = Box::into_raw(app);
