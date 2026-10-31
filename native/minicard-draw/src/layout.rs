@@ -70,6 +70,10 @@ pub struct Style {
     pub align: Align,
     /// 自己在父容器里的交叉轴对齐（CSS `align-self`）；`None` = 继承父的 `align`
     pub self_align: Option<Align>,
+    /// 宽高比（宽 ÷ 高，CSS `aspect-ratio`）：主轴尺寸为 `Auto` 时按交叉轴算出来
+    pub aspect: Option<f32>,
+    /// 交叉轴上限（行容器里是 max-height，列容器里是 max-width）
+    pub max_cross: Option<f32>,
     pub justify: Justify,
 }
 
@@ -86,6 +90,8 @@ impl Style {
             basis: None,
             align: Align::Stretch,
             self_align: None,
+            aspect: None,
+            max_cross: None,
             justify: Justify::Start,
         }
     }
@@ -120,6 +126,16 @@ impl Style {
     }
     pub fn self_align(mut self, a: Align) -> Self {
         self.self_align = Some(a);
+        self
+    }
+    /// 宽高比（宽 ÷ 高）
+    pub fn aspect(mut self, ratio: f32) -> Self {
+        self.aspect = Some(ratio);
+        self
+    }
+    /// 交叉轴上限（行里是 max-height，列里是 max-width）
+    pub fn max_cross(mut self, v: f32) -> Self {
+        self.max_cross = Some(v);
         self
     }
     pub fn justify(mut self, j: Justify) -> Self {
@@ -234,6 +250,14 @@ impl Node {
     fn mar_h(&self) -> f32 {
         self.style.mar[0] + self.style.mar[2]
     }
+    /// 交叉轴方向的 margin 总和
+    fn mar_cross(&self, row: bool) -> f32 {
+        if row {
+            self.style.mar[0] + self.style.mar[2]
+        } else {
+            self.style.mar[1] + self.style.mar[3]
+        }
+    }
     fn pad_w(&self) -> f32 {
         self.style.pad[1] + self.style.pad[3]
     }
@@ -307,10 +331,16 @@ fn measure(n: &Node, avail_w: f32, avail_h: f32, m: &mut dyn Measurer) -> (f32, 
     if let Content::Text(t) = &n.content {
         let max_w = n.style.w.resolve(avail_w).unwrap_or(avail_w).max(0.0);
         let (w, h) = m.text(t, max_w);
+        // 显式尺寸优先于内容尺寸（与 CSS 同口径）：`width:100%` 的文字盒就是撑满的
+        let w = n.style.w.resolve(avail_w).unwrap_or(w + n.pad_w());
+        let h = n.style.h.resolve(avail_h).unwrap_or(h + n.pad_h());
         return (w, h);
     }
     if n.is_leaf() {
-        return (0.0, 0.0);
+        // 叶子盒子没有内容：只有显式尺寸能给它大小（进度条就是这种）
+        let w = n.style.w.resolve(avail_w).unwrap_or(n.pad_w());
+        let h = n.style.h.resolve(avail_h).unwrap_or(n.pad_h());
+        return (w, h);
     }
     let inner_w = (avail_w - n.pad_w()).max(0.0);
     let inner_h = (avail_h - n.pad_h()).max(0.0);
@@ -376,21 +406,41 @@ fn place(n: &Node, rect: Rect, m: &mut dyn Measurer) -> Placed {
     for c in &n.children {
         let (iw, ih) = measure(c, inner.w, inner.h, m);
         let (intr_main, intr_cross) = if row { (iw, ih) } else { (ih, iw) };
+        let al = c.style.self_align.unwrap_or(n.style.align);
+        let cross_dim = if row { c.style.h } else { c.style.w };
+        // 交叉轴先定：CSS 里 `align-self:stretch` 的盒子高度要**减掉自身 margin**
+        let mut cross = if let Some(v) = cross_dim.resolve(inner_cross) {
+            v
+        } else if al == Align::Stretch {
+            (inner_cross - c.mar_cross(row)).max(0.0)
+        } else {
+            intr_cross
+        };
+        if let Some(mx) = c.style.max_cross {
+            cross = cross.min(mx);
+        }
+        let main_dim = if row { c.style.w } else { c.style.h };
         let main = c
             .style
             .basis
-            .or_else(|| if row { c.style.w.resolve(inner.w) } else { c.style.h.resolve(inner.h) })
-            .unwrap_or(intr_main);
-        let cross_dim = if row { c.style.h } else { c.style.w };
-        let cross = match (c.style.align, cross_dim) {
-            _ if cross_dim != Dim::Auto => cross_dim.resolve(inner_cross).unwrap_or(intr_cross),
-            _ => intr_cross,
-        };
+            .or_else(|| main_dim.resolve(inner_main))
+            .unwrap_or_else(|| match c.style.aspect {
+                // `aspect-ratio`：主轴由交叉轴推出来（方形徽标就是这么来的）
+                Some(a) => cross * a,
+                None => intr_main,
+            });
         slots.push(Slot { main, cross, grow: c.style.grow });
     }
 
     let gaps = n.style.gap * (n.children.len() as f32 - 1.0).max(0.0);
-    let used: f32 = slots.iter().map(|s| s.main).sum::<f32>() + gaps;
+    // 子节点的 margin 也占主轴空间 —— 只在定位时加、不进 `used`，会让 justify/居中算错，
+    // 症状是「整块内容整体下移/右移一小段」（磁盘卡差 5.6px 就是这么来的）
+    let margins: f32 = n
+        .children
+        .iter()
+        .map(|c| mar_main(&c.style.mar, row) + mar_main_end(&c.style.mar, row))
+        .sum();
+    let used: f32 = slots.iter().map(|s| s.main).sum::<f32>() + gaps + margins;
     let mut free = inner_main - used;
 
     // grow：只分正剩余；`basis:0 + grow:1` 即等分
@@ -437,23 +487,17 @@ fn place(n: &Node, rect: Rect, m: &mut dyn Measurer) -> Placed {
             cursor += n.style.gap + extra_gap;
         }
 
-        // 交叉轴：尺寸与落位。`align-self` 缺省才看父的 `align-items`（CSS 口径）
+        // 交叉轴落位。`align-self` 缺省才看父的 `align-items`（CSS 口径）
         let al = c.style.self_align.unwrap_or(n.style.align);
-        let cross_dim = if row { c.style.h } else { c.style.w };
-        let stretch = al == Align::Stretch && cross_dim == Dim::Auto;
-        let cross_size = if stretch { inner_cross } else { s.cross };
-        let cross_pos = if stretch {
-            0.0
-        } else {
-            match al {
-                Align::Start | Align::Stretch => 0.0,
-                Align::Center => (inner_cross - cross_size) / 2.0,
-                Align::End => inner_cross - cross_size,
-                Align::Baseline => match &c.content {
-                    Content::Text(t) => max_asc - m.ascent(t),
-                    _ => 0.0,
-                },
-            }
+        let cross_size = s.cross;
+        let cross_pos = match al {
+            Align::Start | Align::Stretch => 0.0,
+            Align::Center => (inner_cross - cross_size) / 2.0,
+            Align::End => inner_cross - cross_size,
+            Align::Baseline => match &c.content {
+                Content::Text(t) => max_asc - m.ascent(t),
+                _ => 0.0,
+            },
         } + mar_cross_start(&mar, row);
 
         let child_rect = if row {

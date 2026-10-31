@@ -34,6 +34,15 @@ pub struct Palette {
     pub shadow: D2D1_COLOR_F,
     pub track: D2D1_COLOR_F,
     pub fill: D2D1_COLOR_F,
+    /// `--muted`：次级文字（徽标字母、歌手名、单位说明）
+    pub muted: D2D1_COLOR_F,
+    /// `--warn`：告警（磁盘超阈值、天气异常）
+    pub warn: D2D1_COLOR_F,
+    /// 进度条底轨的「淡」档（磁盘卡用 12%，性能卡用 25%）
+    pub track12: D2D1_COLOR_F,
+    /// 徽标底色 / 描边（CSS `color-mix(fg 7%/24%)`）
+    pub badge_bg: D2D1_COLOR_F,
+    pub badge_border: D2D1_COLOR_F,
 }
 
 impl Palette {
@@ -49,6 +58,11 @@ impl Palette {
             shadow: D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.45 },
             track: D2D1_COLOR_F { a: 0.25, ..fg },
             fill: D2D1_COLOR_F { a: 0.90, ..fg },
+            muted: oklch(0.85, 0.02, 261.1, 1.0),
+            warn: oklch(0.740, 0.155, 60.0, 1.0),
+            track12: D2D1_COLOR_F { a: 0.12, ..fg },
+            badge_bg: D2D1_COLOR_F { a: 0.07, ..fg },
+            badge_border: D2D1_COLOR_F { a: 0.24, ..fg },
         }
     }
 }

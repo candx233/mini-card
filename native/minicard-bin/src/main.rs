@@ -62,6 +62,7 @@ struct Args {
     viewer: Option<(i32, i32, i32, i32)>,
     probe: Option<String>,
     cover: Option<PathBuf>,
+    debug_layout: bool,
 }
 
 impl Args {
@@ -90,6 +91,7 @@ impl Args {
             viewer: None,
             probe: None,
             cover: None,
+            debug_layout: false,
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -126,6 +128,7 @@ impl Args {
                 "--desktop" => a.desktop_layer = true,
                 "--probe" => a.probe = Some(next(&mut i)),
                 "--cover" => a.cover = Some(PathBuf::from(next(&mut i))),
+                "--debug-layout" => a.debug_layout = true,
                 "--viewer" => {
                     let s = next(&mut i);
                     let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
@@ -181,6 +184,7 @@ struct App {
     snap_text: bool,
     probe: Option<String>,
     cover: Option<PathBuf>,
+    debug_layout: bool,
 }
 
 impl App {
@@ -243,7 +247,7 @@ impl App {
         // 形状探针：只画测试图，不跑卡片视图
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
-                || name == "motion"
+                || name == "motion" || name == "disks"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -255,6 +259,12 @@ impl App {
                             Ok(())
                         }
                     },
+                    "disks" => probe::disks_sheet(
+                        &self.gfx,
+                        &self.te,
+                        &self.pal,
+                        self.debug_layout,
+                    ),
                     "motion" => probe::motion(
                         &self.gfx,
                         &self.te,
@@ -551,6 +561,7 @@ fn main() -> Result<()> {
             snap_text: args.snap_text,
             probe: args.probe.clone(),
             cover: args.cover.clone(),
+            debug_layout: args.debug_layout,
         });
         app.repaint();
 

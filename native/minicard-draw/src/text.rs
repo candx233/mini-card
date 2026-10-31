@@ -19,7 +19,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
     DWRITE_WORD_WRAPPING_WRAP,
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 
 /// 排版模式：对应 CSS 的 `white-space` / `text-overflow` 组合。
@@ -190,10 +190,10 @@ impl TextEngine {
         if let Some(f) = self.fmt_cache.borrow().get(&key) {
             return Ok(f.clone());
         }
-        let a = if align == 0 {
-            DWRITE_TEXT_ALIGNMENT_LEADING
-        } else {
-            DWRITE_TEXT_ALIGNMENT_TRAILING
+        let a = match align {
+            1 => DWRITE_TEXT_ALIGNMENT_TRAILING,
+            2 => DWRITE_TEXT_ALIGNMENT_CENTER,
+            _ => DWRITE_TEXT_ALIGNMENT_LEADING,
         };
         let f = self.format(size, line_box, a)?;
         unsafe {

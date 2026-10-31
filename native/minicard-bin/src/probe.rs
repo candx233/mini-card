@@ -306,3 +306,36 @@ pub fn motion(
     g.end()?;
     Ok(())
 }
+
+/// 第六张测试图：磁盘卡（240×180、5 盘、FIXED_SCALE 档）。
+///
+/// 固定数值与 `docs/verify/minicard_center/_card_ref.py` 里的 SNAP 一致，
+/// 所以能和无头 Edge 渲出的真 WebView2 版逐像素比。
+pub fn disks_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::disks::{self, Disk, Tokens};
+
+    let list = vec![
+        Disk { name: "C:".into(), used: 300_000_000_000, total: 500_000_000_000 },
+        Disk { name: "D:".into(), used: 420_000_000_000, total: 500_000_000_000 },
+        Disk { name: "E:".into(), used: 120_000_000_000, total: 400_000_000_000 },
+        Disk { name: "F:".into(), used: 60_000_000_000, total: 300_000_000_000 },
+        Disk { name: "G:".into(), used: 190_000_000_000, total: 200_000_000_000 },
+    ];
+    let t = Tokens::disks(240.0, 180.0, list.len());
+    if debug_layout {
+        let tree = disks::tree_hook(&t, &list);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        disks::dump_layout(&placed, 0);
+        minicard_shell::mlog!(
+            "tokens: r={:.2} pad_lr={:.2} pad_tb={:.2} rows_gap={:.2} rows_pb={:.3} row_gap={:.2} row_pt={:.3} badge_mt={:.3} dbody_gap={:.3} fs={:.3} lh={:.4} bar_h={:.2}",
+            t.r, t.pad_lr, t.pad_tb, t.rows_gap, t.rows_pb, t.row_gap, t.row_pt, t.badge_mt, t.dbody_gap, t.fs, t.line_h, t.bar_h
+        );
+    }
+    disks::paint(g, te, pal, &t, &list, None, true, false)
+}
