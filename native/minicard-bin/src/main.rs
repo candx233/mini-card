@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anim;
+mod probe;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -59,6 +60,7 @@ struct Args {
     animate: bool,
     desktop_layer: bool,
     viewer: Option<(i32, i32, i32, i32)>,
+    probe: Option<String>,
 }
 
 impl Args {
@@ -85,6 +87,7 @@ impl Args {
             animate: false,
             desktop_layer: false,
             viewer: None,
+            probe: None,
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -119,6 +122,7 @@ impl Args {
                 "--snap-text" => a.snap_text = true,
                 "--animate" => a.animate = true,
                 "--desktop" => a.desktop_layer = true,
+                "--probe" => a.probe = Some(next(&mut i)),
                 "--viewer" => {
                     let s = next(&mut i);
                     let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
@@ -172,6 +176,7 @@ struct App {
     frame_dt: Vec<f32>,
     frame_draw_us: Vec<f32>,
     snap_text: bool,
+    probe: Option<String>,
 }
 
 impl App {
@@ -227,6 +232,20 @@ impl App {
     }
 
     fn repaint(&mut self) {
+        // 形状探针：只画测试图，不跑卡片视图
+        if let Some(name) = self.probe.clone() {
+            if name == "shapes" {
+                if let Err(e) = probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h) {
+                    mlog!("探针 paint 失败: {e:?}");
+                }
+                self.frames += 1;
+                if !self.first_frame {
+                    self.first_frame = true;
+                    mlog!("探针 {} 首帧 {:.1} ms", name, self.t0.elapsed().as_secs_f64() * 1000.0);
+                }
+                return;
+            }
+        }
         let mut rows = self.rows();
         let now = Instant::now();
         for (i, row) in rows.iter_mut().enumerate() {
@@ -501,6 +520,7 @@ fn main() -> Result<()> {
             frame_dt: Vec::new(),
             frame_draw_us: Vec::new(),
             snap_text: args.snap_text,
+            probe: args.probe.clone(),
         });
         app.repaint();
 
