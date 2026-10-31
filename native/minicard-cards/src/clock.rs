@@ -19,12 +19,11 @@ use windows_numerics::Vector2;
 
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
-use minicard_draw::paint::{fill_round, push_clip, pop_clip, set_color, stroke_round};
+use minicard_draw::paint::{fill_round, set_color, stroke_round};
 use minicard_draw::text::TextEngine;
 use minicard_shell::gfx::Gfx;
 
-/// 滚动时长（与 card.html 的 `el.__ms || 300` 一致）
-pub const ROLL_MS: f32 = 300.0;
+use crate::roll::{cell, draw_digit, Roll};
 
 pub struct Tokens {
     pub w: f32,
@@ -72,25 +71,6 @@ impl Tokens {
 }
 
 /// 一位数字的滚动状态。
-#[derive(Clone, Copy, Debug)]
-pub struct Roll {
-    pub from: f32,
-    pub to: f32,
-    pub t0: Instant,
-    pub ms: f32,
-}
-
-impl Roll {
-    fn at(&self, now: Instant) -> f32 {
-        let u = ((now - self.t0).as_secs_f32() * 1000.0 / self.ms).clamp(0.0, 1.0);
-        let k = 1.0 - (1.0 - u).powi(4);
-        self.from + (self.to - self.from) * k
-    }
-    fn done(&self, now: Instant) -> bool {
-        (now - self.t0).as_secs_f32() * 1000.0 >= self.ms
-    }
-}
-
 /// 时钟状态：四位数字 + 每位的滚动。
 #[derive(Clone, Debug)]
 pub struct Clock {
@@ -103,9 +83,9 @@ impl Clock {
         Self { digits: [0; 4], rolls: [None; 4] }
     }
 
-    /// 条上的格子序号：`[9,0,1..9,0]` → 数字 d 在 `d + 1` 格。
+    /// 条上的格子序号（口径在 `roll::cell`）。
     fn cell(d: u8) -> f32 {
-        (d as f32) + 1.0
+        cell(d)
     }
 
     /// 喂新时间（hh, mm），返回是否有滚动在进行。
@@ -126,7 +106,7 @@ impl Clock {
                 // 倒着走（时间回拨）就退一格，视觉上仍是往上
                 to = cur + 1.0;
             }
-            self.rolls[i] = Some(Roll { from: cur, to, t0: now, ms: ROLL_MS });
+            self.rolls[i] = Some(Roll::new(cur, to, now));
             self.digits[i] = want[i];
         }
     }
@@ -272,14 +252,6 @@ fn tree(t: &Tokens, date: &str, lunar: &str) -> Node {
 }
 
 /// 条上第 `cell` 格的字符：`[9,0,1,…,9,0]`
-fn cell_char(cell: i32) -> char {
-    match cell {
-        0 => '9',
-        11 => '0',
-        c => char::from_digit(((c - 1).clamp(0, 9)) as u32, 10).unwrap_or('0'),
-    }
-}
-
 fn paint_tree(
     g: &Gfx,
     te: &TextEngine,
@@ -291,46 +263,28 @@ fn paint_tree(
 ) -> Result<()> {
     if (4000..4100).contains(&p.id) {
         let i = (p.id - 4000) as usize;
-        let idx = clock.idx(i, now);
-        let h = t.time_lh;
-        // 裁到这一位的 1em 高盒子里
-        push_clip(
+        let spec = TextSpec {
+            s: String::new(),
+            size: t.time_fs,
+            line_h: t.time_lh,
+            weight: 600,
+            wrap: false,
+            align: 0,
+            tabular: true,
+            spacing_em: t.spacing_em,
+        };
+        return draw_digit(
             g,
-            D2D_RECT_F { left: p.rect.x, top: p.rect.y, right: p.rect.right(), bottom: p.rect.y + h },
+            te,
+            pal,
+            p.rect.x,
+            p.rect.y,
+            p.rect.w,
+            t.time_lh,
+            clock.idx(i, now),
+            &spec,
+            pal.fg,
         );
-        set_color(g, pal.fg)?;
-        let lo = idx.floor() as i32;
-        for c in [lo, lo + 1] {
-            let ch = cell_char(c);
-            let spec = TextSpec {
-                s: ch.to_string(),
-                size: t.time_fs,
-                line_h: t.time_lh,
-                weight: 600,
-                wrap: false,
-                align: 0,
-                tabular: true,
-                spacing_em: t.spacing_em,
-            };
-            let fmt = te.format_spec(&spec, minicard_draw::text::Mode::Clip)?;
-            let lay = te.layout_spec(
-                &spec,
-                (p.rect.w + 2.0).max(4.0),
-                t.time_lh + 8.0,
-                minicard_draw::text::Mode::Clip,
-            )?;
-            let _ = fmt;
-            let y = p.rect.y + (c as f32 - idx) * h;
-            unsafe {
-                g.d2d.DrawTextLayout(
-                    Vector2 { X: p.rect.x, Y: y },
-                    &lay,
-                    &g.brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
-        }
-        pop_clip(g);
     } else if let Some(spec) = p.text() {
         let fmt = te.format_spec(spec, minicard_draw::text::Mode::Clip)?;
         let lay = te.layout_spec(spec, p.rect.w + 2.0, spec.line_h + 8.0, minicard_draw::text::Mode::Clip)?;
@@ -392,6 +346,7 @@ pub fn tree_hook(t: &Tokens, date: &str, lunar: &str) -> Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::roll::cell_char;
     use std::time::Duration;
 
     fn at(ms: u64) -> Instant {

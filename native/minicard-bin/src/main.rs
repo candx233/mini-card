@@ -64,6 +64,7 @@ struct Args {
     cover: Option<PathBuf>,
     debug_layout: bool,
     roll_ms: u64,
+    pomo_remain: u64,
 }
 
 impl Args {
@@ -94,6 +95,7 @@ impl Args {
             cover: None,
             debug_layout: false,
             roll_ms: 120,
+            pomo_remain: 0,
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -132,6 +134,7 @@ impl Args {
                 "--cover" => a.cover = Some(PathBuf::from(next(&mut i))),
                 "--debug-layout" => a.debug_layout = true,
                 "--roll-ms" => a.roll_ms = next(&mut i).parse().unwrap_or(120),
+                "--pomo-remain" => a.pomo_remain = next(&mut i).parse().unwrap_or(0),
                 "--viewer" => {
                     let s = next(&mut i);
                     let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
@@ -189,6 +192,7 @@ struct App {
     cover: Option<PathBuf>,
     debug_layout: bool,
     roll_ms: u64,
+    pomo_remain: u64,
 }
 
 impl App {
@@ -252,7 +256,7 @@ impl App {
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
-                || name == "clock-roll" || name == "net"
+                || name == "clock-roll" || name == "net" || name == "pomo"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -264,6 +268,7 @@ impl App {
                             Ok(())
                         }
                     },
+                    "pomo" => probe::pomo_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout, self.pomo_remain),
                     "net" => probe::net_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "clock-roll" => probe::clock_roll(&self.gfx, &self.te, &self.pal, self.roll_ms),
                     "clock" => probe::clock_sheet(
@@ -588,6 +593,7 @@ fn main() -> Result<()> {
             cover: args.cover.clone(),
             debug_layout: args.debug_layout,
             roll_ms: args.roll_ms,
+            pomo_remain: args.pomo_remain,
         });
         app.repaint();
 

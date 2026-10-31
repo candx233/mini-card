@@ -43,6 +43,8 @@ pub struct Palette {
     /// 徽标底色 / 描边（CSS `color-mix(fg 7%/24%)`）
     pub badge_bg: D2D1_COLOR_F,
     pub badge_border: D2D1_COLOR_F,
+    /// `color-mix(in oklch, var(--fg) 55%, transparent)`：番茄钟的 −/+ 与禁用态
+    pub fg55: D2D1_COLOR_F,
 }
 
 impl Palette {
@@ -62,6 +64,7 @@ impl Palette {
             warn: oklch(0.740, 0.155, 60.0, 1.0),
             track12: D2D1_COLOR_F { a: 0.12, ..fg },
             badge_bg: D2D1_COLOR_F { a: 0.07, ..fg },
+            fg55: D2D1_COLOR_F { a: 0.55, ..fg },
             badge_border: D2D1_COLOR_F { a: 0.24, ..fg },
         }
     }

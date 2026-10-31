@@ -409,3 +409,38 @@ pub fn net_sheet(
     }
     net::paint(g, te, pal, &t, &st, now, None)
 }
+
+/// 第九张测试图：番茄钟（120×120）。`run_ms > 0` 时进运行态并停在剩余 `run_ms`。
+pub fn pomo_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+    run_ms: u64,
+) -> Result<()> {
+    use minicard_cards::pomo::{self, Pomo, PomoMode, Tokens};
+    use std::time::{Duration, Instant};
+
+    let t = Tokens::pomo(120.0, 120.0);
+    let now = Instant::now();
+    let mut p = Pomo::new();
+    if run_ms > 0 {
+        p.mode = PomoMode::Run;
+        p.end_at = Some(now + Duration::from_millis(run_ms));
+        p.shown = p.mmss(now);
+    }
+    if debug_layout {
+        let mode = p.eff_mode(now);
+        minicard_shell::mlog!("pomo 模式={:?} dur={} 剩余={}ms 进度={:.1}%",
+            mode, p.dur, run_ms, p.pct(now));
+        let tree = pomo::tree_hook(&t, &p, mode, now);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        pomo::dump_layout(&placed, 0);
+        minicard_shell::mlog!(
+            "tokens: pad={:.3} gap_set={:.3} head={:.3} phase_fs={:.3} hero_gap={:.3} flank={:.3} num_fs={:.3} bar_h={:.3} btn_h={:.3}",
+            t.pad, t.gap_set, t.head_min_h, t.phase_fs, t.hero_gap, t.flank_w, t.num_fs, t.bar_h, t.btn_h
+        );
+    }
+    pomo::paint_static(g, te, pal, &t, &p, now)
+}
