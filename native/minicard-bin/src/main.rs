@@ -61,6 +61,7 @@ struct Args {
     desktop_layer: bool,
     viewer: Option<(i32, i32, i32, i32)>,
     probe: Option<String>,
+    cover: Option<PathBuf>,
 }
 
 impl Args {
@@ -88,6 +89,7 @@ impl Args {
             desktop_layer: false,
             viewer: None,
             probe: None,
+            cover: None,
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -123,6 +125,7 @@ impl Args {
                 "--animate" => a.animate = true,
                 "--desktop" => a.desktop_layer = true,
                 "--probe" => a.probe = Some(next(&mut i)),
+                "--cover" => a.cover = Some(PathBuf::from(next(&mut i))),
                 "--viewer" => {
                     let s = next(&mut i);
                     let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
@@ -177,6 +180,7 @@ struct App {
     frame_draw_us: Vec<f32>,
     snap_text: bool,
     probe: Option<String>,
+    cover: Option<PathBuf>,
 }
 
 impl App {
@@ -234,10 +238,17 @@ impl App {
     fn repaint(&mut self) {
         // 形状探针：只画测试图，不跑卡片视图
         if let Some(name) = self.probe.clone() {
-            if name == "shapes" || name == "shapes2" || name == "text" {
+            if name == "shapes" || name == "shapes2" || name == "text" || name == "image" {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
                     "shapes2" => probe::shapes2(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
+                    "image" => match &self.cover {
+                        Some(p) => probe::image_sheet(&self.gfx, p),
+                        None => {
+                            mlog!("--probe image 需要 --cover <文件>");
+                            Ok(())
+                        }
+                    },
                     _ => probe::text_sheet(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
                 };
                 if let Err(e) = r {
@@ -526,6 +537,7 @@ fn main() -> Result<()> {
             frame_draw_us: Vec::new(),
             snap_text: args.snap_text,
             probe: args.probe.clone(),
+            cover: args.cover.clone(),
         });
         app.repaint();
 

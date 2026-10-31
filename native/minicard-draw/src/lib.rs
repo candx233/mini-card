@@ -5,6 +5,7 @@
 pub mod color;
 pub mod gradient;
 pub mod glass;
+pub mod image;
 pub mod layout;
 pub mod path;
 pub mod paint;

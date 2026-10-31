@@ -202,3 +202,23 @@ pub fn text_sheet(g: &Gfx, te: &TextEngine, _w: f32, _h: f32) -> Result<()> {
     g.end()?;
     Ok(())
 }
+
+/// 第四张测试图：图片解码 + 圆角裁剪。
+///
+/// 版面（240×240）：把 `--cover` 给的图按 `object-fit:cover` 铺到 (20,20)-(220,220)、圆角 40。
+/// 测试图是 64×64 的四象限（红/绿/蓝/黄），所以取样点能同时验「解码对不对」与「圆角真裁了」。
+pub fn image_sheet(g: &Gfx, cover: &std::path::Path) -> Result<()> {
+    use minicard_draw::image;
+
+    let img = image::decode_file(cover)?;
+    let bmp = image::bitmap(g, &img)?;
+    let dst = D2D_RECT_F { left: 20.0, top: 20.0, right: 220.0, bottom: 220.0 };
+    let src = image::cover_src(&img, dst.right - dst.left, dst.bottom - dst.top);
+
+    g.begin()?;
+    g.push_clip()?;
+    image::draw_round(g, &bmp, src, dst, 40.0)?;
+    g.pop_clip();
+    g.end()?;
+    Ok(())
+}
