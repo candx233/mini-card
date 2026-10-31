@@ -79,5 +79,32 @@ impl Palette {
             badge_border: D2D1_COLOR_F { a: 0.24, ..fg },
         }
     }
+
+    /// 按 config 的强调色覆盖 `--accent` / `--on-accent`（口径同 `card.html:paintOnAccent()`）：
+    /// 只有「近白强调色」或浅色主题才把压在强调色上的字翻成深色，粉/蓝/绿一律白字。
+    pub fn with_accent(mut self, rgb: [u8; 3], dark_theme: bool) -> Self {
+        self.accent = srgb8(rgb[0], rgb[1], rgb[2]);
+        // sRGB → 线性 → 相对亮度（WCAG 口径）
+        let lin: Vec<f32> = rgb
+            .iter()
+            .map(|&c| {
+                let v = c as f32 / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            })
+            .collect();
+        let lum = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+        let dark_ink = lum > 0.72 || !dark_theme;
+        self.on_accent = if dark_ink {
+            oklch(0.22, 0.02, 258.0, 1.0)
+        } else {
+            oklch(0.985, 0.0, 0.0, 1.0)
+        };
+        self
+    }
+
 }
 

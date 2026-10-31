@@ -42,8 +42,10 @@ struct CardWin {
     /// 玻璃位图（按卡片位置裁壁纸）—— 先留空，等玻璃层接线
     #[allow(dead_code)]
     glass: Option<(ID2D1Bitmap1, D2D_RECT_F)>,
-    /// 下次重绘时刻：有动画 16.7ms，静置 1s
+    /// 下次重绘时刻：有动画 16.7ms，静置按卡片自己的 refresh_ms
     next_draw: Instant,
+    /// 静置节拍（config 的 refresh_ms，钳到 200ms..60s）
+    refresh: Duration,
 }
 
 enum State {
@@ -55,7 +57,7 @@ enum State {
     Todo(Vec<todo::Item>),
     Weather,
     Music,
-    Calendar(calendar::Calendar),
+    Calendar(calendar::Calendar, u32),
 }
 
 /// 本地时间的一小块：年/月/日/时/分/秒/星期（0=周日）
@@ -128,7 +130,9 @@ fn calendar_of(y: i32, m: u32, today: u32) -> calendar::Calendar {
     let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
     let yy = if m < 3 { y - 1 } else { y };
     let wd0 = (yy + yy / 4 - yy / 100 + yy / 400 + t[(m - 1) as usize] + 1) % 7; // 0=周日
-    calendar::Calendar::build(y, m, wd0 as u32, days, today)
+    let mut c = calendar::Calendar::build(y, m, wd0 as u32, days, today);
+    c.holiday = calendar::holiday(y, m, today);
+    c
 }
 
 /// 壁纸：优先读系统壁纸文件（按卡位切片 + 模糊），读不到就退回「只画白纱」
@@ -158,7 +162,41 @@ fn load_wallpaper() -> Option<glass::Wall> {
     Some(glass::Wall { bgra: img.bgra, w: img.w, h: img.h })
 }
 
+/// 卡片落在哪块屏（物理像素）：返回 (left, top, w, h)
+fn monitor_of(x: i32, y: i32) -> (f32, f32, f32, f32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    unsafe {
+        let m = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(m, &mut info).as_bool() {
+            let r = info.rcMonitor;
+            (
+                r.left as f32,
+                r.top as f32,
+                (r.right - r.left) as f32,
+                (r.bottom - r.top) as f32,
+            )
+        } else {
+            (0.0, 0.0, 1920.0, 1080.0)
+        }
+    }
+}
+
 pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: bool, exit_after: Option<u64>) -> Result<()> {
+    // 层级以 config 的 z_order 为准；`--live-topmost` 只是取证覆盖
+    let z = if topmost {
+        minicard_core::config::ZOrder::Top
+    } else {
+        cfg.settings.z_order
+    };
+    minicard_shell::mlog!("live：层级 {:?}", z);
+
     let snap: SharedSnap = data::spawn_sampler();
     let wshared = wx::SharedWeather::default();
     wx::seed(&wshared);
@@ -191,23 +229,16 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
         }
 
         let wall = load_wallpaper();
-        let (mon_w, mon_h) = {
-            use windows::Win32::Graphics::Gdi::{
-                GetDC, GetDeviceCaps, ReleaseDC, DESKTOPHORZRES, DESKTOPVERTRES,
-            };
-            let hdc = GetDC(None);
-            let sw = GetDeviceCaps(Some(hdc), DESKTOPHORZRES) as f32;
-            let sh = GetDeviceCaps(Some(hdc), DESKTOPVERTRES) as f32;
-            let _ = ReleaseDC(None, hdc);
-            (if sw > 0.0 { sw } else { 1920.0 }, if sh > 0.0 { sh } else { 1080.0 })
-        };
         let dpi_sys = GetDpiForSystem() as f32;
         let mut wins: Vec<CardWin> = Vec::new();
         for card in cfg.cards.iter().filter(|c| c.enabled) {
             let (win_w, win_h) = (card.size[0], card.size[1]);
             let w_px = (win_w * dpi_sys / 96.0).round() as i32;
             let h_px = (win_h * dpi_sys / 96.0).round() as i32;
-            let ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+            let mut ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+            if matches!(z, minicard_core::config::ZOrder::Top) {
+                ex |= WS_EX_TOPMOST;
+            }
             let title: Vec<u16> = format!("MiniCardLive · {:?}", card.kind)
                 .encode_utf16()
                 .chain(std::iter::once(0))
@@ -242,12 +273,15 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
 
             // 玻璃：按卡位从壁纸切一块（含 pad）再模糊，与 card.html 的 .wall 同一口径
             let pad_px = ((blur * 3.0).max(60.0) * dpi / 96.0).round() as i32;
+            // 每张卡按**它自己那块屏**切（副屏、负坐标屏都要对）
+            let mon = monitor_of(card.pos[0] as i32, card.pos[1] as i32);
+            let pos_rel = (card.pos[0] - mon.0, card.pos[1] - mon.1);
             let glass_pair = match &wall {
                 Some(w) => {
                     let cap = glass::from_wallpaper(
                         w,
-                        (mon_w, mon_h),
-                        (card.pos[0], card.pos[1]),
+                        (mon.2, mon.3),
+                        pos_rel,
                         (w_px, h_px),
                         pad_px as f32,
                         blur * dpi / 96.0,
@@ -291,17 +325,27 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
                 CardKind::Music => State::Music,
                 CardKind::Calendar => {
                     let (y, m, d, _, _, _) = now_parts();
-                    State::Calendar(calendar_of(y, m, d))
+                    State::Calendar(calendar_of(y, m, d), d)
                 }
             };
-            // 默认插到桌面层（被普通窗口压住 = 与真卡同层）；--live-topmost 只是取证用
-            if !topmost {
+            // Desktop 档：插到 Progman/WorkerW 锚点正上方（被普通窗口压住 = 与真卡同层）
+            if matches!(z, minicard_core::config::ZOrder::Desktop) {
                 if let Err(e) = minicard_shell::desktop::insert_above_desktop(hwnd) {
                     minicard_shell::mlog!("桌面层插入失败: {e:?}");
                 }
             }
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            wins.push(CardWin { hwnd, gfx, kind: card.kind, w: win_w, h: win_h, state, glass: glass_pair, next_draw: Instant::now() });
+            wins.push(CardWin {
+                hwnd,
+                gfx,
+                kind: card.kind,
+                w: win_w,
+                h: win_h,
+                state,
+                glass: glass_pair,
+                next_draw: Instant::now(),
+                refresh: Duration::from_millis(card.refresh_ms.clamp(200, 60_000)),
+            });
         }
         minicard_shell::mlog!("live：{} 张卡窗口", wins.len());
 
@@ -352,7 +396,7 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
                     + if animating {
                         Duration::from_micros(16_667)
                     } else {
-                        Duration::from_millis(1000)
+                        win.refresh
                     };
                 if win.next_draw < earliest {
                     earliest = win.next_draw;
@@ -485,10 +529,11 @@ fn draw_one(
             music::paint(&win.gfx, te, pal, &mk, &mw, glass_pair)?;
             mw.playing
         }
-        (State::Calendar(c), _) => {
-            // 跨月翻页暂未接（先保证当月正确）
-            if c.year != y || c.month != mo {
+        (State::Calendar(c, built_day), _) => {
+            // 跨月或跨天都要重建（今天是哪格、节日标签都会变）
+            if c.year != y || c.month != mo || *built_day != d {
                 *c = calendar_of(y, mo, d);
+                *built_day = d;
             }
             let ck = calendar::Tokens::cal(win.w, win.h);
             calendar::paint(&win.gfx, te, pal, &ck, c, glass_pair)?;
@@ -518,7 +563,14 @@ pub fn start(font: &std::path::Path, blur: f32, topmost: bool, exit_after: Optio
     let fonts = crate::font_set(font);
     let refs: Vec<&std::path::Path> = fonts.iter().map(|p| p.as_path()).collect();
     let te = Arc::new(TextEngine::new_weights(&refs, "MiSans")?);
-    let pal = Palette::new(cfg.settings.glass_alpha as f32, false);
+    // 强调色/压在强调色上的字色按 config（口径同 card.html:paintOnAccent）
+    let dark_theme = !matches!(cfg.settings.theme, minicard_core::config::Theme::Light);
+    let pal = Palette::new(cfg.settings.glass_alpha as f32, false)
+        .with_accent(cfg.settings.accent, dark_theme);
+    minicard_shell::mlog!(
+        "live：强调色 rgb{:?} / 玻璃 {}/100 / 模糊 {}px / 主题 {:?}",
+        cfg.settings.accent, cfg.settings.glass_alpha, cfg.settings.glass_blur, cfg.settings.theme
+    );
     run(cfg, te, pal, blur, topmost, exit_after)
 }
 

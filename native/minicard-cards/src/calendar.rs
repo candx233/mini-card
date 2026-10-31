@@ -65,6 +65,95 @@ impl Calendar {
     }
 }
 
+
+/// 星期几（0=周日）—— Sakamoto 公式
+pub fn weekday(y: i32, m: u32, d: u32) -> u32 {
+    const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let yy = if m < 3 { y - 1 } else { y };
+    ((yy + yy / 4 - yy / 100 + yy / 400 + T[(m - 1) as usize] + d as i32) % 7) as u32
+}
+
+/// 公历节日（口径同 `card.html:FEST_SOLAR`）
+fn fest_solar(m: u32, d: u32) -> Option<&'static str> {
+    Some(match (m, d) {
+        (1, 1) => "元旦",
+        (2, 14) => "情人节",
+        (3, 8) => "妇女节",
+        (3, 12) => "植树节",
+        (4, 1) => "愚人节",
+        (5, 1) => "劳动节",
+        (5, 4) => "青年节",
+        (6, 1) => "儿童节",
+        (7, 1) => "建党节",
+        (8, 1) => "建军节",
+        (9, 10) => "教师节",
+        (10, 1) => "国庆节",
+        (12, 24) => "平安夜",
+        (12, 25) => "圣诞节",
+        _ => return None,
+    })
+}
+
+/// 农历节日（口径同 `card.html:FEST_LUNAR`）
+fn fest_lunar(m: u32, d: u32) -> Option<&'static str> {
+    Some(match (m, d) {
+        (1, 1) => "春节",
+        (1, 15) => "元宵节",
+        (2, 2) => "龙抬头",
+        (5, 5) => "端午节",
+        (7, 7) => "七夕节",
+        (8, 15) => "中秋节",
+        (9, 9) => "重阳节",
+        (12, 8) => "腊八节",
+        (12, 23) => "小年",
+        _ => return None,
+    })
+}
+
+/// 第 n 个星期 wd 的日号（wd: 0=周日）
+fn nth_weekday(y: i32, m: u32, wd: u32, n: u32) -> u32 {
+    let first = weekday(y, m, 1);
+    1 + ((wd + 7 - first) % 7) + (n - 1) * 7
+}
+
+/// 当天节日 / 节气标签（空串 = 没有）。顺序与 `card.html:holidayOf` 一致：
+/// 明天正月初一 → 除夕；农历节日；位次节日；公历节日。
+pub fn holiday(y: i32, m: u32, d: u32) -> String {
+    use crate::lunar::solar_to_lunar;
+    // 除夕：明天是农历正月初一
+    let (ny, nm, nd) = if d >= days_in_month_of(y, m) {
+        if m == 12 {
+            (y + 1, 1, 1)
+        } else {
+            (y, m + 1, 1)
+        }
+    } else {
+        (y, m, d + 1)
+    };
+    if let Some(l) = solar_to_lunar(ny, nm, nd) {
+        if l.month == 1 && l.day == 1 {
+            return "除夕".to_string();
+        }
+    }
+    if let Some(l) = solar_to_lunar(y, m, d) {
+        if !l.leap {
+            if let Some(s) = fest_lunar(l.month, l.day) {
+                return s.to_string();
+            }
+        }
+    }
+    if m == 5 && d == nth_weekday(y, 5, 0, 2) {
+        return "母亲节".to_string();
+    }
+    if m == 6 && d == nth_weekday(y, 6, 0, 3) {
+        return "父亲节".to_string();
+    }
+    if m == 11 && d == nth_weekday(y, 11, 4, 4) {
+        return "感恩节".to_string();
+    }
+    fest_solar(m, d).unwrap_or("").to_string()
+}
+
 pub struct Tokens {
     pub w: f32,
     pub h: f32,
@@ -471,5 +560,43 @@ pub fn days_in_month_of(year: i32, month: u32) -> u32 {
             }
         }
         _ => 30,
+    }
+}
+
+#[cfg(test)]
+mod holiday_tests {
+    use super::holiday;
+
+    #[test]
+    fn 公历节日() {
+        assert_eq!(holiday(2026, 10, 1), "国庆节");
+        assert_eq!(holiday(2026, 1, 1), "元旦");
+        assert_eq!(holiday(2026, 10, 31), "");
+    }
+
+    #[test]
+    fn 农历节日与除夕() {
+        // 2026 春节 = 2/17（正月初一），前一天 2/16 = 除夕
+        assert_eq!(holiday(2026, 2, 17), "春节");
+        assert_eq!(holiday(2026, 2, 16), "除夕");
+        // 元宵 = 正月十五 = 3/3
+        assert_eq!(holiday(2026, 3, 3), "元宵节");
+        // 中秋 = 八月十五 = 9/25
+        assert_eq!(holiday(2026, 9, 25), "中秋节");
+    }
+
+    #[test]
+    fn 位次节日() {
+        // 母亲节 = 5 月第 2 个周日 = 5/10；父亲节 = 6 月第 3 个周日 = 6/21
+        assert_eq!(holiday(2026, 5, 10), "母亲节");
+        assert_eq!(holiday(2026, 6, 21), "父亲节");
+        // 感恩节 = 11 月第 4 个周四 = 11/26
+        assert_eq!(holiday(2026, 11, 26), "感恩节");
+    }
+
+    #[test]
+    fn 星期公式() {
+        assert_eq!(super::weekday(2026, 10, 31), 6); // 周六
+        assert_eq!(super::weekday(2026, 10, 1), 4); // 周四
     }
 }
