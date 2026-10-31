@@ -42,6 +42,8 @@ struct CardWin {
     /// 玻璃位图（按卡片位置裁壁纸）—— 先留空，等玻璃层接线
     #[allow(dead_code)]
     glass: Option<(ID2D1Bitmap1, D2D_RECT_F)>,
+    /// 下次重绘时刻：有动画 16.7ms，静置 1s
+    next_draw: Instant,
 }
 
 enum State {
@@ -318,14 +320,13 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
                 }
             }
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            wins.push(CardWin { hwnd, gfx, kind: card.kind, w: win_w, h: win_h, state, glass: glass_pair });
+            wins.push(CardWin { hwnd, gfx, kind: card.kind, w: win_w, h: win_h, state, glass: glass_pair, next_draw: Instant::now() });
         }
         minicard_shell::mlog!("live：{} 张卡窗口", wins.len());
 
         // 帧循环：自节拍 16.667ms（与单窗模式同一套），消息循环与绘制交替
         let _timer = windows::Win32::Media::timeBeginPeriod(1);
         let t_start = Instant::now();
-        let mut next = Instant::now();
         loop {
             // 先把消息吃完
             let mut msg = MSG::default();
@@ -346,8 +347,15 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
             let date = date_text(y, mo, d, now_parts().5);
             let lunar_txt = lunar::lunar_text(y, mo, d).unwrap_or_default();
 
+            let mut earliest = now + Duration::from_millis(250);
             for win in wins.iter_mut() {
-                draw_one(
+                if now < win.next_draw {
+                    if win.next_draw < earliest {
+                        earliest = win.next_draw;
+                    }
+                    continue;
+                }
+                let animating = draw_one(
                     win,
                     &snap,
                     &wshared,
@@ -358,14 +366,22 @@ pub fn run(cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: b
                     &date,
                     &lunar_txt,
                 )?;
+                // 动画中 60fps；静置按 1s 走（采样也是 1s 一拍），空闲几乎不烧 CPU
+                win.next_draw = now
+                    + if animating {
+                        Duration::from_micros(16_667)
+                    } else {
+                        Duration::from_millis(1000)
+                    };
+                if win.next_draw < earliest {
+                    earliest = win.next_draw;
+                }
             }
 
-            next += Duration::from_micros(16_667);
             let now2 = Instant::now();
-            if next > now2 {
-                std::thread::sleep(next - now2);
-            } else if now2 - next > Duration::from_millis(120) {
-                next = now2; // 落后太多就重新对齐，别追帧
+            if earliest > now2 {
+                let wait = (earliest - now2).min(Duration::from_millis(100));
+                std::thread::sleep(wait);
             }
         }
         Ok(())
@@ -383,15 +399,16 @@ fn draw_one(
     t: (i32, u32, u32, u8, u8),
     date: &str,
     lunar_txt: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let (y, mo, d, hh, mm) = t;
     let glass_pair = win.glass.as_ref().map(|(b, r)| (b, *r));
     let snap_r = snap.read().unwrap();
-    match (&mut win.state, win.kind) {
+    let animating = match (&mut win.state, win.kind) {
         (State::Perf, _) => {
             let rows = perf_rows(&snap_r, true);
             let tk = perf::Tokens::perf(win.w, win.h);
             perf::paint(&win.gfx, te, pal, &tk, &rows, glass_pair, false)?;
+            false
         }
         (State::Disks { warn90 }, _) => {
             let list: Vec<disks::Disk> = snap_r
@@ -406,25 +423,30 @@ fn draw_one(
                 .collect();
             let tk = disks::Tokens::disks(win.w, win.h, list.len());
             disks::paint(&win.gfx, te, pal, &tk, &list, glass_pair, *warn90, false)?;
+            false
         }
         (State::Clock(c), _) => {
             c.set(hh, mm, now);
             let tk = clock::Tokens::clock(win.w, win.h);
             clock::paint(&win.gfx, te, pal, &tk, c, date, lunar_txt, now, glass_pair)?;
+            !c.idle(now)
         }
         (State::Net(st), _) => {
             st.set(snap_r.net.tx, snap_r.net.rx, now);
             let tk = net::Tokens::net(win.w, win.h, 1.044, 0.282);
             net::paint(&win.gfx, te, pal, &tk, st, now, glass_pair)?;
+            st.animating(now)
         }
         (State::Pomo(p), _) => {
             p.tick(now);
             let tk = pomo::Tokens::pomo(win.w, win.h);
             pomo::paint(&win.gfx, te, pal, &tk, p, now, glass_pair)?;
+            p.is_running()
         }
         (State::Todo(items), _) => {
             let tk = todo::Tokens::todo(win.w, win.h);
             todo::paint(&win.gfx, te, pal, &tk, items, now, glass_pair)?;
+            false
         }
         (State::Weather, _) => {
             let ws = wshared.read().unwrap().clone();
@@ -457,6 +479,7 @@ fn draw_one(
                 humidity: hum,
             };
             weather::paint(&win.gfx, te, pal, &wk, &wv, glass_pair)?;
+            false
         }
         (State::Music, _) => {
             let m = media::snapshot();
@@ -479,6 +502,7 @@ fn draw_one(
             };
             let mk = music::Tokens::music(win.w, win.h);
             music::paint(&win.gfx, te, pal, &mk, &mw, glass_pair)?;
+            mw.playing
         }
         (State::Calendar(c), _) => {
             // 跨月翻页暂未接（先保证当月正确）
@@ -487,9 +511,10 @@ fn draw_one(
             }
             let ck = calendar::Tokens::cal(win.w, win.h);
             calendar::paint(&win.gfx, te, pal, &ck, c, glass_pair)?;
+            false
         }
-    }
-    Ok(())
+    };
+    Ok(animating)
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {

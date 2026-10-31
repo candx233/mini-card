@@ -126,6 +126,11 @@ impl Pomo {
         }
     }
 
+    /// 运行态才需要 60fps（秒数在跳），设置/暂停/完成都按 1Hz 就够
+    pub fn is_running(&self) -> bool {
+        matches!(self.mode, PomoMode::Run)
+    }
+
     pub fn total_ms(&self) -> f64 {
         self.dur as f64 * 60000.0
     }

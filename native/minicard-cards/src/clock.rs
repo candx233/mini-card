@@ -88,6 +88,11 @@ impl Clock {
         cell(d)
     }
 
+    /// 四位都没在滚 = 可以降频重绘
+    pub fn idle(&self, now: Instant) -> bool {
+        self.rolls.iter().all(|r| r.map_or(true, |r| r.done(now)))
+    }
+
     /// 喂新时间（hh, mm），返回是否有滚动在进行。
     pub fn set(&mut self, hh: u8, mm: u8, now: Instant) {
         let want = [hh / 10, hh % 10, mm / 10, mm % 10];
