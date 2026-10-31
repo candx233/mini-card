@@ -40,6 +40,8 @@ pub struct Tokens {
     pub time_lh: f32,
     pub date_fs: f32,
     pub date_lh: f32,
+    pub lunar_fs: f32,
+    pub lunar_lh: f32,
     pub spacing_em: f32,
 }
 
@@ -62,6 +64,8 @@ impl Tokens {
             time_lh: 4.5 * r, // line-height: 1
             date_fs: 1.125 * r,
             date_lh: 1.125 * r * 1.55,
+            lunar_fs: 1.0 * r,
+            lunar_lh: 1.5 * r,
             spacing_em: -0.02,
         }
     }
@@ -159,10 +163,11 @@ pub fn paint(
     t: &Tokens,
     clock: &Clock,
     date: &str,
+    lunar: &str,
     now: Instant,
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
 ) -> Result<()> {
-    let tree = tree(t, date);
+    let tree = tree(t, date, lunar);
     let mut m: &TextEngine = te;
     let placed = layout(&tree, (t.w, t.h), &mut m);
 
@@ -192,7 +197,7 @@ pub fn paint(
 }
 
 /// id 约定：4000+i = 第 i 位数字（要滚动绘制）；其余走普通文字。
-fn tree(t: &Tokens, date: &str) -> Node {
+fn tree(t: &Tokens, date: &str, lunar: &str) -> Node {
     let digit_spec = |ch: &str| TextSpec {
         s: ch.to_string(),
         size: t.time_fs,
@@ -233,6 +238,18 @@ fn tree(t: &Tokens, date: &str) -> Node {
     })
     .style(|s| s.mar([t.date_mt, 0.0, 0.0, 0.0]));
 
+    // 第三行：农历（与日期同为 muted 小字，但字号小一档、无上边距）
+    let lunar_node = Node::text(TextSpec {
+        s: lunar.to_string(),
+        size: t.lunar_fs,
+        line_h: t.lunar_lh,
+        weight: 400,
+        wrap: false,
+        align: 0,
+        tabular: true,
+        spacing_em: 0.0,
+    });
+
     Node::new(Dir::Column)
         .style(|s| {
             s.size(Dim::Px(t.w), Dim::Px(t.h))
@@ -249,7 +266,8 @@ fn tree(t: &Tokens, date: &str) -> Node {
                         .pad([0.0, 0.0, t.body_pb, 0.0])
                 })
                 .child(time)
-                .child(date_node),
+                .child(date_node)
+                .child(lunar_node),
         )
 }
 
@@ -367,6 +385,72 @@ pub fn dump_layout(p: &Placed, depth: usize) {
     }
 }
 
-pub fn tree_hook(t: &Tokens, date: &str) -> Node {
-    tree(t, date)
+pub fn tree_hook(t: &Tokens, date: &str, lunar: &str) -> Node {
+    tree(t, date, lunar)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn at(ms: u64) -> Instant {
+        Instant::now() + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn 条上的格子映射() {
+        // [9, 0, 1, …, 9, 0]：数字 d 在 d+1 格
+        assert_eq!(cell_char(0), '9');
+        assert_eq!(cell_char(1), '0');
+        assert_eq!(cell_char(2), '1');
+        assert_eq!(cell_char(10), '9');
+        assert_eq!(cell_char(11), '0');
+        // 数字 → 格子
+        assert_eq!(Clock::cell(0), 1.0);
+        assert_eq!(Clock::cell(9), 10.0);
+    }
+
+    #[test]
+    fn 滚动从原位起步并单调推到目标() {
+        let now = Instant::now();
+        let mut c = Clock::new();
+        c.snap(14, 26);
+        // 直接跳到 14:27：只有最后一位动
+        c.set(14, 27, now);
+        let r = c.rolls[3].expect("最后一位应开始滚动");
+        assert_eq!(r.from, Clock::cell(6));
+        assert_eq!(r.to, Clock::cell(7));
+        // t=0 在原位、t=300ms 到目标、中途在两者之间
+        assert!((r.at(now) - r.from).abs() < 0.01, "起步 {:?}", r.at(now));
+        assert!((r.at(now + Duration::from_millis(300)) - r.to).abs() < 0.01);
+        let mid = r.at(now + Duration::from_millis(120));
+        assert!(mid > r.from && mid < r.to, "中途 {mid} 应在 {}..{} 之间", r.from, r.to);
+        // easeOutQuart：前 1/3 时间应走掉一半以上行程
+        assert!(mid - r.from > (r.to - r.from) * 0.5, "前 40% 走了 {:?}", mid - r.from);
+    }
+
+    #[test]
+    fn 九到零走补格再瞬归() {
+        let now = Instant::now();
+        let mut c = Clock::new();
+        c.snap(14, 29);
+        c.set(14, 30, now);
+        let r = c.rolls[3].expect("应滚动");
+        // 个位 9 → 0：目标是补的第 11 格（0），不是第 1 格
+        assert_eq!(r.to, 11.0, "9→0 应走补格");
+        assert_eq!(cell_char(11), '0');
+        // 滚完之后 idx 落到 0 所在格（第 1 格）
+        assert_eq!(c.idx(3, now + Duration::from_millis(320)), Clock::cell(0));
+    }
+
+    #[test]
+    fn 时间没变不起滚动() {
+        let now = Instant::now();
+        let mut c = Clock::new();
+        c.snap(14, 26);
+        c.set(14, 26, now);
+        assert!(c.rolls.iter().all(|r| r.is_none()));
+        assert!(!c.animating(now));
+    }
 }

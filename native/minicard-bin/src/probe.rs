@@ -352,9 +352,10 @@ pub fn clock_sheet(
     let t = Tokens::clock(240.0, 120.0);
     let mut c = Clock::new();
     c.snap(14, 26);
-    let date = "2026年10月31日 星期六";
+    let date = "2026年10月31日 周六";
+    let lunar = "农历九月廿二";
     if debug_layout {
-        let tree = clock::tree_hook(&t, date);
+        let tree = clock::tree_hook(&t, date, lunar);
         let mut m: &TextEngine = te;
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
         clock::dump_layout(&placed, 0);
@@ -363,5 +364,18 @@ pub fn clock_sheet(
             t.r, t.pad_lr, t.pad_tb, t.gap, t.body_pb, t.date_mt, t.time_fs, t.time_lh, t.date_fs, t.date_lh
         );
     }
-    clock::paint(g, te, pal, &t, &c, date, std::time::Instant::now(), None)
+    clock::paint(g, te, pal, &t, &c, date, lunar, std::time::Instant::now(), None)
+}
+
+/// 滚动中途的一帧：从 14:26 跳到 14:27，并把时间轴拨到滚动开始后 120ms。
+pub fn clock_roll(g: &Gfx, te: &TextEngine, pal: &minicard_draw::color::Palette, roll_ms: u64) -> Result<()> {
+    use minicard_cards::clock::{self, Clock, Tokens};
+    use std::time::{Duration, Instant};
+
+    let t = Tokens::clock(240.0, 120.0);
+    let now = Instant::now();
+    let mut c = Clock::new();
+    c.snap(14, 26);
+    c.set(14, 27, now - Duration::from_millis(roll_ms));
+    clock::paint(g, te, pal, &t, &c, "2026年10月31日 周六", "农历九月廿二", now, None)
 }

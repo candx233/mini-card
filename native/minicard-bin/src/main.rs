@@ -63,6 +63,7 @@ struct Args {
     probe: Option<String>,
     cover: Option<PathBuf>,
     debug_layout: bool,
+    roll_ms: u64,
 }
 
 impl Args {
@@ -92,6 +93,7 @@ impl Args {
             probe: None,
             cover: None,
             debug_layout: false,
+            roll_ms: 120,
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -129,6 +131,7 @@ impl Args {
                 "--probe" => a.probe = Some(next(&mut i)),
                 "--cover" => a.cover = Some(PathBuf::from(next(&mut i))),
                 "--debug-layout" => a.debug_layout = true,
+                "--roll-ms" => a.roll_ms = next(&mut i).parse().unwrap_or(120),
                 "--viewer" => {
                     let s = next(&mut i);
                     let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
@@ -185,6 +188,7 @@ struct App {
     probe: Option<String>,
     cover: Option<PathBuf>,
     debug_layout: bool,
+    roll_ms: u64,
 }
 
 impl App {
@@ -248,6 +252,7 @@ impl App {
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
+                || name == "clock-roll"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -259,6 +264,7 @@ impl App {
                             Ok(())
                         }
                     },
+                    "clock-roll" => probe::clock_roll(&self.gfx, &self.te, &self.pal, self.roll_ms),
                     "clock" => probe::clock_sheet(
                         &self.gfx,
                         &self.te,
@@ -580,6 +586,7 @@ fn main() -> Result<()> {
             probe: args.probe.clone(),
             cover: args.cover.clone(),
             debug_layout: args.debug_layout,
+            roll_ms: args.roll_ms,
         });
         app.repaint();
 
