@@ -405,14 +405,14 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT {
-                    return Ok(());
+                    clean_exit();
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
             if let Some(limit) = exit_after {
                 if t_start.elapsed().as_millis() as u64 >= limit {
-                    break;
+                    clean_exit();
                 }
             }
             // 窗口消息里只记事件；动作在这里做（能正常借用 wins/cfg/te）
@@ -470,7 +470,6 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 std::thread::sleep(wait);
             }
         }
-        Ok(())
     }
 }
 
@@ -782,6 +781,12 @@ fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
         }
         Err(e) => minicard_shell::mlog!("重切玻璃失败: {e:?}"),
     }
+}
+
+/// 显式收尾：D2D/DComp 的窗口资源在进程退出路径上不一定能干净释放，
+/// 直接 exit(0) 让脚本/托盘拿到确定的返回码（实测 return Ok 会得到 122/2170 这种怪码）。
+fn clean_exit() -> ! {
+    std::process::exit(0)
 }
 
 fn save_cfg(cfg: &Config) {
