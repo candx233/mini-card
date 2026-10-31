@@ -478,3 +478,34 @@ pub fn todo_sheet(
     }
     todo::paint(g, te, pal, &t, &items, now, None)
 }
+
+/// 第十一张测试图：天气卡（320×240 基准）。
+pub fn weather_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::weather::{Day, Tokens, Weather};
+
+    let t = Tokens::weather(320.0, 240.0);
+    let w = Weather {
+        city: "杭州".into(),
+        temp: Some(24.4),
+        code: 2,
+        air: Some("优".into()),
+        humidity: Some(62),
+        days: vec![
+            Day { label: "今天".into(), hi: Some(26.2), lo: Some(18.4), code: 2 },
+            Day { label: "明天".into(), hi: Some(23.1), lo: Some(17.2), code: 61 },
+            Day { label: "后天".into(), hi: Some(21.3), lo: Some(16.1), code: 3 },
+        ],
+    };
+    if debug_layout {
+        let tree = minicard_cards::weather::tree_hook(&t, &w);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        minicard_cards::weather::dump_layout(&placed, 0);
+    }
+    minicard_cards::weather::paint(g, te, pal, &t, &w, None)
+}

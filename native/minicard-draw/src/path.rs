@@ -84,6 +84,196 @@ impl Path {
             .close()
     }
 
+    /// 圆（用两条半弧拼，跨 360° 时 D2D 的 AddArc 不好处理整圈）
+    pub fn circle(cx: f32, cy: f32, r: f32) -> Self {
+        Self::new().arc(cx, cy, r, -90.0, 180.0).arc(cx, cy, r, 90.0, 180.0).close()
+    }
+
+    /// SVG `path d` 的最小解析（M/m L/l H/h V/v A/a C/c Z/z）。
+    ///
+    /// 只为天气图标那几条路径服务：`A` 走标准的「端点 → 圆心」换算（SVG 规范的
+    /// implementation notes F.6.5，含半径不足时的等比放大）；`Z` 闭合并把笔位移回子路径起点。
+    /// 不认识的指令直接停下（宁可少画，不要画错）。
+    pub fn svg(d: &str) -> Self {
+        let mut p = Self::new();
+        // 词法：数字之间靠空格/逗号/负号分隔 —— 空格必须**把当前数字收尾**，
+        // 否则「M2 3」会被读成 23（这就是第一版解析出空路径的原因）。
+        let mut cmds: Vec<(char, Vec<f32>)> = Vec::new();
+        let mut nums: Vec<f32> = Vec::new();
+        let mut cur: Option<char> = None;
+        let mut buf = String::new();
+        let take = |buf: &mut String, nums: &mut Vec<f32>| {
+            if !buf.is_empty() {
+                if let Ok(v) = buf.parse::<f32>() {
+                    nums.push(v);
+                }
+                buf.clear();
+            }
+        };
+        for c in d.chars() {
+            if c.is_ascii_alphabetic() {
+                take(&mut buf, &mut nums);
+                if let Some(pc) = cur.take() {
+                    if !nums.is_empty() {
+                        cmds.push((pc, std::mem::take(&mut nums)));
+                    }
+                }
+                cur = Some(c);
+            } else if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' {
+                buf.push(c);
+            } else if c == '-' || c == '+' {
+                // 正负号一定是新数字的开头（指数里的符号已在上面的分支里并入 buf）
+                take(&mut buf, &mut nums);
+                buf.push(c);
+            } else {
+                // 空格 / 逗号 / 其他分隔符
+                take(&mut buf, &mut nums);
+            }
+        }
+        take(&mut buf, &mut nums);
+        if let Some(pc) = cur {
+            if !nums.is_empty() {
+                cmds.push((pc, nums));
+            }
+        }
+
+        let mut cx = 0.0f32;
+        let mut cy = 0.0f32;
+        let mut sx = 0.0f32;
+        let mut sy = 0.0f32;
+        for (c, a) in cmds {
+            let rel = c.is_ascii_lowercase();
+            match c.to_ascii_uppercase() {
+                'M' => {
+                    let mut i = 0;
+                    while i + 1 < a.len() {
+                        let (x, y) = if rel { (cx + a[i], cy + a[i + 1]) } else { (a[i], a[i + 1]) };
+                        if i == 0 {
+                            p = p.move_to(x, y);
+                            sx = x;
+                            sy = y;
+                        } else {
+                            p = p.line_to(x, y);
+                        }
+                        cx = x;
+                        cy = y;
+                        i += 2;
+                    }
+                }
+                'L' => {
+                    let mut i = 0;
+                    while i + 1 < a.len() {
+                        let (x, y) = if rel { (cx + a[i], cy + a[i + 1]) } else { (a[i], a[i + 1]) };
+                        p = p.line_to(x, y);
+                        cx = x;
+                        cy = y;
+                        i += 2;
+                    }
+                }
+                'H' => {
+                    for v in a {
+                        let x = if rel { cx + v } else { v };
+                        p = p.line_to(x, cy);
+                        cx = x;
+                    }
+                }
+                'V' => {
+                    for v in a {
+                        let y = if rel { cy + v } else { v };
+                        p = p.line_to(cx, y);
+                        cy = y;
+                    }
+                }
+                'A' => {
+                    let mut i = 0;
+                    while i + 6 < a.len() {
+                        let (rx, ry, rot, large, sweep) = (a[i], a[i + 1], a[i + 2], a[i + 3], a[i + 4]);
+                        let (mut x, mut y) = (a[i + 5], a[i + 6]);
+                        if rel {
+                            x += cx;
+                            y += cy;
+                        }
+                        p = p.svg_arc_to(cx, cy, rx, ry, rot, large != 0.0, sweep != 0.0, x, y);
+                        cx = x;
+                        cy = y;
+                        i += 7;
+                    }
+                }
+                'Z' => {
+                    p = p.close();
+                    cx = sx;
+                    cy = sy;
+                }
+                _ => break,
+            }
+        }
+        p
+    }
+
+    /// SVG 的端点式圆弧 → 圆心式（规范 F.6.5）。
+    #[allow(clippy::too_many_arguments)]
+    fn svg_arc_to(
+        self,
+        x1: f32,
+        y1: f32,
+        rx: f32,
+        ry: f32,
+        rot_deg: f32,
+        large: bool,
+        sweep: bool,
+        x2: f32,
+        y2: f32,
+    ) -> Self {
+        if rx == 0.0 || ry == 0.0 {
+            return self.line_to(x2, y2);
+        }
+        let (mut rx, mut ry) = (rx.abs(), ry.abs());
+        let phi = rot_deg.to_radians();
+        let (sinp, cosp) = phi.sin_cos();
+        let dx2 = (x1 - x2) / 2.0;
+        let dy2 = (y1 - y2) / 2.0;
+        let x1p = cosp * dx2 + sinp * dy2;
+        let y1p = -sinp * dx2 + cosp * dy2;
+        // 半径不足时等比放大
+        let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+        if lambda > 1.0 {
+            let s = lambda.sqrt();
+            rx *= s;
+            ry *= s;
+        }
+        let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+        let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+        let mut coef = if den > 0.0 { (num / den).max(0.0).sqrt() } else { 0.0 };
+        if large == sweep {
+            coef = -coef;
+        }
+        let cxp = coef * rx * y1p / ry;
+        let cyp = -coef * ry * x1p / rx;
+        let cx = cosp * cxp - sinp * cyp + (x1 + x2) / 2.0;
+        let cy = sinp * cxp + cosp * cyp + (y1 + y2) / 2.0;
+        let ang = |ux: f32, uy: f32, vx: f32, vy: f32| {
+            let dot = ux * vx + uy * vy;
+            let len = ((ux * ux + uy * uy) * (vx * vx + vy * vy)).sqrt();
+            let mut a = (dot / len).clamp(-1.0, 1.0).acos();
+            if ux * vy - uy * vx < 0.0 {
+                a = -a;
+            }
+            a
+        };
+        let ux = (x1p - cxp) / rx;
+        let uy = (y1p - cyp) / ry;
+        let vx = (-x1p - cxp) / rx;
+        let vy = (-y1p - cyp) / ry;
+        let a0 = ang(1.0, 0.0, ux, uy);
+        let mut da = ang(ux, uy, vx, vy);
+        if !sweep && da > 0.0 {
+            da -= std::f32::consts::TAU;
+        } else if sweep && da < 0.0 {
+            da += std::f32::consts::TAU;
+        }
+        self.arc(cx, cy, rx, a0.to_degrees(), da.to_degrees())
+    }
+
     /// 圆环弧线（番茄钟进度环）：从 12 点起顺时针 `frac` 圈，`frac ∈ [0,1]`
     pub fn ring_arc(cx: f32, cy: f32, r: f32, frac: f32) -> Self {
         let sweep = 360.0 * frac.clamp(0.0, 1.0);
@@ -413,5 +603,60 @@ mod tests {
         // 100% 时闭合
         let full = Path::ring_arc(50.0, 50.0, 20.0, 1.0);
         assert_eq!(full.cmds.iter().filter(|c| **c == Cmd::Close).count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod svg_tests {
+    use super::*;
+
+    fn end(p: &Path) -> (f32, f32) {
+        p.cmds.last().map(|c| match *c {
+            Cmd::Line(x, y) | Cmd::Move(x, y) => (x, y),
+            Cmd::Arc { cx, cy, rx, ry, a0, sweep } => Path::arc_end(cx, cy, rx, ry, a0, sweep),
+            Cmd::Quad { x, y, .. } | Cmd::Cubic { x, y, .. } => (x, y),
+            Cmd::Close => (0.0, 0.0),
+        }).unwrap_or((0.0, 0.0))
+    }
+
+    #[test]
+    fn 直线与相对命令() {
+        let p = Path::svg("M2 3 L12 3 l0 7 H2 V3");
+        assert_eq!(end(&p), (2.0, 3.0), "闭合后笔位回到起点");
+        // 周长：10 + 7 + 10 + 7 = 34
+        assert!((p.length() - 34.0).abs() < 0.01, "长度 {}", p.length());
+    }
+
+    #[test]
+    fn 半圆弧长度与端点() {
+        // 半径 5 的半圆：弧长 π·5 ≈ 15.708，终点 (10, 0)
+        let p = Path::svg("M0 0 A5 5 0 0 1 10 0");
+        let (x, y) = end(&p);
+        assert!((x - 10.0).abs() < 0.01 && y.abs() < 0.01, "终点 {x},{y}");
+        assert!((p.length() - std::f32::consts::PI * 5.0).abs() < 0.05, "弧长 {}", p.length());
+    }
+
+    #[test]
+    fn 半径不足时等比放大() {
+        // 两点相距 20，但半径写 5 → 规范要求放大到半径 10 的半圆
+        let p = Path::svg("M0 0 A5 5 0 0 1 20 0");
+        let (x, y) = end(&p);
+        assert!((x - 20.0).abs() < 0.05 && y.abs() < 0.05, "终点 {x},{y}（放大后仍落点）");
+        assert!((p.length() - std::f32::consts::PI * 10.0).abs() < 0.1, "弧长 {}", p.length());
+    }
+
+    #[test]
+    fn 圆心与方向() {
+        // sweep=1（顺时针）从 (0,0) 到 (10,0)：圆心应在 (5,0)，弧从 180° 走到 360°
+        let p = Path::svg("M0 0 A5 5 0 0 1 10 0");
+        match p.cmds[1] {
+            Cmd::Arc { cx, cy, rx, a0, sweep, .. } => {
+                assert!((cx - 5.0).abs() < 0.01 && cy.abs() < 0.01, "圆心 {cx},{cy}");
+                assert!((rx - 5.0).abs() < 0.01);
+                assert!((a0 - 180.0).abs() < 0.5, "起角 {a0}");
+                assert!((sweep - 180.0).abs() < 0.5, "扫角 {sweep}");
+            }
+            ref c => panic!("第二段应是弧：{c:?}"),
+        }
     }
 }
