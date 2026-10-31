@@ -263,7 +263,7 @@ impl App {
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
-                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music"
+                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "calendar"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -275,6 +275,7 @@ impl App {
                             Ok(())
                         }
                     },
+                    "calendar" => probe::calendar_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "music" => probe::music_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "weather" => probe::weather_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "todo" => probe::todo_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),

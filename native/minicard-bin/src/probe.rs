@@ -535,3 +535,24 @@ pub fn music_sheet(
     }
     minicard_cards::music::paint(g, te, pal, &t, &m, None)
 }
+
+/// 第十三张测试图：日历卡（240×180），2026-10（1 号周四，31 天 → 5 行），今天是 31 号。
+pub fn calendar_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::calendar::{Calendar, Tokens};
+
+    let t = Tokens::cal(240.0, 180.0);
+    let c = Calendar::build(2026, 10, 4, 31, 31);
+    if debug_layout {
+        minicard_shell::mlog!("cal 网格 {} 格", c.cells.len());
+        let tree = minicard_cards::calendar::tree_hook(&t, &c);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        minicard_cards::calendar::dump_layout(&placed, 0);
+    }
+    minicard_cards::calendar::paint(g, te, pal, &t, &c, None)
+}
