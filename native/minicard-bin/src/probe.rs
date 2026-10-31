@@ -509,3 +509,29 @@ pub fn weather_sheet(
     }
     minicard_cards::weather::paint(g, te, pal, &t, &w, None)
 }
+
+/// 第十二张测试图：音乐卡（240×120）。
+pub fn music_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::music::{Music, Tokens};
+
+    let t = Tokens::music(240.0, 120.0);
+    let m = Music {
+        title: "River Flows in You".into(),
+        artist: "Yiruma".into(),
+        playing: true,
+        position_ms: 83_000,
+        duration_ms: 221_000,
+    };
+    if debug_layout {
+        let tree = minicard_cards::music::tree_hook(&t, &m);
+        let mut mm: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut mm);
+        minicard_cards::music::dump_layout(&placed, 0);
+    }
+    minicard_cards::music::paint(g, te, pal, &t, &m, None)
+}

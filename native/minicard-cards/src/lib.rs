@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod disks;
+pub mod music;
 pub mod net;
 pub mod perf;
 pub mod pomo;

@@ -184,6 +184,22 @@ impl Path {
                         cy = y;
                     }
                 }
+                'Q' => {
+                    let mut i = 0;
+                    while i + 3 < a.len() {
+                        let (mut qx, mut qy, mut x, mut y) = (a[i], a[i + 1], a[i + 2], a[i + 3]);
+                        if rel {
+                            qx += cx;
+                            qy += cy;
+                            x += cx;
+                            y += cy;
+                        }
+                        p = p.quad(qx, qy, x, y);
+                        cx = x;
+                        cy = y;
+                        i += 4;
+                    }
+                }
                 'A' => {
                     let mut i = 0;
                     while i + 6 < a.len() {
