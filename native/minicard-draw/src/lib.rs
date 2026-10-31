@@ -3,8 +3,10 @@
 //! B 段在这里补场景树与布局（`layout`），M0 验证过的三件（text/glass/color）先搬成 crate。
 
 pub mod color;
+pub mod gradient;
 pub mod glass;
 pub mod layout;
 pub mod path;
 pub mod paint;
+pub mod shadow;
 pub mod text;

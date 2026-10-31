@@ -13,8 +13,10 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, ID2D1SimplifiedGeometrySink,
 };
+use windows_numerics::Matrix3x2;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1,
+    ID2D1Bitmap1, ID2D1Layer, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL,
     D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_LINE_JOIN_ROUND, D2D1_QUADRATIC_BEZIER_SEGMENT,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1, D2D1_SWEEP_DIRECTION_CLOCKWISE,
     D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_STROKE_TRANSFORM_TYPE_NORMAL, ID2D1Geometry,
@@ -191,4 +193,141 @@ pub fn push_clip(g: &Gfx, rect: D2D_RECT_F) {
 
 pub fn pop_clip(g: &Gfx) {
     unsafe { g.d2d.PopAxisAlignedClip() };
+}
+
+/// 组不透明度层（`.dim`）。**不是**「把每个颜色乘 alpha」——层内所有绘制先合成到
+/// 一张离屏，再整体按 `opacity` 贴回，所以重叠部分不会被重复减淡（两根进度条重叠时
+/// 逐色乘 alpha 会叠出 0.25 的效果，层不透明度才是 0.5）。
+///
+/// RAII：`Drop` 里 `PopLayer`，忘了 pop 也不会把后续绘制留在层里。
+pub struct OpacityLayer<'a> {
+    g: &'a Gfx,
+    _layer: ID2D1Layer,
+    popped: bool,
+}
+
+impl Drop for OpacityLayer<'_> {
+    fn drop(&mut self) {
+        if !self.popped {
+            unsafe { self.g.d2d.PopLayer() };
+        }
+    }
+}
+
+pub fn push_opacity(g: &Gfx, opacity: f32) -> Result<OpacityLayer<'_>> {
+    unsafe {
+        let layer = g.d2d.CreateLayer(None)?;
+        let params = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: D2D_RECT_F {
+                left: -1.0e6,
+                top: -1.0e6,
+                right: 1.0e6,
+                bottom: 1.0e6,
+            },
+            geometricMask: std::mem::ManuallyDrop::new(None),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.0,
+                M31: 0.0,
+                M32: 0.0,
+            },
+            opacity: opacity.clamp(0.0, 1.0),
+            opacityBrush: std::mem::ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+        };
+        g.d2d.PushLayer(&params, &layer);
+        Ok(OpacityLayer { g, _layer: layer, popped: false })
+    }
+}
+
+/// 画一块圆角矩形阴影（形状左上角 = `origin`）。掩码按参数缓存，位图也缓存 ——
+/// 阴影是静态的，每帧重算掩码 + 重传纹理纯属浪费。
+pub fn draw_shadow(
+    g: &Gfx,
+    spec: &crate::shadow::Spec,
+    origin: (f32, f32),
+    color: D2D1_COLOR_F,
+) -> Result<()> {
+    use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR;
+    let key = shadow_key(spec, color);
+    thread_local! {
+        static CACHE: RefCell<HashMap<u64, (ID2D1Bitmap1, f32, f32, f32, f32)>> =
+            RefCell::new(HashMap::new());
+    }
+    if let Some((bmp, ox, oy, bw, bh)) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        let dst = D2D_RECT_F {
+            left: origin.0 + ox,
+            top: origin.1 + oy,
+            right: origin.0 + ox + bw,
+            bottom: origin.1 + oy + bh,
+        };
+        unsafe {
+            g.d2d.DrawBitmap(
+                &bmp,
+                Some(&dst),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            )
+        };
+        return Ok(());
+    }
+
+    let m = crate::shadow::mask(spec);
+    // 覆盖率 → 预乘 BGRA（阴影只有一种颜色，逐像素乘 alpha 即可）
+    let mut bgra = vec![0u8; (m.w * m.h * 4) as usize];
+    for i in 0..(m.w * m.h) as usize {
+        let a = m.alpha[i] as f32 / 255.0 * color.a;
+        bgra[i * 4] = (color.b * a * 255.0).round().clamp(0.0, 255.0) as u8;
+        bgra[i * 4 + 1] = (color.g * a * 255.0).round().clamp(0.0, 255.0) as u8;
+        bgra[i * 4 + 2] = (color.r * a * 255.0).round().clamp(0.0, 255.0) as u8;
+        bgra[i * 4 + 3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    let bmp = g.bitmap_from_bgra(&bgra, m.w, m.h)?;
+    let dst = D2D_RECT_F {
+        left: origin.0 + m.ox,
+        top: origin.1 + m.oy,
+        right: origin.0 + m.ox + m.w as f32,
+        bottom: origin.1 + m.oy + m.h as f32,
+    };
+    unsafe {
+        g.d2d.DrawBitmap(
+            &bmp,
+            Some(&dst),
+            1.0,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            None,
+            None,
+        )
+    };
+    CACHE.with(|c| {
+        let mut mm = c.borrow_mut();
+        if mm.len() > 16 {
+            mm.clear();
+        }
+        mm.insert(
+            key,
+            (bmp, m.ox, m.oy, m.w as f32, m.h as f32),
+        );
+    });
+    Ok(())
+}
+
+fn shadow_key(spec: &crate::shadow::Spec, color: D2D1_COLOR_F) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut mix = |v: f32| {
+        h ^= v.to_bits() as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    };
+    for v in [spec.w, spec.h, spec.radius, spec.spread, spec.blur, spec.dx, spec.dy] {
+        mix(v);
+    }
+    for v in [color.r, color.g, color.b, color.a] {
+        mix(v);
+    }
+    h
 }

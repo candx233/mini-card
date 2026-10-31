@@ -61,3 +61,91 @@ pub fn shapes(g: &Gfx, te: &TextEngine, w: f32, h: f32) -> Result<()> {
     }
     Ok(())
 }
+
+/// 第二张测试图：渐变（线性/径向）+ 组不透明度 + 形状阴影。
+///
+/// 版面（240×240）：
+/// ① 线性渐变 135°：(8,8)-(112,112)，黑→白
+/// ② 径向渐变：圆心 (180,60) r=50，白→透明
+/// ③ 组不透明度：两个白方块在 opacity=0.5 的层里重叠
+/// ④ 阴影：白圆角矩形 (150,150)-(220,200) r=10，dy=6 / blur=8 / 黑 34%
+pub fn shapes2(g: &Gfx, _te: &TextEngine, _w: f32, _h: f32) -> Result<()> {
+    use minicard_draw::gradient::{self, Grad, Stop};
+
+    g.begin()?;
+    g.push_clip()?;
+
+        // ① 线性渐变：黑 → 白，135°（左上到右下）
+        let rect = D2D_RECT_F { left: 8.0, top: 8.0, right: 112.0, bottom: 112.0 };
+        let (grad, stops) = gradient::linear_two(
+            135.0,
+            rect,
+            D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+        );
+        gradient::fill_round(g, rect, 10.0, &grad, &stops)?;
+
+        // ② 径向渐变：白 → 透明
+        let rg = Grad::Radial(gradient::Radial {
+            cx: 180.0,
+            cy: 60.0,
+            rx: 50.0,
+            ry: 50.0,
+            fx: 0.0,
+            fy: 0.0,
+        });
+        let rs = [
+            Stop { pos: 0.0, color: D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } },
+            Stop { pos: 1.0, color: D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.0 } },
+        ];
+        gradient::fill_round(
+            g,
+            D2D_RECT_F { left: 130.0, top: 10.0, right: 230.0, bottom: 110.0 },
+            0.0,
+            &rg,
+            &rs,
+        )?;
+
+        // ③ 组不透明度 0.5：两块重叠白方
+        {
+            let _layer = minicard_draw::paint::push_opacity(g, 0.5)?;
+            set_color(g, WHITE)?;
+            fill_round(
+                g,
+                D2D_RECT_F { left: 20.0, top: 140.0, right: 90.0, bottom: 200.0 },
+                0.0,
+            )?;
+            fill_round(
+                g,
+                D2D_RECT_F { left: 60.0, top: 170.0, right: 130.0, bottom: 230.0 },
+                0.0,
+            )?;
+        }
+
+        // ④ 阴影 + 白圆角矩形盖在影子上
+        let spec = minicard_draw::shadow::Spec {
+            w: 70.0,
+            h: 50.0,
+            radius: 10.0,
+            spread: 0.0,
+            blur: 8.0,
+            dx: 0.0,
+            dy: 6.0,
+        };
+        minicard_draw::paint::draw_shadow(
+            g,
+            &spec,
+            (150.0, 150.0),
+            D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.34 },
+        )?;
+        set_color(g, WHITE)?;
+        fill_round(
+            g,
+            D2D_RECT_F { left: 150.0, top: 150.0, right: 220.0, bottom: 200.0 },
+            10.0,
+        )?;
+
+    g.pop_clip();
+    g.end()?;
+    Ok(())
+}
