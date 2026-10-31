@@ -124,9 +124,11 @@ fn stop_collection(g: &Gfx, stops: &[Stop]) -> Result<ID2D1GradientStopCollectio
 
 /// 建（或复用）渐变笔刷。同一组参数只建一次 —— 每帧新建 COM 对象是纯浪费。
 pub fn brush(g: &Gfx, grad: &Grad, stops: &[Stop]) -> Result<ID2D1Brush> {
-    let key = key_of(grad, stops);
+    // 渐变笔刷属于**某个设备上下文**：一进程多窗口（后面要把 9 张卡收进一个进程）时，
+    // 不同窗口各有一份，键里不带上下文身份就会把 A 窗的笔刷拿到 B 窗上用（静默画错）。
+    let key = (g.d2d.as_raw() as usize, key_of(grad, stops));
     thread_local! {
-        static CACHE: RefCell<HashMap<u64, ID2D1Brush>> = RefCell::new(HashMap::new());
+        static CACHE: RefCell<HashMap<(usize, u64), ID2D1Brush>> = RefCell::new(HashMap::new());
     }
     if let Some(b) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return Ok(b);

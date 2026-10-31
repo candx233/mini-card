@@ -146,10 +146,13 @@ pub fn geometry(g: &Gfx, p: &Path) -> Result<ID2D1PathGeometry1> {
 /// 按线宽缓存 —— 宽度种类很少，每帧新建 COM 对象是纯浪费。
 pub fn round_stroke(g: &Gfx, width: f32) -> Result<ID2D1StrokeStyle> {
     thread_local! {
-        static CACHE: RefCell<HashMap<u32, ID2D1StrokeStyle>> = RefCell::new(HashMap::new());
+        static CACHE: RefCell<HashMap<(usize, u32), ID2D1StrokeStyle>> =
+            RefCell::new(HashMap::new());
     }
+    // stroke style 建在**该窗口自己的 factory** 上，跨窗口复用会把 A 厂的资源喂给 B 厂
+    let ctx = g.factory.as_raw() as usize;
     CACHE.with(|c| {
-        if let Some(s) = c.borrow().get(&width.to_bits()) {
+        if let Some(s) = c.borrow().get(&(ctx, width.to_bits())) {
             return Ok(s.clone());
         }
         let props = D2D1_STROKE_STYLE_PROPERTIES1 {
@@ -164,7 +167,7 @@ pub fn round_stroke(g: &Gfx, width: f32) -> Result<ID2D1StrokeStyle> {
         };
         let s1 = unsafe { g.factory.CreateStrokeStyle(&props, None)? };
         let s: ID2D1StrokeStyle = s1.cast()?;
-        c.borrow_mut().insert(width.to_bits(), s.clone());
+        c.borrow_mut().insert((ctx, width.to_bits()), s.clone());
         Ok(s)
     })
 }
@@ -254,9 +257,11 @@ pub fn draw_shadow(
     use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR;
     let key = shadow_key(spec, color);
     thread_local! {
-        static CACHE: RefCell<HashMap<u64, (ID2D1Bitmap1, f32, f32, f32, f32)>> =
+        static CACHE: RefCell<HashMap<(usize, u64), (ID2D1Bitmap1, f32, f32, f32, f32)>> =
             RefCell::new(HashMap::new());
     }
+    // 位图也是上下文资源：键里必须带上下文身份（多窗口共栈时不同窗口各一份）
+    let key = (g.d2d.as_raw() as usize, key);
     if let Some((bmp, ox, oy, bw, bh)) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         let dst = D2D_RECT_F {
             left: origin.0 + ox,
