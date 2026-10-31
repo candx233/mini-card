@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anim;
+mod live;
 mod probe;
 
 use std::path::PathBuf;
@@ -68,6 +69,8 @@ struct Args {
     gamma: f32,
     contrast: f32,
     rmode: u8,
+    live: bool,
+    live_topmost: bool,
     emb_off: f32,
     emb_a: f32,
     text_dx: f32,
@@ -106,6 +109,8 @@ impl Args {
             gamma: 0.0,
             contrast: 0.0,
             rmode: 0,
+            live: false,
+            live_topmost: false,
             emb_off: 0.0,
             emb_a: 0.0,
             text_dx: 0.0,
@@ -152,6 +157,8 @@ impl Args {
                 "--pomo-remain" => a.pomo_remain = next(&mut i).parse().unwrap_or(0),
                 "--gamma" => a.gamma = next(&mut i).parse().unwrap_or(0.0),
                 "--contrast" => a.contrast = next(&mut i).parse().unwrap_or(0.0),
+                "--live" => a.live = true,
+                "--live-topmost" => a.live_topmost = true,
                 "--rmode" => a.rmode = next(&mut i).parse().unwrap_or(0),
                 "--embolden-off" => a.emb_off = next(&mut i).parse().unwrap_or(0.0),
                 "--embolden-a" => a.emb_a = next(&mut i).parse().unwrap_or(0.0),
@@ -426,10 +433,40 @@ impl App {
     }
 }
 
+/// 同目录下的三个字面（Regular/Medium/Semibold），供 live 模式装字体用
+pub fn font_set(font: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let dir = font.parent().unwrap_or(std::path::Path::new("."));
+    let mut files: Vec<std::path::PathBuf> = ["MiSans-Regular.ttf", "MiSans-Medium.ttf", "MiSans-Semibold.ttf"]
+        .iter()
+        .map(|n| dir.join(n))
+        .filter(|p| p.exists())
+        .collect();
+    if files.is_empty() {
+        files.push(font.to_path_buf());
+    }
+    files
+}
+
 fn main() -> Result<()> {
     let t0 = Instant::now();
     minicard_shell::log::init(&std::env::temp_dir().join("minicard-native.log"));
     let args = Args::parse();
+
+    // 真数据接线模式：读 config.toml → 每张启用的卡一个窗口 → 共用采样线程
+    if args.live {
+        let _ = unsafe {
+            windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+                windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            )
+        };
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            );
+        }
+        return live::start(&args.font, args.blur, args.live_topmost, args.exit_after);
+    }
 
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
