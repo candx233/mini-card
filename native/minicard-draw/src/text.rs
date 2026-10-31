@@ -262,25 +262,17 @@ impl TextEngine {
     }
 }
 
-/// 布局层的度量来源：线上用的就是这一份（测试里换成假字体）。
-///
-/// 宽高口径与绘制一致 —— 同一个 `format_cached`（行盒已钉死）＋ `layout_cached`，
-/// 所以「量出来的高」和「画出来的高」天然一致，不会差半个行距。
-impl crate::layout::Measurer for TextEngine {
-    fn text(&mut self, t: &crate::layout::TextSpec, max_w: f32) -> (f32, f32) {
-        // 只有显式声明允许换行的文字才按 `white-space:normal` 量；其余照 CSS 默认的 nowrap
+impl TextEngine {
+    /// 度量一段文字（按 `max_w` 换行后的宽高）。`Measurer` 的两个 impl 都走这里，
+    /// 免得「只读引用」与「可变引用」两套实现漂移。
+    pub fn measure(&self, t: &crate::layout::TextSpec, max_w: f32) -> (f32, f32) {
         let mode = if t.wrap && max_w > 0.0 { Mode::Wrap } else { Mode::Clip };
-        let fmt = match self.format_mode(t.size, t.line_h, 0, mode) {
+        let fmt = match self.format_mode(t.size, t.line_h, t.align, mode) {
             Ok(f) => f,
             Err(_) => return (0.0, t.line_h),
         };
-        // max_w <= 0 = 不限宽：给个足够大的盒子，让单行自然排开
-        let (w, h) = if max_w > 0.0 {
-            (max_w, 4096.0)
-        } else {
-            (4096.0, t.line_h * 1.5)
-        };
-        match self.layout_mode(0, &fmt, &t.s, w, h, false, mode) {
+        let (w, h) = if max_w > 0.0 { (max_w, 4096.0) } else { (4096.0, t.line_h * 1.5) };
+        match self.layout_mode(t.align, &fmt, &t.s, w, h, t.tabular, mode) {
             Ok(l) => unsafe {
                 let mut m = DWRITE_TEXT_METRICS::default();
                 match l.GetMetrics(&mut m) {
@@ -292,8 +284,28 @@ impl crate::layout::Measurer for TextEngine {
         }
     }
 
-    fn ascent(&mut self, t: &crate::layout::TextSpec) -> f32 {
+    pub fn ascent_of(&self, t: &crate::layout::TextSpec) -> f32 {
         self.ascent * t.size
+    }
+}
+
+/// 绘制层手里只有 `&TextEngine`（没有所有权），没必要为「可变性」把所有调用点改 `&mut`。
+impl crate::layout::Measurer for &TextEngine {
+    fn text(&mut self, t: &crate::layout::TextSpec, max_w: f32) -> (f32, f32) {
+        TextEngine::measure(self, t, max_w)
+    }
+    fn ascent(&mut self, t: &crate::layout::TextSpec) -> f32 {
+        TextEngine::ascent_of(self, t)
+    }
+}
+
+/// 拥有所有权的 `TextEngine` 也能当度量器（测试与需要 `&mut dyn Measurer` 的场合）。
+impl crate::layout::Measurer for TextEngine {
+    fn text(&mut self, t: &crate::layout::TextSpec, max_w: f32) -> (f32, f32) {
+        self.measure(t, max_w)
+    }
+    fn ascent(&mut self, t: &crate::layout::TextSpec) -> f32 {
+        self.ascent_of(t)
     }
 }
 

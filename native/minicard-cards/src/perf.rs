@@ -16,6 +16,7 @@ use windows::Win32::Graphics::Direct2D::*;
 use windows_numerics::Vector2;
 
 use minicard_draw::color::Palette;
+use minicard_draw::layout::{layout, Dim, Dir, Justify, Node, Placed, Rect, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_round};
 use minicard_draw::text::TextEngine;
 use minicard_shell::gfx::Gfx;
@@ -90,65 +91,33 @@ pub fn paint(
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
     snap_text: bool,
 ) -> Result<()> {
+    // ① 场景树 → 布局（几何由 B1 算，不再手写 row_geom 那套公式）
+    let tree = tree(t, rows);
+    let mut m: &TextEngine = te; // `impl Measurer for &TextEngine`：本地绑定要可变
+    let placed = layout(&tree, (t.w, t.h), &mut m);
+
     unsafe {
         g.begin()?;
         g.push_clip()?;
 
-        // ① 磨砂层（壁纸切片，已模糊）
+        // ② 背景：磨砂层 / 白纱 / 描边（是「卡的皮」，不是内容，不进树）
         if let Some((bmp, rect)) = glass {
             g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
         }
-
-        // ② 白纱 + 描边（.veil）
         let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
         set_color(g, pal.border)?;
-        stroke_round(g, 
+        stroke_round(
+            g,
             D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
 
-        // ③ 三行
-        let fmt_lab = te.format_cached(t.lab, t.line_h, 0)?;
-        let fmt_pct = te.format_cached(t.lab, t.line_h, 1)?;
-        let bw = t.bar_w();
-        for (i, row) in rows.iter().enumerate() {
-            let (mut line_top, bar_top) = t.row_geom(rows.len(), i);
-            if snap_text {
-                line_top = line_top.round();
-            }
+        // ③ 内容：照树画
+        paint_tree(g, te, pal, rows, &placed, placed.rect, snap_text)?;
 
-            // 文字阴影：CSS text-shadow 0 .833px 1.667px #000/45%（偏移照搬；模糊省到 M1）
-            let lay = te.layout_cached(0, &fmt_lab, &row.label, bw, t.line_h + 8.0, false)?;
-            set_color(g, pal.shadow)?;
-            g.d2d.DrawTextLayout(Vector2 { X: t.pad_lr, Y: line_top + 0.833 }, &lay, &g.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-
-            let layp = te.layout_cached(1, &fmt_pct, &row.text, bw, t.line_h + 8.0, true)?;
-            g.d2d.DrawTextLayout(Vector2 { X: t.pad_lr, Y: line_top + 0.833 }, &layp, &g.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-
-            set_color(g, pal.fg)?;
-            g.d2d.DrawTextLayout(Vector2 { X: t.pad_lr, Y: line_top }, &lay, &g.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-            g.d2d.DrawTextLayout(Vector2 { X: t.pad_lr, Y: line_top }, &layp, &g.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-
-            // 进度条：底轨（fg 25%）+ 填充（fg 90%），药丸
-            let r = t.bar_h / 2.0;
-            set_color(g, pal.track)?;
-            fill_round(g, D2D_RECT_F { left: t.pad_lr, top: bar_top, right: t.pad_lr + bw, bottom: bar_top + t.bar_h }, r)?;
-            if let Some(p) = row.pct {
-                let fw = bw * (p.clamp(0.0, 100.0) / 100.0);
-                if fw > 0.0 {
-                    set_color(g, pal.fill)?;
-                    fill_round(g, 
-                        D2D_RECT_F { left: t.pad_lr, top: bar_top, right: t.pad_lr + fw, bottom: bar_top + t.bar_h },
-                        r,
-                    )?;
-                }
-            }
-        }
-
-        // 诊断：半透明红块压满卡面。用于判定 DComp 合成是否真的走逐像素 alpha
         if pal.debug_alpha {
             set_color(g, D2D1_COLOR_F { r: 1.0, g: 0.0, b: 0.0, a: 0.5 })?;
             fill_round(g, full, t.radius)?;
@@ -158,4 +127,97 @@ pub fn paint(
         g.end()?;
         Ok(())
     }
+}
+
+/// 按卡尺寸建场景树。id 约定：进度条 = 1000 + 行号。
+fn tree(t: &Tokens, rows: &[Row]) -> Node {
+    let row_nodes = rows.iter().enumerate().map(|(i, r)| {
+        let lab = Node::text(text_spec(&r.label, t.lab, t.line_h, 0));
+        let pct = Node::text(text_spec(&r.text, t.lab, t.line_h, 1))
+            .tabular(true)
+            .style(|s| s.grow(1.0));
+        let line = Node::new(Dir::Row).child(lab).child(pct);
+        let bar = Node::new(Dir::Row)
+            .id(1000 + i as u32)
+            .style(|s| s.size(Dim::Pct(1.0), Dim::Px(t.bar_h)));
+        Node::new(Dir::Column)
+            .style(|s| s.grow(1.0).basis(0.0).justify(Justify::Center).gap(t.gap))
+            .child(line)
+            .child(bar)
+    });
+    Node::new(Dir::Column)
+        .style(|s| {
+            s.size(Dim::Px(t.w), Dim::Px(t.h))
+                .pad([t.pad_tb, t.pad_lr, t.pad_tb, t.pad_lr])
+        })
+        .child(
+            Node::new(Dir::Column)
+                .style(|s| s.grow(1.0).basis(0.0).pad([0.0, 0.0, t.rows_pb, 0.0]))
+                .children_of(row_nodes),
+        )
+}
+
+fn text_spec(s: &str, size: f32, line_h: f32, align: u8) -> TextSpec {
+    TextSpec { s: s.to_string(), size, line_h, weight: 400, wrap: false, align, tabular: false }
+}
+
+/// 画一棵排好版的树。
+///
+/// 文字的右边界取**父盒右缘**：CSS 里 `text-align` 相对包含块生效，`.pct` 的右对齐
+/// 就是靠这个对上进度条右端的（照自己的盒宽算会短一截 —— 两段文字共享一行时尤其明显）。
+fn paint_tree(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &Palette,
+    rows: &[Row],
+    p: &Placed,
+    parent: Rect,
+    snap_text: bool,
+) -> Result<()> {
+    if let Some(spec) = p.text() {
+        let right = parent.right().max(p.rect.right());
+        let box_w = (right - p.rect.x).max(0.0);
+        let mut y = p.rect.y;
+        if snap_text {
+            y = y.round();
+        }
+        let fmt = te.format_cached(spec.size, spec.line_h, spec.align)?;
+        let lay = te.layout_cached(spec.align, &fmt, &spec.s, box_w, spec.line_h + 8.0, spec.tabular)?;
+        set_color(g, pal.shadow)?;
+        unsafe {
+            g.d2d.DrawTextLayout(
+                Vector2 { X: p.rect.x, Y: y + 0.833 },
+                &lay,
+                &g.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+            set_color(g, pal.fg)?;
+            g.d2d.DrawTextLayout(
+                Vector2 { X: p.rect.x, Y: y },
+                &lay,
+                &g.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+        }
+    } else if p.id >= 1000 {
+        let i = (p.id - 1000) as usize;
+        let r = p.rect.h / 2.0;
+        set_color(g, pal.track)?;
+        fill_round(g, to_d2d(p.rect), r)?;
+        if let Some(pct) = rows.get(i).and_then(|row| row.pct) {
+            let w = p.rect.w * (pct.clamp(0.0, 100.0) / 100.0);
+            if w > 0.0 {
+                set_color(g, pal.fill)?;
+                fill_round(g, to_d2d(Rect { w, ..p.rect }), r)?;
+            }
+        }
+    }
+    for c in &p.children {
+        paint_tree(g, te, pal, rows, c, p.rect, snap_text)?;
+    }
+    Ok(())
+}
+
+fn to_d2d(r: Rect) -> D2D_RECT_F {
+    D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() }
 }

@@ -139,11 +139,15 @@ pub struct TextSpec {
     pub weight: u16,
     /// 是否允许自动换行（CSS `white-space:normal`）；默认 false = nowrap
     pub wrap: bool,
+    /// 文本在盒内的水平对齐：0 = leading（CSS `text-align:left`），1 = trailing（`right`）
+    pub align: u8,
+    /// 等宽数字（CSS `font-variant-numeric: tabular-nums`）
+    pub tabular: bool,
 }
 
 impl TextSpec {
     pub fn new(s: impl Into<String>, size: f32, line_h: f32) -> Self {
-        Self { s: s.into(), size, line_h, weight: 400, wrap: false }
+        Self { s: s.into(), size, line_h, weight: 400, wrap: false, align: 0, tabular: false }
     }
 }
 
@@ -156,17 +160,20 @@ pub enum Content {
 #[derive(Clone, Debug)]
 pub struct Node {
     pub style: Style,
+    /// 业务标识（绘制层用它把节点映射回数据；布局本身不用）
+    pub id: u32,
     pub content: Content,
     pub children: Vec<Node>,
 }
 
 impl Node {
     pub fn new(dir: Dir) -> Self {
-        Self { style: Style::new(dir), content: Content::None, children: Vec::new() }
+        Self { style: Style::new(dir), id: 0, content: Content::None, children: Vec::new() }
     }
     pub fn text(t: TextSpec) -> Self {
         Self {
             style: Style::new(Dir::Row),
+            id: 0,
             content: Content::Text(t),
             children: Vec::new(),
         }
@@ -174,8 +181,26 @@ impl Node {
     pub fn text_s(s: impl Into<String>, size: f32, line_h: f32) -> Self {
         Self::text(TextSpec::new(s, size, line_h))
     }
+    pub fn id(mut self, id: u32) -> Self {
+        self.id = id;
+        self
+    }
     pub fn style(mut self, f: impl FnOnce(Style) -> Style) -> Self {
         self.style = f(self.style);
+        self
+    }
+    /// 文字在盒内右对齐（CSS `text-align:right`）—— 数值列用
+    pub fn align_text(mut self, a: u8) -> Self {
+        if let Content::Text(t) = &mut self.content {
+            t.align = a;
+        }
+        self
+    }
+    /// 等宽数字（`tabular-nums`）
+    pub fn tabular(mut self, on: bool) -> Self {
+        if let Content::Text(t) = &mut self.content {
+            t.tabular = on;
+        }
         self
     }
     /// 允许换行（对应 CSS `white-space:normal`）
@@ -241,6 +266,7 @@ impl Rect {
 #[derive(Clone, Debug)]
 pub struct Placed {
     pub rect: Rect,
+    pub id: u32,
     pub content: Content,
     pub style: Style,
     pub children: Vec<Placed>,
@@ -319,7 +345,13 @@ fn measure(n: &Node, avail_w: f32, avail_h: f32, m: &mut dyn Measurer) -> (f32, 
 }
 
 fn place(n: &Node, rect: Rect, m: &mut dyn Measurer) -> Placed {
-    let mut out = Placed { rect, content: n.content.clone(), style: n.style, children: Vec::new() };
+    let mut out = Placed {
+        rect,
+        id: n.id,
+        content: n.content.clone(),
+        style: n.style,
+        children: Vec::new(),
+    };
     if n.children.is_empty() {
         return out;
     }
