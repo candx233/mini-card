@@ -67,6 +67,7 @@ struct Args {
     pomo_remain: u64,
     gamma: f32,
     contrast: f32,
+    rmode: u8,
 }
 
 impl Args {
@@ -100,6 +101,7 @@ impl Args {
             pomo_remain: 0,
             gamma: 0.0,
             contrast: 0.0,
+            rmode: 0,
             // (duplicate gamma/contrast removed)
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -142,6 +144,7 @@ impl Args {
                 "--pomo-remain" => a.pomo_remain = next(&mut i).parse().unwrap_or(0),
                 "--gamma" => a.gamma = next(&mut i).parse().unwrap_or(0.0),
                 "--contrast" => a.contrast = next(&mut i).parse().unwrap_or(0.0),
+                "--rmode" => a.rmode = next(&mut i).parse().unwrap_or(0),
                 "--viewer" => {
                     let s = next(&mut i);
                     let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
@@ -609,7 +612,10 @@ fn main() -> Result<()> {
 
     // 文字栅格化参数（只有显式给了 --gamma 才动，默认沿用系统）
     if args.gamma > 0.0 {
-        match app.te.rendering_params(args.gamma, args.contrast) {
+        // 实测结论（2026-10-31）：这条路上 SetTextRenderingParams **不改变输出**。
+        // 引擎把 SetTextAntialiasMode 设成 GRAYSCALE 后参数被忽略；改成 DEFAULT 也没变化。
+        // 保留开关只为将来换字体/换目标时能快速复验，别指望它调 AA。
+        match app.te.rendering_params(args.gamma, args.contrast, args.rmode) {
             Ok(rp) => {
                 let _ = app.gfx.d2d.SetTextRenderingParams(&rp);
             }

@@ -466,18 +466,32 @@ impl TextEngine {
         &self,
         gamma: f32,
         enhanced_contrast: f32,
+        rmode: u8,
     ) -> windows::core::Result<windows::Win32::Graphics::DirectWrite::IDWriteRenderingParams> {
         use windows::Win32::Graphics::DirectWrite::{
-            DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+            DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_ALIASED,
+            DWRITE_RENDERING_MODE_GDI_NATURAL, DWRITE_RENDERING_MODE_NATURAL,
+            DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        };
+        let mode = match rmode {
+            1 => DWRITE_RENDERING_MODE_NATURAL,
+            2 => DWRITE_RENDERING_MODE_GDI_NATURAL,
+            3 => DWRITE_RENDERING_MODE_ALIASED,
+            _ => DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
         };
         unsafe {
-            self.factory.CreateCustomRenderingParams(
+            // IDWriteFactory1 的版本多一个「灰阶增强对比度」——灰阶抗锯齿下就是这个系数
+            // 决定字形边缘的粗细（IDWriteRenderingParams1 只暴露 getter，设不进去）。
+            let f1: windows::Win32::Graphics::DirectWrite::IDWriteFactory1 = self.factory.cast()?;
+            let p1 = f1.CreateCustomRenderingParams(
                 gamma,
+                enhanced_contrast,
                 enhanced_contrast,
                 0.0,
                 DWRITE_PIXEL_GEOMETRY_FLAT,
-                DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-            )
+                mode,
+            )?;
+            p1.cast()
         }
     }
 

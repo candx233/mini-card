@@ -12,7 +12,7 @@ use windows_numerics::Vector2;
 
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
-use minicard_draw::paint::{fill_round, push_opacity, set_color, stroke_path, stroke_round};
+use minicard_draw::paint::{fill_round, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
 use minicard_draw::text::{Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
@@ -161,13 +161,18 @@ pub fn paint(
 }
 
 fn text_node(s: &str, size: f32, lh: f32, weight: u16) -> Node {
+    text_node_aligned(s, size, lh, weight, 0)
+}
+
+/// `align`: 0 左 / 1 右 / 2 居中（走 DWrite 的文本对齐，盒子有多宽就按多宽居中）
+fn text_node_aligned(s: &str, size: f32, lh: f32, weight: u16, align: u8) -> Node {
     Node::text(TextSpec {
         s: s.to_string(),
         size,
         line_h: lh,
         weight,
         wrap: false,
-        align: 0,
+        align,
         tabular: true,
         spacing_em: 0.0,
     })
@@ -216,7 +221,7 @@ fn tree(t: &Tokens, c: &Calendar) -> Node {
     let mut wd = Node::new(Dir::Row).style(move |s| s.size(Dim::Pct(1.0), Dim::Px(t.wd_lh)));
     for (i, w) in ["一", "二", "三", "四", "五", "六", "日"].iter().enumerate() {
         wd = wd.child(
-            text_node(w, t.wd_fs, t.wd_lh, 400)
+            text_node_aligned(w, t.wd_fs, t.wd_lh, 400, 2)
                 .id(9520 + i as u32)
                 .style(|s| {
                     s.grow(1.0)
@@ -245,7 +250,7 @@ fn tree(t: &Tokens, c: &Calendar) -> Node {
             let id = 9600 + idx as u32;
             let is_today = cell.map(|x| x.today && !x.other).unwrap_or(false);
             row = row.child(
-                text_node(&txt, t.day_fs, t.day_lh, 400)
+                text_node_aligned(&txt, t.day_fs, t.day_lh, if is_today { 600 } else { 400 }, 2)
                     .id(id)
                     .style(move |s| {
                         // 今日格的 `<i>` 是 22×22，会把整格撑到 22 高（比普通格高 4.5），
@@ -317,16 +322,16 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
             if cell.today && !cell.other {
                 // 块 = 22×22，横向居中于列、纵向就是节点盒子（节点高已经设成 22）
                 let r = pl.rect;
-                let left = (r.x + (r.w - t.chip) / 2.0).round();
-                let top = r.y.round();
+                let left = r.x + (r.w - t.chip) / 2.0;
+                let top = r.y;
                 set_color(g, pal.accent)?;
                 fill_round(
                     g,
                     D2D_RECT_F {
                         left,
                         top,
-                        right: left + t.chip.round(),
-                        bottom: top + t.chip.round(),
+                        right: left + t.chip,
+                        bottom: top + t.chip,
                     },
                     t.chip_r,
                 )?;
@@ -350,8 +355,8 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
         } else {
             pal.fg
         };
-        // 跨月格 32% 不透明（CSS opacity: .32）
-        let layer = if other { Some(push_opacity(g, 0.32)?) } else { None };
+        // 跨月格 32% 不透明：用颜色 alpha（套 opacity 层会叠加，实测 0.32 → 0.08）
+        let color = if other { D2D1_COLOR_F { a: 0.32, ..color } } else { color };
         set_color(g, color)?;
         let lay = te.layout_spec(spec, pl.rect.w + 2.0, spec.line_h + 6.0, TextMode::Clip)?;
         // 今日数字要在 22 高的块里居中（普通格是 17.5 的行盒，直接画即可）
@@ -363,13 +368,13 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
         };
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: pl.rect.x + dx, Y: pl.rect.y + dy },
+                // 试：把基线吸附到整像素（Skia 画水平文本时就是这么做的）
+                Vector2 { X: pl.rect.x + dx, Y: (pl.rect.y + dy).round() },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
         }
-        drop(layer);
     }
     for ch in &pl.children {
         paint_tree(g, te, pal, t, c, ch)?;
