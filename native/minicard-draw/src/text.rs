@@ -234,3 +234,32 @@ impl crate::layout::Measurer for TextEngine {
         self.ascent * t.size
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缓存键必须含宽度：同一段文字在同一对齐下，两个可用宽度要拿到各自的布局。
+    ///
+    /// 这条不是理论洁癖 —— `align=1`（trailing）的绘制是「按布局盒右缘右对齐」，
+    /// 性能卡的百分比就是这么画的：先被度量按 4096 宽建过一次，再按 220 宽绘制时若
+    /// 命中旧布局，数字会被右对齐到 4096 的位置，整块飞出卡片（看着像「数值消失了」）。
+    #[test]
+    fn 布局缓存键必须含宽度() {
+        let p = std::path::Path::new("../assets/fonts/MiSans-Regular.ttf");
+        if !p.exists() {
+            eprintln!("跳过：字体不在 {}（先跑 assets/fonts/build_misans_ttf.py）", p.display());
+            return;
+        }
+        let te = TextEngine::new(p, "MiSans").unwrap();
+        let fmt = te.format_cached(13.125, 15.09375, 1).unwrap();
+        let wide = te.layout_cached(1, &fmt, "27%", 4096.0, 20.0, true).unwrap();
+        let narrow = te.layout_cached(1, &fmt, "27%", 60.0, 20.0, true).unwrap();
+        let (w_wide, w_narrow) = unsafe { (wide.GetMaxWidth(), narrow.GetMaxWidth()) };
+        assert!((w_wide - 4096.0).abs() < 0.01, "宽盒子布局宽 = {w_wide}");
+        assert!(
+            (w_narrow - 60.0).abs() < 0.01,
+            "窄盒子拿到旧布局（宽 {w_narrow}）= 缓存键漏了宽度"
+        );
+    }
+}
