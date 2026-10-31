@@ -358,7 +358,8 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
         // 跨月格 32% 不透明：用颜色 alpha（套 opacity 层会叠加，实测 0.32 → 0.08）
         let color = if other { D2D1_COLOR_F { a: 0.32, ..color } } else { color };
         set_color(g, color)?;
-        let lay = te.layout_spec(spec, pl.rect.w + 2.0, spec.line_h + 6.0, TextMode::Clip)?;
+        // 宽度必须**恰好**等于盒子：多给 2px 在居中时会把文字推右 1px（实测 dx 趋势揭示的）
+        let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, TextMode::Clip)?;
         // 今日数字要在 22 高的块里居中（普通格是 17.5 的行盒，直接画即可）
         let (dx, dy) = if is_today {
             let tw = te.measure(spec, 0.0).0;
@@ -368,12 +369,26 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
         };
         unsafe {
             g.d2d.DrawTextLayout(
-                // 试：把基线吸附到整像素（Skia 画水平文本时就是这么做的）
-                Vector2 { X: pl.rect.x + dx, Y: (pl.rect.y + dy).round() },
+                Vector2 { X: pl.rect.x + dx + g.text_dx, Y: pl.rect.y + dy + g.text_dy },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
+            // 笔画加粗实验：Chromium 的 AA 会做 stem darkening（同一覆盖率下更暗），
+            // D2D 是纯覆盖率。用两个亚像素偏移的低透明度副本把边缘补厚。
+            let (off, a) = (g.embolden_off, g.embolden_a);
+            if off > 0.0 && a > 0.0 {
+                for (ox, oy) in [(-off, 0.0), (off, 0.0)] {
+                    set_color(g, D2D1_COLOR_F { a, ..color })?;
+                    g.d2d.DrawTextLayout(
+                        Vector2 { X: pl.rect.x + dx + ox, Y: pl.rect.y + dy + oy },
+                        &lay,
+                        &g.brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+                set_color(g, color)?;
+            }
         }
     }
     for ch in &pl.children {

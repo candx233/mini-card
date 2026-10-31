@@ -324,7 +324,9 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
                         .basis(0.0)
                         .justify(Justify::Center)
                         .align(Align::Stretch)
-                        .pad([t.stack_pt, 0.0, 0.0, 0.0])
+                        // `.w-stack` 的 padding 是 2.667px 0 **1px** —— 下边距那 1px 漏了的话，
+                        // 居中时整栈会低 0.5px（w-top 12.88 → 13.37）
+                        .pad([t.stack_pt, 0.0, 0.0625 * t.r, 0.0])
                 })
                 .child(top)
                 .child(
@@ -415,7 +417,7 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, w: &Weather, 
             _ => pal.muted,
         };
         set_color(g, color)?;
-        let lay = te.layout_spec(spec, pl.rect.w + 4.0, spec.line_h + 8.0, TextMode::Clip)?;
+        let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 8.0, TextMode::Clip)?;
         let dx = if (8130..8160).contains(&pl.id) {
             // hi/sep/lo 三个节点在行里是按各自宽度排的，schema 里给的是自动宽
             0.0

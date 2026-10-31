@@ -68,6 +68,10 @@ struct Args {
     gamma: f32,
     contrast: f32,
     rmode: u8,
+    emb_off: f32,
+    emb_a: f32,
+    text_dx: f32,
+    text_dy: f32,
 }
 
 impl Args {
@@ -102,6 +106,10 @@ impl Args {
             gamma: 0.0,
             contrast: 0.0,
             rmode: 0,
+            emb_off: 0.0,
+            emb_a: 0.0,
+            text_dx: 0.0,
+            text_dy: 0.0,
             // (duplicate gamma/contrast removed)
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -145,6 +153,10 @@ impl Args {
                 "--gamma" => a.gamma = next(&mut i).parse().unwrap_or(0.0),
                 "--contrast" => a.contrast = next(&mut i).parse().unwrap_or(0.0),
                 "--rmode" => a.rmode = next(&mut i).parse().unwrap_or(0),
+                "--embolden-off" => a.emb_off = next(&mut i).parse().unwrap_or(0.0),
+                "--embolden-a" => a.emb_a = next(&mut i).parse().unwrap_or(0.0),
+                "--text-dx" => a.text_dx = next(&mut i).parse().unwrap_or(0.0),
+                "--text-dy" => a.text_dy = next(&mut i).parse().unwrap_or(0.0),
                 "--viewer" => {
                     let s = next(&mut i);
                     let mut it = s.split([',', 'x']).filter_map(|v| v.parse::<i32>().ok());
@@ -481,6 +493,10 @@ fn main() -> Result<()> {
         let tokens = Tokens::perf(args.w, args.h);
         let mut gfx = gfx::Gfx::new(hwnd, w_px, h_px, dpi, tokens.radius)?;
         gfx.dump = args.dump.clone();
+        gfx.embolden_off = args.emb_off;
+        gfx.embolden_a = args.emb_a;
+        gfx.text_dx = args.text_dx;
+        gfx.text_dy = args.text_dy;
         if let Some(d) = &args.dump_seq {
             std::fs::create_dir_all(d).ok();
             gfx.dump_seq = Some(d.clone());

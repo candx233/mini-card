@@ -344,7 +344,7 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, m: &Music, pl
         } else {
             TextMode::Clip
         };
-        let lay = te.layout_spec(spec, pl.rect.w + 2.0, spec.line_h + 6.0, mode)?;
+        let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, mode)?;
         unsafe {
             g.d2d.DrawTextLayout(
                 Vector2 { X: pl.rect.x, Y: pl.rect.y },

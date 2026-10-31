@@ -505,7 +505,7 @@ fn paint_tree(
             6002 => pal.muted,
             _ => pal.fg,
         };
-        let lay = te.layout_spec(spec, pl.rect.w + 4.0, spec.line_h + 8.0, TextMode::Clip)?;
+        let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 8.0, TextMode::Clip)?;
         let id = pl.id;
         if id == 6200 + 1 || id == 6200 + 2 || id == 6200 || id == 6200 + 3 {
             set_color(g, pal.fg)?;

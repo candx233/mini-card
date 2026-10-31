@@ -330,14 +330,33 @@ fn paint_tree(
         let lay = te.layout_cached(spec.align, &fmt, &spec.s, w, parent.h.max(spec.line_h) + 8.0, spec.tabular)?;
         // 徽标字母没有阴影（CSS 只在 .card 上给 text-shadow，理论上所有字都有；
         // 但徽标是 mono 小字，实测与浏览器一致的做法是照画）
-        set_color(g, pal.shadow)?;
-        unsafe {
-            g.d2d.DrawTextLayout(
-                Vector2 { X: x, Y: p.rect.y + 0.833 },
-                &lay,
-                &g.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
+        // 硬边副本 → 换成 CSS 的模糊阴影（0 0.833px 1.667px black 45%）
+        {
+            let mut total = 0.0f32;
+            let mut taps = [(0.0f32, 0.0f32, 0.0f32); 9];
+            let mut k = 0;
+            let sigma = 0.833;
+            for i in -1..=1 {
+                for j in -1..=1 {
+                    let (ox, oy) = (i as f32 * sigma, j as f32 * sigma);
+                    let wt = (-(ox * ox + oy * oy) / (2.0 * sigma * sigma)).exp();
+                    taps[k] = (ox, oy, wt);
+                    total += wt;
+                    k += 1;
+                }
+            }
+            for (ox, oy, wt) in taps {
+                let a = 0.45 * wt / total;
+                set_color(g, D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a })?;
+                unsafe {
+                    g.d2d.DrawTextLayout(
+                        Vector2 { X: x + ox, Y: p.rect.y + 0.833 + oy },
+                        &lay,
+                        &g.brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+            }
         }
         let is_badge = (2000..2500).contains(&p.id);
         let warn = if (3000..4000).contains(&p.id) {

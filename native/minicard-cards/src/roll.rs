@@ -83,7 +83,7 @@ pub fn draw_digit(
         let ch = cell_char(c);
         let mut s = spec.clone();
         s.s = ch.to_string();
-        let lay = te.layout_spec(&s, (w + 2.0).max(4.0), cell_h + 8.0, Mode::Clip)?;
+        let lay = te.layout_spec(&s, w.max(1.0), cell_h + 8.0, Mode::Clip)?;
         let yy = y + (c as f32 - idx) * cell_h;
         unsafe {
             g.d2d.DrawTextLayout(

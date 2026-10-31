@@ -287,7 +287,7 @@ fn paint_tree(
         );
     } else if let Some(spec) = p.text() {
         let fmt = te.format_spec(spec, minicard_draw::text::Mode::Clip)?;
-        let lay = te.layout_spec(spec, p.rect.w + 2.0, spec.line_h + 8.0, minicard_draw::text::Mode::Clip)?;
+        let lay = te.layout_spec(spec, p.rect.w, spec.line_h + 8.0, minicard_draw::text::Mode::Clip)?;
         let _ = fmt;
         set_color(g, pal.shadow)?;
         unsafe {

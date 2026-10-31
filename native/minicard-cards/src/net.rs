@@ -259,7 +259,7 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, p: &Placed) -
     if let Some(spec) = p.text() {
         let fmt = te.format_spec(spec, minicard_draw::text::Mode::Clip)?;
         let _ = fmt;
-        let lay = te.layout_spec(spec, p.rect.w + 4.0, spec.line_h + 8.0, minicard_draw::text::Mode::Clip)?;
+        let lay = te.layout_spec(spec, p.rect.w, spec.line_h + 8.0, minicard_draw::text::Mode::Clip)?;
         // 箭头：CSS 的相对定位只挪墨迹、不占布局 → 这里画的时候左移
         let dx = if (5000..5100).contains(&p.id) { -t.arrow_shift } else { 0.0 };
         let muted = (5000..5100).contains(&p.id) == false && spec.size == t.unit_fs;

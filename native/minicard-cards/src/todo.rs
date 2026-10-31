@@ -10,10 +10,7 @@ use std::time::Instant;
 
 use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::*;
-use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap1, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR,
-};
-use windows_numerics::Vector2;
+use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_INTERPOLATION_MODE_LINEAR};
 
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
@@ -297,17 +294,21 @@ fn paint_tree(
         } else {
             pal.fg
         };
-        let lay = te.layout_spec(spec, pl.rect.w + 2.0, spec.line_h + 6.0, TextMode::Ellipsis)?;
-        set_color(g, color)?;
-        let y = pl.rect.y;
-        unsafe {
-            g.d2d.DrawTextLayout(
-                Vector2 { X: pl.rect.x, Y: y },
-                &lay,
-                &g.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
+        // CSS 的 text-shadow（0 0.833px 1.667px black 45%）——带模糊，不是硬边副本
+        minicard_draw::text::draw_shadowed(
+            g,
+            spec,
+            pl.rect.x,
+            pl.rect.y,
+            pl.rect.w,
+            spec.line_h + 6.0,
+            TextMode::Ellipsis,
+            color,
+            0.45,
+            0.8335,
+            0.833,
+            te,
+        )?;
         // 删除线：文字中线（CSS text-decoration: line-through 约在基线上方 ~0.3em）
         if done_row {
             let w = te.measure(spec, 0.0).0.min(pl.rect.w);

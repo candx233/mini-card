@@ -51,6 +51,12 @@ pub struct Gfx {
     /// 连续帧序列目录 + 剩余帧数（动效取证用）
     pub dump_seq: Option<std::path::PathBuf>,
     pub dump_seq_left: std::cell::Cell<u32>,
+    /// 笔画加粗实验：偏移量（px）与副本透明度，0 = 关
+    pub embolden_off: f32,
+    pub embolden_a: f32,
+    /// 文字原点偏移（亚像素，px）——用来复验「我的字形原点是否比浏览器偏」
+    pub text_dx: f32,
+    pub text_dy: f32,
     /// 上一帧耗时分解（毫秒）：D2D 绘制结束 / Present 等待
     pub t_end_raw: std::cell::Cell<f32>,
     pub t_present: std::cell::Cell<f32>,
@@ -157,6 +163,10 @@ impl Gfx {
                 dump: None,
                 dump_seq: None,
                 dump_seq_left: std::cell::Cell::new(0),
+            embolden_off: 0.0,
+            embolden_a: 0.0,
+            text_dx: 0.0,
+            text_dy: 0.0,
                 t_end_raw: std::cell::Cell::new(0.0),
                 t_present: std::cell::Cell::new(0.0),
             })

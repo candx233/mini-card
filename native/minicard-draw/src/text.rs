@@ -657,3 +657,65 @@ mod tests {
         assert!(h_wrap > LH * 1.5, "wrap 高应长到多行，实得 {h_wrap}");
     }
 }
+
+/// CSS `text-shadow: 0 Ypx Rpx color` 的近似：R 是模糊半径（= 2σ），用 3×3 高斯核
+/// 画 9 遍低透明度副本。注意**不是**硬边偏移 —— 硬边在每一条字形边缘都会差一大截。
+#[allow(clippy::too_many_arguments)]
+pub fn draw_shadowed(
+    g: &minicard_shell::gfx::Gfx,
+    spec: &crate::layout::TextSpec,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    mode: Mode,
+    color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
+    shadow_a: f32,
+    sigma: f32,
+    dy: f32,
+    te: &TextEngine,
+) -> Result<()> {
+    use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+    use windows_numerics::Vector2;
+    if shadow_a > 0.0 && sigma > 0.0 {
+        let mut total = 0.0f32;
+        let mut taps = [(0.0f32, 0.0f32, 0.0f32); 9];
+        let mut k = 0;
+        for i in -1..=1 {
+            for j in -1..=1 {
+                let (ox, oy) = (i as f32 * sigma, j as f32 * sigma);
+                let wt = (-(ox * ox + oy * oy) / (2.0 * sigma * sigma)).exp();
+                taps[k] = (ox, oy, wt);
+                total += wt;
+                k += 1;
+            }
+        }
+        let lay = te.layout_spec(spec, w, h, mode)?;
+        for (ox, oy, wt) in taps {
+            let a = shadow_a * wt / total;
+            if a <= 0.001 {
+                continue;
+            }
+            crate::paint::set_color(g, D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a })?;
+            unsafe {
+                g.d2d.DrawTextLayout(
+                    Vector2 { X: x + ox, Y: y + oy + dy },
+                    &lay,
+                    &g.brush,
+                    windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+        }
+    }
+    crate::paint::set_color(g, color)?;
+    let lay = te.layout_spec(spec, w, h, mode)?;
+    unsafe {
+        g.d2d.DrawTextLayout(
+            Vector2 { X: x, Y: y },
+            &lay,
+            &g.brush,
+            windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+    }
+    Ok(())
+}
