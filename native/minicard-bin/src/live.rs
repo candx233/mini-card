@@ -71,6 +71,10 @@ struct CardWin {
     cfg_idx: usize,
     /// 该窗口的 DPI（客户区像素 → 逻辑点）
     dpi: f32,
+    /// 玻璃位图是按这个屏幕坐标（物理 px）切的
+    slice_origin: (i32, i32),
+    /// 拖动时把玻璃位图整体偏移这么多（逻辑点）——不用每帧重切/重模糊
+    glass_off: (f32, f32),
 }
 
 enum State {
@@ -431,6 +435,8 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 refresh: Duration::from_millis(card.refresh_ms.clamp(200, 60_000)),
                 cfg_idx,
                 dpi,
+                slice_origin: (card.pos[0].round() as i32, card.pos[1].round() as i32),
+                glass_off: (0.0, 0.0),
             });
         }
         minicard_shell::mlog!("live：{} 张卡窗口", wins.len());
@@ -475,8 +481,16 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
             let mut cur_pt = POINT::default();
             let _ = GetCursorPos(&mut cur_pt);
             let under = WindowFromPoint(cur_pt);
+            let dragging_hwnd = DRAG
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|d| d.moved)
+                .map(|d| d.hwnd);
             for win in wins.iter_mut() {
-                let hov = if under == win.hwnd {
+                let hov = if dragging_hwnd == Some(win.hwnd.0 as isize) {
+                    None
+                } else if under == win.hwnd {
                     let mut r = RECT::default();
                     if GetWindowRect(win.hwnd, &mut r).is_ok() {
                         let k = 96.0 / win.dpi.max(1.0);
@@ -490,6 +504,38 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 if win.gfx.hover != hov {
                     win.gfx.hover = hov;
                     win.next_draw = now;
+                }
+            }
+
+            // 拖动中：玻璃位图按窗口位移平移（实时跟手），越界才重切
+            {
+                let dragging = DRAG
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|d| d.moved)
+                    .map(|d| d.hwnd);
+                if let Some(dh) = dragging {
+                    for win in wins.iter_mut() {
+                        if win.hwnd.0 as isize != dh {
+                            continue;
+                        }
+                        let mut r = RECT::default();
+                        if GetWindowRect(win.hwnd, &mut r).is_err() {
+                            break;
+                        }
+                        let k = 96.0 / win.dpi.max(1.0);
+                        let off = (
+                            (r.left - win.slice_origin.0) as f32 * k,
+                            (r.top - win.slice_origin.1) as f32 * k,
+                        );
+                        if off.0.abs() > DRAG_MARGIN * 0.55 || off.1.abs() > DRAG_MARGIN * 0.55 {
+                            reslice(win, &wall, blur);
+                        } else {
+                            win.glass_off = off;
+                        }
+                        win.next_draw = now;
+                    }
                 }
             }
 
@@ -560,7 +606,18 @@ fn draw_one(
     lunar_txt: &str,
 ) -> Result<bool> {
     let (y, mo, d, hh, mm) = t;
-    let glass_pair = win.glass.as_ref().map(|(b, r)| (b, *r));
+    let (gox, goy) = win.glass_off;
+    let glass_pair = win.glass.as_ref().map(|(b, r)| {
+        (
+            b,
+            D2D_RECT_F {
+                left: r.left - gox,
+                top: r.top - goy,
+                right: r.right - gox,
+                bottom: r.bottom - goy,
+            },
+        )
+    });
     let snap_r = snap.read().unwrap();
     let animating = match (&mut win.state, win.kind) {
         (State::Perf { show_gpu, tweens }, _) => {
@@ -915,6 +972,9 @@ fn drag_end(wins: &mut [CardWin], cfg: &mut Config, wall: &Option<glass::Wall>, 
     win.next_draw = Instant::now();
 }
 
+/// 玻璃切片在四周多留这么多（逻辑点）——拖动时先平移复用，越界了才重切
+const DRAG_MARGIN: f32 = 160.0;
+
 /// 按窗口当前屏幕位置重切玻璃位图
 fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
     let Some(w) = wall else { return };
@@ -922,22 +982,25 @@ fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
     if unsafe { GetWindowRect(win.hwnd, &mut r) }.is_err() {
         return;
     }
-    let pad_px = ((blur * 3.0).max(60.0) * win.dpi / 96.0).round() as f32;
+    let k = win.dpi / 96.0;
+    let pad_px = ((blur * 3.0).max(60.0) * k).round() as f32;
+    let margin_px = (DRAG_MARGIN * k).round() as f32;
     let mon = monitor_of(r.left, r.top);
+    // 四周多切一圈：拖动时靠平移复用，不用每帧重切重模糊
     let cap = glass::from_wallpaper(
         w,
         (mon.2, mon.3),
         ((r.left as f32 - mon.0), (r.top as f32 - mon.1)),
         (
-            (win.w * win.dpi / 96.0).round() as u32,
-            (win.h * win.dpi / 96.0).round() as u32,
+            (win.w * k).round() as u32,
+            (win.h * k).round() as u32,
         ),
-        pad_px,
-        blur * win.dpi / 96.0,
+        pad_px + margin_px,
+        blur * k,
     );
     match win.gfx.bitmap_from_bgra(&cap.bgra, cap.w, cap.h) {
         Ok(b) => {
-            let pad_dip = pad_px * 96.0 / win.dpi;
+            let pad_dip = pad_px * 96.0 / win.dpi + DRAG_MARGIN;
             win.glass = Some((
                 b,
                 D2D_RECT_F {
@@ -947,6 +1010,8 @@ fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
                     bottom: win.h + pad_dip,
                 },
             ));
+            win.slice_origin = (r.left, r.top);
+            win.glass_off = (0.0, 0.0);
         }
         Err(e) => minicard_shell::mlog!("重切玻璃失败: {e:?}"),
     }
