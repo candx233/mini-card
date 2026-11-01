@@ -2209,44 +2209,8 @@ fn dock_top_reserve() -> f32 {
 /// 侧向预留（逻辑 px）：F+3 的「位移 + 条宽外扩」让悬停时的玻璃比常态宽，窗口两侧要留出来，
 /// 免得外扩的玻璃/图标被窗口边缘裁掉。算法与 `dock.html` 的逐帧布局**同一套**（扫指针位置取上界）。
 fn dock_side_reserve(d: &config::Dock) -> f32 {
-    let n = d.items.len();
-    if n == 0 {
-        return 6.0;
-    }
-    let size = d.size as f32;
-    let bar = d.bar_width();
-    let pad = 18.0f32;                               // 边距恒 18（条宽与内容差恒 36，分隔线额外宽度两边都算）
-    let kmax = 1.0 + 36.0 / size;                    // 与页面同一条放大上限
-    let mag = d.mag as f32;
-    let rest = |i: usize| d.item_center_x(i);        // 含分隔线偏移
-    let mut worst = 0.0f32;
-    let mut probe = 0.0f32;
-    while probe <= bar + 0.001 {
-        let ks: Vec<f32> = (0..n)
-            .map(|i| {
-                let dd = (probe - rest(i)).abs() / (size * 1.3);
-                (1.0 + mag / 100.0 * (-(dd * dd)).exp()).min(kmax)
-            })
-            .collect();
-        let j = (0..n)
-            .min_by(|a, b| {
-                (probe - rest(*a)).abs().partial_cmp(&(probe - rest(*b)).abs()).unwrap()
-            })
-            .unwrap();
-        let mut pos = vec![0.0f32; n];
-        pos[j] = rest(j);
-        for i in (j + 1)..n {
-            pos[i] = pos[i - 1] + size * ks[i - 1] / 2.0 + d.gap_after(i - 1) + size * ks[i] / 2.0;
-        }
-        for i in (0..j).rev() {
-            pos[i] = pos[i + 1] - size * ks[i + 1] / 2.0 - d.gap_after(i) - size * ks[i] / 2.0;
-        }
-        let row_l = pos[0] - size * ks[0] / 2.0;
-        let row_r = pos[n - 1] + size * ks[n - 1] / 2.0;
-        worst = worst.max(pad - row_l).max(row_r + pad - bar);
-        probe += 2.0;
-    }
-    worst.ceil() + 2.0
+    // 单一实现：`minicard-core` 里与自绘端共用（算法照 dock.html 的逐帧布局扫上界）
+    d.side_reserve()
 }
 
 /// 玻璃条在屏幕上的物理矩形（WM_MOVING 的对齐基准）。

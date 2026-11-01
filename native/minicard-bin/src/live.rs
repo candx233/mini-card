@@ -18,7 +18,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
-use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, ScreenToClient, SetWindowRgn};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -110,27 +110,24 @@ struct DockWin {
     next_paint: Instant,
 }
 
-/// 窗口区域：`open=false` 只放玻璃条（上方预留既不可见也不吃点击）；
-/// `open=true` 往上放开 `HOVER_EXTRA`（放大图标 + 名字气泡要看得见、点得到）。
-unsafe fn dock_region(dw: &DockWin, dpi: f32, open: bool) {
-    let s = dpi / 96.0;
-    let side = dw.t.side * s;
+/// Dock 窗的「可点区域」（窗内逻辑矩形 + 是否已放开上方预留）。
+///
+/// **不能用 `SetWindowRgn`**：`WS_EX_NOREDIRECTIONBITMAP` + DComp 的窗一旦设了小于整窗的
+/// 区域，DWM 会把**整个合成内容**裁没（实测：静止态区域 (34,172)-(1033,235) 时整条不可见，
+/// 放开成 135 高反而能看见）。改用 `WM_NCHITTEST` 返回 `HTTRANSPARENT` —— 内容照常合成，
+/// 只有点击穿透；这也正是上方 172px 预留想要的语义。
+use std::sync::atomic::{AtomicIsize, Ordering};
+static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
+/// (left, top, right, bottom, 已放开)
+static DOCK_HIT: Mutex<(f32, f32, f32, f32, bool)> = Mutex::new((0.0, 0.0, 0.0, 0.0, false));
+
+fn dock_set_hit(t: &minicard_cards::dock::Tokens, open: bool) {
     let top = if open {
-        (dw.t.top - minicard_core::config::Dock::HOVER_EXTRA).max(0.0) * s
+        (t.top - minicard_core::config::Dock::HOVER_EXTRA).max(0.0)
     } else {
-        dw.t.top * s
+        t.top
     };
-    let right = (dw.t.w - dw.t.side) * s;
-    let bottom = dw.t.h * s;
-    let rgn = CreateRoundRectRgn(
-        side.round() as i32,
-        top.round() as i32,
-        right.round() as i32,
-        bottom.round() as i32,
-        (40.0 * s).round() as i32,
-        (40.0 * s).round() as i32,
-    );
-    let _ = SetWindowRgn(dw.hwnd, Some(rgn), true);
+    *DOCK_HIT.lock().unwrap() = (t.side, top, t.w - t.side, t.h, open);
 }
 
 impl DockWin {
@@ -676,7 +673,8 @@ pub fn run(
                         next_draw: Instant::now(),
                         next_paint: Instant::now(),
                     };
-                    dock_region(&dw, dk_dpi, false);
+                    DOCK_HWND.store(dw.hwnd.0 as isize, Ordering::Relaxed);
+                    dock_set_hit(&dw.t, false);
                     dw.next_draw = Instant::now();
                     dock_win = Some(dw);
                 }
@@ -892,10 +890,10 @@ pub fn run(
                     dw.ease = 1.0;
                     dw.ease_v = 0.0;
                 }
-                // 区域跟着放/收（放：放大图标 + 气泡要能看见、能点）
+                // 可点区域跟着放/收（放：放大图标 + 名字气泡要能点；收：预留区还给下面）
                 let want_open = dw.ease > 0.002;
                 if want_open != dw.region_open {
-                    dock_region(dw, dpi, want_open);
+                    dock_set_hit(&dw.t, want_open);
                     dw.region_open = want_open;
                 }
                 if std::env::var("MC_DOCK_LOG").is_ok() {
@@ -1517,6 +1515,28 @@ fn save_cfg(cfg: &Config) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_NCHITTEST => {
+            if hwnd.0 as isize != DOCK_HWND.load(Ordering::Relaxed) {
+                return LRESULT(HTCLIENT as isize);
+            }
+            {
+                let (l, t, r, b, _) = *DOCK_HIT.lock().unwrap();
+                // lp = 屏幕像素坐标（低 16 位 x、高 16 位 y，带符号）
+                let x = (lp.0 & 0xFFFF) as i16 as f32;
+                let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32;
+                let mut wr = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut wr);
+                let dpi = GetDpiForWindow(hwnd) as f32;
+                let s = if dpi > 0.0 { dpi / 96.0 } else { 1.0 };
+                let cx = (x - wr.left as f32) / s;
+                let cy = (y - wr.top as f32) / s;
+                if cx < l || cx > r || cy < t || cy > b {
+                    // 条以外的窗口区域：既不可见也不该吃点击
+                    return LRESULT(HTTRANSPARENT as isize);
+                }
+                return LRESULT(HTCLIENT as isize);
+            }
+        }
         WM_LBUTTONDOWN => {
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
