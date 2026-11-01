@@ -56,6 +56,11 @@ impl Roll {
     }
 }
 
+/// 从 `from` 到 `to` 的单向步数（0..9，按 10 取模）——用来判断「是不是只走一格」
+pub fn step_delta(from: u8, to: u8) -> i32 {
+    ((to as i32 - from as i32) + 10) % 10
+}
+
 /// 条上的格子序号：`[9,0,1..9,0]` → 数字 d 在 `d + 1` 格。
 pub fn cell(d: u8) -> f32 {
     (d as f32) + 1.0

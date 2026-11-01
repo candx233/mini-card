@@ -26,11 +26,24 @@ pub struct Item {
     /// 描线进度 0..1（勾上时从 0 走到 1；非动画时直接 1）
     pub check: f32,
     pub check_t0: Option<Instant>,
+    /// FLIP：勾选后行会重排，这里存「起始位移」（px）与起始时刻，画的时候从它衰减到 0
+    pub mv_from: f32,
+    pub mv_t0: Option<Instant>,
+    /// 勾上的「弹一下」（ckPop：0.9 → 1.04 → 1，420ms）
+    pub pop_t0: Option<Instant>,
 }
 
 impl Item {
     pub fn new(text: impl Into<String>, done: bool) -> Self {
-        Self { text: text.into(), done, check: if done { 1.0 } else { 0.0 }, check_t0: None }
+        Self {
+            text: text.into(),
+            done,
+            check: if done { 1.0 } else { 0.0 },
+            check_t0: None,
+            mv_from: 0.0,
+            mv_t0: None,
+            pop_t0: None,
+        }
     }
 
     /// 勾上：起描线动画（280ms，与 CSS 的 `stroke-dashoffset 280ms` 同）
@@ -42,9 +55,33 @@ impl Item {
         if done {
             self.check = 0.0;
             self.check_t0 = Some(now);
+            self.pop_t0 = Some(now);
         } else {
             self.check = 0.0;
             self.check_t0 = None;
+        }
+    }
+
+    /// FLIP 位移（px）：300ms ease-out 衰减到 0
+    pub fn move_dy(&self, now: Instant) -> f32 {
+        let Some(t0) = self.mv_t0 else { return 0.0 };
+        let u = ((now - t0).as_secs_f32() * 1000.0 / 300.0).clamp(0.0, 1.0);
+        let k = 1.0 - (1.0 - u) * (1.0 - u);
+        self.mv_from * (1.0 - k)
+    }
+
+    /// ckPop 的缩放（0.9 → 1.04 → 1）
+    pub fn pop_scale(&self, now: Instant) -> f32 {
+        let Some(t0) = self.pop_t0 else { return 1.0 };
+        let u = ((now - t0).as_secs_f32() * 1000.0 / 420.0).clamp(0.0, 1.0);
+        if u >= 1.0 {
+            return 1.0;
+        }
+        // 0% .9 / 55% 1.04 / 100% 1
+        if u < 0.55 {
+            0.9 + (1.04 - 0.9) * (u / 0.55)
+        } else {
+            1.04 + (1.0 - 1.04) * ((u - 0.55) / 0.45)
         }
     }
 
@@ -115,6 +152,20 @@ pub fn shown(items: &[Item]) -> Vec<usize> {
     idx.into_iter().take(keep).collect()
 }
 
+/// 有没有在跑的动效（勾描线 / 弹一下 / 重排）—— live 用它决定要不要 60fps
+pub fn animating(items: &[Item], now: Instant) -> bool {
+    items.iter().any(|it| {
+        let drawing = it.done
+            && it
+                .check_t0
+                .map(|t0| (now - t0).as_secs_f32() < 0.28)
+                .unwrap_or(false);
+        let popping = it.pop_t0.map(|t0| (now - t0).as_secs_f32() < 0.42).unwrap_or(false);
+        let moving = it.mv_t0.map(|t0| (now - t0).as_secs_f32() < 0.30).unwrap_or(false);
+        drawing || popping || moving
+    })
+}
+
 pub fn paint(
     g: &Gfx,
     te: &TextEngine,
@@ -144,7 +195,7 @@ pub fn paint(
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
-        paint_tree(g, te, pal, t, items, &placed, now)?;
+        paint_tree(g, te, pal, t, items, &placed, now, 0.0)?;
         g.pop_clip();
         g.end()?;
         Ok(())
@@ -245,13 +296,39 @@ fn paint_tree(
     items: &[Item],
     pl: &Placed,
     now: Instant,
+    dy: f32,
 ) -> Result<()> {
+    // 行容器：把这一行的 FLIP 位移传给子节点
+    if (7300..7400).contains(&pl.id) {
+        let row = (pl.id - 7300) as usize;
+        let order = shown(items);
+        let d = order.get(row).map(|&i| items[i].move_dy(now)).unwrap_or(0.0);
+        for c in &pl.children {
+            paint_tree(g, te, pal, t, items, c, now, d)?;
+        }
+        return Ok(());
+    }
+
     // 勾选圆：id 7100+row
     if (7100..7200).contains(&pl.id) {
         let row = (pl.id - 7100) as usize;
         let idx = shown(items);
         let it = idx.get(row).map(|&i| &items[i]);
-        let r = pl.rect;
+        let mut r = pl.rect;
+        r.y += dy;
+        // 勾上的弹一下：绕圆心缩放
+        if let Some(it) = it {
+            let k = it.pop_scale(now);
+            if (k - 1.0).abs() > 0.001 {
+                let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                r = minicard_draw::layout::Rect {
+                    x: cx - r.w * k / 2.0,
+                    y: cy - r.h * k / 2.0,
+                    w: r.w * k,
+                    h: r.h * k,
+                };
+            }
+        }
         let cx = r.x + r.w / 2.0;
         let cy = r.y + r.h / 2.0;
         let rad = r.w / 2.0;
@@ -299,7 +376,7 @@ fn paint_tree(
             g,
             spec,
             pl.rect.x,
-            pl.rect.y,
+            pl.rect.y + dy,
             pl.rect.w,
             spec.line_h + 6.0,
             TextMode::Ellipsis,
@@ -319,7 +396,7 @@ fn paint_tree(
         }
     }
     for c in &pl.children {
-        paint_tree(g, te, pal, t, items, c, now)?;
+        paint_tree(g, te, pal, t, items, c, now, dy)?;
     }
     Ok(())
 }

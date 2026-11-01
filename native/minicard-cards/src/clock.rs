@@ -102,14 +102,18 @@ impl Clock {
             }
             // 上一段没走完就从当前位置接着走（与 CSS 版 `from = cur` 同口径）
             let cur = self.rolls[i].map(|r| r.at(now)).unwrap_or(Self::cell(self.digits[i]));
-            // 口径照抄 `card.html::rollSet(dir=+1)`：**只有跨 9→0** 才绕末尾那一格，
-            // 其余情况直接滚到目标格（反方向也直接滚 —— 早先写成 `to = cur + 1`
-            // 会在数字变小时画成「往上跳一格」，看着就是「先蹦到 9 再变」）。
-            self.rolls[i] = Some(if want[i] < self.digits[i] {
-                Roll::wrap(cur, 11.0, Self::cell(want[i]), now)
+            // 只有「往上走一格」才滚（9→0 走末尾补格）；跨多位直接落位 ——
+            // 5→0 这种一口气滚 6 格在 300ms 里只会糊成一片。
+            let up_one = crate::roll::step_delta(self.digits[i], want[i]) == 1;
+            self.rolls[i] = if up_one {
+                Some(if want[i] == 0 {
+                    Roll::wrap(cur, 11.0, Self::cell(want[i]), now)
+                } else {
+                    Roll::new(cur, Self::cell(want[i]), now)
+                })
             } else {
-                Roll::new(cur, Self::cell(want[i]), now)
-            });
+                None
+            };
             self.digits[i] = want[i];
         }
     }
@@ -432,7 +436,7 @@ mod roll_tests {
         let end = t1 + Duration::from_millis(500);
         let want = [1u8, 3, 0, 0];
         for i in 0..4 {
-            let idx = c.rolls[i].unwrap().at(end);
+            let idx = c.idx(i, end);
             assert!(
                 (idx - (want[i] as f32 + 1.0)).abs() < 0.01,
                 "第 {i} 位滚完停在 {idx}，应在 {}（数字 {want:?}）",
@@ -443,7 +447,7 @@ mod roll_tests {
         let mut seen = Vec::new();
         for k in 0..=20 {
             let now = t1 + Duration::from_millis(k * 15);
-            let idx = c.rolls[3].unwrap().at(now);
+            let idx = c.idx(3, now);
             let ch = cell_char(idx.round() as i32);
             if seen.last() != Some(&ch) {
                 seen.push(ch);
@@ -461,7 +465,7 @@ mod roll_tests {
         let t1 = t0 + Duration::from_millis(400);
         c.set(13, 0, t1);
         let end = t1 + Duration::from_millis(500);
-        let idx = c.rolls[2].unwrap().at(end);
+        let idx = c.idx(2, end);
         assert!((idx - 1.0).abs() < 0.01, "分钟十位应归到 0（格 1），实得 {idx}");
     }
 }

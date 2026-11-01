@@ -213,14 +213,18 @@ impl Pomo {
                 continue;
             }
             let cur = self.rolls[i].map(|r| r.at(now)).unwrap_or(cell(self.shown[i]));
-            // 口径照抄 `card.html::rollSet(dir=-1)`：倒计时**只有跨 0→9** 才绕开头那一格
-            // （往 0 号格滚，滚完瞬归到 9），其余直接滚到目标格。
-            // 早先的 `to = cur + 1` 把每次「减一」都画成往上加一格 —— 看着像先蹦到 9。
-            self.rolls[i] = Some(if want[i] > self.shown[i] {
-                Roll::wrap(cur, 0.0, cell(want[i]), now)
+            // 倒计时只有「往下走一格」才滚（0→9 走开头补格）；跨多位直接落位 ——
+            // 25:00 → 24:59 的秒十位是 0→5（跳 5 格），以前会绕补格闪一下 9 → 看上去像 99。
+            let down_one = crate::roll::step_delta(self.shown[i], want[i]) == 9;
+            self.rolls[i] = if down_one {
+                Some(if want[i] == 9 {
+                    Roll::wrap(cur, 0.0, cell(want[i]), now)
+                } else {
+                    Roll::new(cur, cell(want[i]), now)
+                })
             } else {
-                Roll::new(cur, cell(want[i]), now)
-            });
+                None
+            };
             self.shown[i] = want[i];
         }
     }
@@ -697,6 +701,27 @@ mod countdown_roll_tests {
 
     /// 倒计时每次「减一」都要**往下**滚一格：30→29 的个位是 0→9，
     /// 只许经过补的 9（格 0），不能顺着 1..8 一路走 —— 那就是「先跳到 9」。
+    /// 25:00 → 24:59：秒十位 0→5 是跨 5 格，必须**直接落位**，
+    /// 不许绕补格闪一下 9（那会显示成 24:99）。
+    #[test]
+    fn 秒十位跨多位直接落位() {
+        let t0 = Instant::now();
+        let mut p = Pomo::new();
+        p.start(t0);
+        let t1 = t0 + Duration::from_millis(1000);
+        p.tick(t1);
+        let mut seen = Vec::new();
+        for k in 0..=20 {
+            let now = t1 + Duration::from_millis(k * 15);
+            let idx = p.idx(2, now);
+            let ch = cell_char(idx.round() as i32);
+            if seen.last() != Some(&ch) {
+                seen.push(ch);
+            }
+        }
+        assert_eq!(seen, vec!['5'], "秒十位轨迹 {:?}（应直接是 5，不许经过 9）", seen);
+    }
+
     #[test]
     fn 倒计时减一不绕远路() {
         let t0 = Instant::now();
@@ -710,7 +735,7 @@ mod countdown_roll_tests {
         let mut seen = Vec::new();
         for k in 0..=20 {
             let now = t1 + Duration::from_millis(k * 15);
-            let idx = p.rolls[3].unwrap().at(now);
+            let idx = p.idx(3, now);
             let ch = cell_char(idx.round() as i32);
             if seen.last() != Some(&ch) {
                 seen.push(ch);
@@ -718,7 +743,8 @@ mod countdown_roll_tests {
         }
         assert_eq!(seen, vec!['0', '9'], "个位轨迹 {:?}（应 0→9，不许经过 1..8）", seen);
         let end = t1 + Duration::from_millis(400);
-        let idx = p.rolls[3].unwrap().at(end);
+        let idx = p.idx(3, end);
         assert!((idx - 10.0).abs() < 0.01, "滚完应归到 9 的规范格 10，实得 {idx}");
     }
 }
+

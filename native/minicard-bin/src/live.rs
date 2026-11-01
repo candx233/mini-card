@@ -589,7 +589,7 @@ fn draw_one(
         (State::Todo(items), _) => {
             let tk = todo::Tokens::todo(win.w, win.h);
             todo::paint(&win.gfx, te, pal, &tk, items, now, glass_pair)?;
-            false
+            todo::animating(items, now)
         }
         (State::Weather, _) => {
             let ws = wshared.read().unwrap().clone();
@@ -727,6 +727,7 @@ fn click(
         State::Todo(items) => {
             let tk = todo::Tokens::todo(win.w, win.h);
             if let Some(i) = todo::hit(te, &tk, items, x, y) {
+                let old_order = todo::shown(items);
                 if let Some(it) = items.get_mut(i) {
                     let done = !it.done;
                     it.set_done(done, now);
@@ -736,6 +737,19 @@ fn click(
                         }
                     }
                     save_cfg(cfg);
+                }
+                // FLIP：勾完的顺序会变（完成沉底），给挪位的行记一个起始位移
+                let new_order = todo::shown(items);
+                let pitch = tk.row_h + tk.row_gap;
+                for (new_row, &ii) in new_order.iter().enumerate() {
+                    if let Some(orow) = old_order.iter().position(|&x| x == ii) {
+                        if orow != new_row {
+                            if let Some(it) = items.get_mut(ii) {
+                                it.mv_from = (orow as f32 - new_row as f32) * pitch;
+                                it.mv_t0 = Some(now);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -872,8 +886,9 @@ fn clean_exit() -> ! {
 }
 
 fn save_cfg(cfg: &Config) {
-    if let Err(e) = cfg.save() {
-        minicard_shell::mlog!("config 保存失败: {e}");
+    match cfg.save() {
+        Ok(()) => minicard_shell::mlog!("config 已保存（卡片 {} 项）", cfg.cards.len()),
+        Err(e) => minicard_shell::mlog!("config 保存失败: {e}"),
     }
 }
 
