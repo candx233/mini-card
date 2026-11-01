@@ -534,7 +534,7 @@ pub fn music_sheet(
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut mm);
         minicard_cards::music::dump_layout(&placed, 0);
     }
-    minicard_cards::music::paint(g, te, pal, &t, &m, None, None)
+    minicard_cards::music::paint(g, te, pal, &t, &m, None, None, None)
 }
 
 /// 第十三张测试图：日历卡（240×180），2026-10（1 号周四，31 天 → 5 行），今天是 31 号。
@@ -556,4 +556,60 @@ pub fn calendar_sheet(
         minicard_cards::calendar::dump_layout(&placed, 0);
     }
     minicard_cards::calendar::paint(g, te, pal, &t, &c, None)
+}
+
+
+/// 封面翻转探针：两张纯色封面（红/绿），按 `--roll-ms` 当作翻转进度（0..460ms）出图。
+/// 用来验证「转出 → 换图 → 转回」的横向压扁曲线，不依赖真有歌在放。
+pub fn music_flip(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    ms: u64,
+) -> Result<()> {
+    use minicard_cards::music::{CoverFlip, Music, Tokens};
+
+    let t = Tokens::music(240.0, 120.0);
+    let m = Music {
+        title: "River Flows in You".into(),
+        artist: "Yiruma".into(),
+        playing: true,
+        position_ms: 83_000,
+        duration_ms: 221_000,
+    };
+    let mk = |src: [u8; 3]| -> Result<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1> {
+        let mut bgra = Vec::with_capacity(100 * 100 * 4);
+        for y in 0..100u32 {
+            for x in 0..100u32 {
+                // 圆角 12 烘进 alpha（和 live 里 cover_src 同一口径）
+                let inside = {
+                    let (cx, cy, r) = if x < 12 && y < 12 {
+                        (12.0, 12.0, 12.0)
+                    } else if x >= 88 && y < 12 {
+                        (88.0, 12.0, 12.0)
+                    } else if x < 12 && y >= 88 {
+                        (12.0, 88.0, 12.0)
+                    } else if x >= 88 && y >= 88 {
+                        (88.0, 88.0, 12.0)
+                    } else {
+                        (50.0, 50.0, 0.0)
+                    };
+                    let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+                    r == 0.0 || dx * dx + dy * dy <= r * r + 0.5
+                };
+                let a = if inside { 255u8 } else { 0 };
+                let p = |c: u8| ((c as u32 * a as u32) / 255) as u8;
+                bgra.extend_from_slice(&[p(src[2]), p(src[1]), p(src[0]), a]);
+            }
+        }
+        g.bitmap_from_bgra(&bgra, 100, 100)
+    };
+    let red = mk([200, 40, 40])?;
+    let green = mk([40, 190, 60])?;
+    let flip = CoverFlip {
+        t: (ms as f32 / 460.0).clamp(0.0, 1.0),
+        old: Some(&red),
+        new: Some(&green),
+    };
+    minicard_cards::music::paint(g, te, pal, &t, &m, None, Some(&green), Some(&flip))
 }

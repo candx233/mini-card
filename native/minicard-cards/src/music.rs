@@ -118,6 +118,15 @@ impl Tokens {
     }
 }
 
+/// 切歌封面翻转：0→90° 转出（old）→ 换图 → 90°→0 转回（new）。
+/// Direct2D 里没有 3D，这里用「横向压扁」(cos) 近似 —— 90° 那刻宽度为 0，肉眼一致。
+pub struct CoverFlip<'a> {
+    /// 0..1 总进度（460ms）
+    pub t: f32,
+    pub old: Option<&'a ID2D1Bitmap1>,
+    pub new: Option<&'a ID2D1Bitmap1>,
+}
+
 pub fn paint(
     g: &Gfx,
     te: &TextEngine,
@@ -127,6 +136,8 @@ pub fn paint(
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
     // 真专辑封面（圆角已烘进 alpha）；None = 渐变 + 音符占位
     cover: Option<&ID2D1Bitmap1>,
+    // 切歌翻转（None = 静止）
+    flip: Option<&CoverFlip<'_>>,
 ) -> Result<()> {
     let tree = tree(t, m);
     let mut mm: &TextEngine = te;
@@ -141,14 +152,14 @@ pub fn paint(
         let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, pal.border)?;
+        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
         stroke_round(
             g,
             D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
-        paint_tree(g, te, pal, t, m, &placed, cover)?;
+        paint_tree(g, te, pal, t, m, &placed, cover, flip)?;
         g.pop_clip();
         g.end()?;
         Ok(())
@@ -254,6 +265,15 @@ fn tree(t: &Tokens, m: &Music) -> Node {
         )
 }
 
+
+/// 鼠标是否落在某个矩形里（卡片内坐标）
+fn hovering(g: &Gfx, r: &minicard_draw::layout::Rect) -> bool {
+    match g.hover {
+        Some((x, y)) => x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h,
+        None => false,
+    }
+}
+
 fn paint_tree(
     g: &Gfx,
     te: &TextEngine,
@@ -262,11 +282,33 @@ fn paint_tree(
     m: &Music,
     pl: &Placed,
     cover: Option<&ID2D1Bitmap1>,
+    flip: Option<&CoverFlip<'_>>,
 ) -> Result<()> {
     // 封面：有真专辑图就画图，否则渐变 + 音符占位
     if pl.id == 9001 {
         let r = pl.rect;
         let rect = D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };
+        if let Some(f) = flip {
+            // 0→48%：转出（旧图），48%→100%：转回（新图）
+            let (deg, which) = if f.t < 0.48 {
+                (-90.0 * (f.t / 0.48), f.old)
+            } else {
+                (-90.0 * (1.0 - (f.t - 0.48) / 0.52), f.new)
+            };
+            let sx = deg.to_radians().cos().abs();
+            if let Some(bmp) = which {
+                let sz = unsafe {
+                    let s = bmp.GetPixelSize();
+                    (s.width as f32, s.height as f32)
+                };
+                let src = minicard_draw::image::cover_src_px(sz.0, sz.1, r.w, r.h);
+                let w = (r.w * sx).max(0.5);
+                let cx = r.x + r.w / 2.0;
+                let dst = D2D_RECT_F { left: cx - w / 2.0, top: r.y, right: cx + w / 2.0, bottom: r.bottom() };
+                minicard_draw::image::draw(g, bmp, src, dst)?;
+            }
+            return Ok(());
+        }
         if let Some(bmp) = cover {
             // 圆角已经烘进位图的 alpha（见 live 的 `bake_round_cover`），这里直接 cover 铺满
             let (iw, ih) = unsafe {
@@ -324,7 +366,16 @@ fn paint_tree(
         let py = pl.rect.y.round();
         let pw = pl.rect.w.round();
         let ph = pl.rect.h.round();
-        set_color(g, pal.badge_border)?;
+        let hov = hovering(g, &pl.rect);
+        if hov {
+            set_color(g, pal.fg_soft)?;
+            fill_round(
+                g,
+                D2D_RECT_F { left: px + 0.5, top: py + 0.5, right: px + pw - 0.5, bottom: py + ph - 0.5 },
+                6.0,
+            )?;
+        }
+        set_color(g, if hov { pal.fg44 } else { pal.badge_border })?;
         stroke_round(
             g,
             D2D_RECT_F { left: px + 0.5, top: py + 0.5, right: px + pw - 0.5, bottom: py + ph - 0.5 },
@@ -375,7 +426,7 @@ fn paint_tree(
         }
     }
     for c in &pl.children {
-        paint_tree(g, te, pal, t, m, c, cover)?;
+        paint_tree(g, te, pal, t, m, c, cover, flip)?;
     }
     Ok(())
 }

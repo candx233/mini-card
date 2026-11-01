@@ -30,6 +30,8 @@ use windows::Win32::Graphics::Dxgi::{
 };
 
 pub struct Gfx {
+    /// 鼠标在本卡内的位置（逻辑点）；None = 不在卡上。hover 态由各卡自己按 id/矩形判定。
+    pub hover: Option<(f32, f32)>,
     pub d2d: ID2D1DeviceContext,
     #[allow(dead_code)]
     pub factory: ID2D1Factory1,
@@ -145,6 +147,7 @@ impl Gfx {
             let clip: ID2D1Geometry = clip_geo.cast()?;
 
             Ok(Self {
+                hover: None,
                 d2d,
                 device,
                 ctx11,

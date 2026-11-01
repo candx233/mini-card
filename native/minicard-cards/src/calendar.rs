@@ -235,7 +235,7 @@ pub fn paint(
         let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, pal.border)?;
+        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
         stroke_round(
             g,
             D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
@@ -386,6 +386,15 @@ fn tree(t: &Tokens, c: &Calendar) -> Node {
         )
 }
 
+
+/// 鼠标是否落在某个矩形里（卡片内坐标）
+fn hovering(g: &Gfx, r: &minicard_draw::layout::Rect) -> bool {
+    match g.hover {
+        Some((x, y)) => x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h,
+        None => false,
+    }
+}
+
 fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar, pl: &Placed) -> Result<()> {
     // 导航按钮：1px 描边吸附 + 居中箭头
     if pl.id == 9510 || pl.id == 9511 {
@@ -398,8 +407,16 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
         let cx = px + (pw - sz) / 2.0;
         let cy = py + (ph - sz) / 2.0;
         let d = if pl.id == 9510 { "M14.5 6l-6 6 6 6" } else { "M9.5 6l6 6-6 6" };
+        if hovering(g, &pl.rect) {
+            set_color(g, pal.fg_soft)?;
+            fill_round(
+                g,
+                D2D_RECT_F { left: px as f32, top: py as f32, right: (px + pw) as f32, bottom: (py + ph) as f32 },
+                6.0,
+            )?;
+        }
         let p = Path::svg(d).scale(cx, cy, s);
-        set_color(g, pal.muted)?;
+        set_color(g, if hovering(g, &pl.rect) { pal.fg } else { pal.muted })?;
         stroke_path(g, &p, 2.0 * s, true)?;
         return Ok(());
     }

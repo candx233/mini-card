@@ -88,6 +88,9 @@ enum State {
     Music {
         /// (封面 dataURL, 位图)；换曲才重解码
         cover: Option<(String, ID2D1Bitmap1)>,
+        /// 翻转中的旧封面 + 起始时刻（460ms）
+        prev: Option<ID2D1Bitmap1>,
+        flip_t0: Option<Instant>,
     },
     Calendar(calendar::Calendar, i32, u32),
 }
@@ -399,7 +402,7 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 CardKind::Pomodoro => State::Pomo(pomo::Pomo::new()),
                 CardKind::Todo => State::Todo(todo_items(&card.todo)),
                 CardKind::Weather => State::Weather,
-                CardKind::Music => State::Music { cover: None },
+                CardKind::Music => State::Music { cover: None, prev: None, flip_t0: None },
                 CardKind::Calendar => {
                     let (y, m, d, _, _, _) = now_parts();
                     State::Calendar(calendar_of(y, m, d), 0, d)
@@ -463,6 +466,28 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
             let (y, mo, d, hh, mm, _) = now_parts();
             let date = date_text(y, mo, d, now_parts().5);
             let lunar_txt = lunar::lunar_text(y, mo, d).unwrap_or_default();
+
+            // 悬停：指针在哪张卡上（卡片内坐标），变了就立刻重绘
+            let mut cur_pt = POINT::default();
+            let _ = GetCursorPos(&mut cur_pt);
+            let under = WindowFromPoint(cur_pt);
+            for win in wins.iter_mut() {
+                let hov = if under == win.hwnd {
+                    let mut r = RECT::default();
+                    if GetWindowRect(win.hwnd, &mut r).is_ok() {
+                        let k = 96.0 / win.dpi.max(1.0);
+                        Some(((cur_pt.x - r.left) as f32 * k, (cur_pt.y - r.top) as f32 * k))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if win.gfx.hover != hov {
+                    win.gfx.hover = hov;
+                    win.next_draw = now;
+                }
+            }
 
             let mut earliest = now + Duration::from_millis(250);
             let mut drawn = 0usize;
@@ -624,7 +649,7 @@ fn draw_one(
             weather::paint(&win.gfx, te, pal, &wk, &wv, glass_pair)?;
             false
         }
-        (State::Music { cover }, _) => {
+        (State::Music { cover, prev, flip_t0 }, _) => {
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) => music::Music {
@@ -659,7 +684,14 @@ fn draw_one(
                                 mk.cover_r * win.dpi / 96.0,
                             );
                             match win.gfx.bitmap_from_bgra(&small.bgra, small.w, small.h) {
-                                Ok(b) => *cover = Some((s.cover.clone(), b)),
+                                Ok(b) => {
+                                    // 换曲：旧图留作翻转的「转出面」
+                                    if cover.is_some() {
+                                        *prev = cover.take().map(|(_, b)| b);
+                                        *flip_t0 = Some(now);
+                                    }
+                                    *cover = Some((s.cover.clone(), b))
+                                }
                                 Err(e) => minicard_shell::mlog!("封面上传失败: {e:?}"),
                             }
                         }
@@ -667,8 +699,25 @@ fn draw_one(
                     }
                 }
             }
-            music::paint(&win.gfx, te, pal, &mk, &mw, glass_pair, cover.as_ref().map(|(_, b)| b))?;
-            mw.playing
+            let flip = flip_t0.map(|t0| {
+                let t = ((now - t0).as_secs_f32() / 0.46).clamp(0.0, 1.0);
+                music::CoverFlip { t, old: prev.as_ref(), new: cover.as_ref().map(|(_, b)| b) }
+            });
+            music::paint(
+                &win.gfx,
+                te,
+                pal,
+                &mk,
+                &mw,
+                glass_pair,
+                cover.as_ref().map(|(_, b)| b),
+                flip.as_ref(),
+            )?;
+            let flipping = flip_t0.map(|t0| (now - t0).as_secs_f32() < 0.46).unwrap_or(false);
+            if !flipping {
+                *flip_t0 = None;
+            }
+            mw.playing || flipping
         }
         (State::Calendar(c, off, built_day), _) => {
             let (cy, cm) = month_with_offset(y, mo, *off);
@@ -785,8 +834,8 @@ fn click(
                 *c = calendar_for(yy, mo, *off, dd);
             }
         }
-        State::Music { cover } => {
-            let _ = cover;
+        State::Music { cover, prev, flip_t0 } => {
+            let _ = (&cover, &prev, &flip_t0);
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) => music::Music {

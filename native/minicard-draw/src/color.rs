@@ -52,6 +52,12 @@ pub struct Palette {
     pub fg55: D2D1_COLOR_F,
     /// `--accent`：强调色（待办勾选底、日历今天）。由调用方按 config 的 accent 传进来。
     pub accent: D2D1_COLOR_F,
+    /// `--fg-soft`：控件 hover 底（fg 6%）
+    pub fg_soft: D2D1_COLOR_F,
+    /// hover 时的卡片描边（fg 30%）
+    pub fg30: D2D1_COLOR_F,
+    /// hover 时的控件描边（fg 44%）
+    pub fg44: D2D1_COLOR_F,
     /// `--on-accent`：压在强调色上的字色
     pub on_accent: D2D1_COLOR_F,
 }
@@ -77,6 +83,9 @@ impl Palette {
             accent: srgb8(76, 154, 255),
             on_accent: oklch(0.985, 0.0, 0.0, 1.0),
             badge_border: D2D1_COLOR_F { a: 0.24, ..fg },
+            fg_soft: D2D1_COLOR_F { a: 0.06, ..fg },
+            fg30: D2D1_COLOR_F { a: 0.30, ..fg },
+            fg44: D2D1_COLOR_F { a: 0.44, ..fg },
         }
     }
 

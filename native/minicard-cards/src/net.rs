@@ -176,7 +176,7 @@ pub fn paint(
         let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, pal.border)?;
+        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
         stroke_round(
             g,
             D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
@@ -187,7 +187,7 @@ pub fn paint(
         paint_tree(g, te, pal, t, &placed)?;
 
         // 分隔线：rows 盒的 50%，走 padding box（1px）
-        set_color(g, pal.border)?;
+        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
         let y = t.h / 2.0;
         fill_rect(
             g,

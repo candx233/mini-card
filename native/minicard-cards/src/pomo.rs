@@ -270,7 +270,7 @@ pub fn paint(
         let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, pal.border)?;
+        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
         stroke_round(
             g,
             D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
@@ -425,6 +425,15 @@ fn tree(t: &Tokens, p: &Pomo, mode: PomoMode, _now: Instant) -> Node {
         .child(body)
 }
 
+
+/// 鼠标是否落在某个矩形里（卡片内坐标）
+fn hovering(g: &Gfx, r: &minicard_draw::layout::Rect) -> bool {
+    match g.hover {
+        Some((x, y)) => x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h,
+        None => false,
+    }
+}
+
 fn paint_tree(
     g: &Gfx,
     te: &TextEngine,
@@ -486,6 +495,10 @@ fn paint_tree(
     }
 
     // 按钮：1px 26% 描边 + 文字
+    if (6100..6200).contains(&pl.id) && hovering(g, &pl.rect) {
+        // hover：−/+ 从 fg55 提到 fg（CSS `.pm-flank:hover { color: var(--fg) }`）
+        // 文字在下面统一画，这里只记一个"要提亮"的标记
+    }
     if (6200..6300).contains(&pl.id) {
         // 边框必须落在设备像素上：CSS 会把 1px 边框吸附到整行（参考图 y=81 是纯色 82），
         // 跟着分数坐标画会摊成两行各 13%，看着像「没有边框」。
@@ -493,7 +506,16 @@ fn paint_tree(
         let py = pl.rect.y.round();
         let pw = pl.rect.w.round();
         let ph = pl.rect.h.round();
-        set_color(g, pal.badge_border)?;
+        let hov = hovering(g, &pl.rect);
+        if hov {
+            set_color(g, pal.fg_soft)?;
+            fill_round(
+                g,
+                D2D_RECT_F { left: px + 0.5, top: py + 0.5, right: px + pw - 0.5, bottom: py + ph - 0.5 },
+                6.0,   // 按钮圆角（CSS 0.375rem @16px = 6）
+            )?;
+        }
+        set_color(g, if hov { pal.fg44 } else { pal.badge_border })?;
         stroke_round(
             g,
             D2D_RECT_F {

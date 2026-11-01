@@ -191,7 +191,7 @@ pub fn paint(
         let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, pal.border)?;
+        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
         stroke_round(
             g,
             D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
@@ -402,7 +402,7 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, w: &Weather, 
         // 向下取整：浏览器把 109.42 处的 1px 边框画在第 109 行（不是 110）
         let top = r.y.floor();
         let bottom = r.bottom().floor() - 1.0;
-        set_color(g, pal.border)?;
+        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
         fill_rect(g, D2D_RECT_F { left: r.x, top, right: r.right(), bottom: top + 1.0 })?;
         fill_rect(
             g,

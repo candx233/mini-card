@@ -188,7 +188,7 @@ pub fn paint(
         let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, pal.border)?;
+        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
         stroke_round(
             g,
             D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
@@ -298,11 +298,18 @@ fn paint_tree(
     now: Instant,
     dy: f32,
 ) -> Result<()> {
-    // 行容器：把这一行的 FLIP 位移传给子节点
+    // 行容器：hover 底色 + 把这一行的 FLIP 位移传给子节点
     if (7300..7400).contains(&pl.id) {
         let row = (pl.id - 7300) as usize;
         let order = shown(items);
         let d = order.get(row).map(|&i| items[i].move_dy(now)).unwrap_or(0.0);
+        if let Some((mx, my)) = g.hover {
+            let r = minicard_draw::layout::Rect { y: pl.rect.y + d, ..pl.rect };
+            if mx >= r.x && my >= r.y && mx < r.x + r.w && my < r.y + r.h {
+                set_color(g, pal.fg_soft)?;
+                fill_round(g, D2D_RECT_F { left: r.x, top: r.y, right: r.x + r.w, bottom: r.y + r.h }, 6.0)?;
+            }
+        }
         for c in &pl.children {
             paint_tree(g, te, pal, t, items, c, now, d)?;
         }
@@ -389,7 +396,7 @@ fn paint_tree(
         // 删除线：文字中线（CSS text-decoration: line-through 约在基线上方 ~0.3em）
         if done_row {
             let w = te.measure(spec, 0.0).0.min(pl.rect.w);
-            let mid = pl.rect.y + spec.line_h * 0.5;
+            let mid = pl.rect.y + dy + spec.line_h * 0.5;   // 必须跟行一起位移，否则勾完横线留在原地
             set_color(g, pal.muted)?;
             let line = Path::polyline(&[(pl.rect.x, mid), (pl.rect.x + w, mid)]);
             stroke_path(g, &line, 1.0, false)?;
