@@ -534,7 +534,7 @@ pub fn music_sheet(
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut mm);
         minicard_cards::music::dump_layout(&placed, 0);
     }
-    minicard_cards::music::paint(g, te, pal, &t, &m, None)
+    minicard_cards::music::paint(g, te, pal, &t, &m, None, None)
 }
 
 /// 第十三张测试图：日历卡（240×180），2026-10（1 号周四，31 天 → 5 行），今天是 31 号。

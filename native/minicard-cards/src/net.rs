@@ -96,22 +96,29 @@ pub struct Tween {
     pub from: f64,
     pub to: f64,
     pub t0: Instant,
+    /// 补间时长（ms）。网络卡固定 320；性能卡的条按采样间隔走（见 `perf`），900+ms 才连成连续运动。
+    pub ms: f32,
 }
 
 impl Tween {
     pub fn new(from: f64, to: f64, now: Instant) -> Self {
-        Self { from, to, t0: now }
+        Self { from, to, t0: now, ms: TWEEN_MS }
+    }
+
+    /// 指定时长的补间（性能卡用：时长 ≈ 采样间隔，短了会一格一格跳）
+    pub fn with_ms(from: f64, to: f64, now: Instant, ms: f32) -> Self {
+        Self { from, to, t0: now, ms: ms.max(120.0) }
     }
 
     pub fn value(&self, now: Instant) -> f64 {
-        let u = ((now - self.t0).as_secs_f32() * 1000.0 / TWEEN_MS).clamp(0.0, 1.0);
+        let u = ((now - self.t0).as_secs_f32() * 1000.0 / self.ms).clamp(0.0, 1.0);
         // 梯形速度：s(u) = 2u² (u<.5) / 1-2(1-u)² (u≥.5)
         let k = if u < 0.5 { 2.0 * u * u } else { 1.0 - 2.0 * (1.0 - u) * (1.0 - u) };
         self.from + (self.to - self.from) * k as f64
     }
 
     pub fn live(&self, now: Instant) -> bool {
-        (now - self.t0).as_secs_f32() * 1000.0 < TWEEN_MS
+        (now - self.t0).as_secs_f32() * 1000.0 < self.ms
     }
 }
 
@@ -369,5 +376,37 @@ mod tests {
             prev = Some(v);
         }
         assert_eq!(jumps, 0, "逐帧数值出现 {jumps} 次大跳");
+    }
+}
+
+#[cfg(test)]
+mod tween_tests {
+    use super::Tween;
+    use std::time::{Duration, Instant};
+
+    /// 性能卡的条必须**连续**爬：950ms 里至少 40 个不同中间值，
+    /// 且补间期内 `live` 一直为真（否则 live 循环会退回 1Hz，看着一秒跳一格）
+    #[test]
+    fn bar_tween_is_continuous() {
+        let t0 = Instant::now();
+        let mut t = Tween::with_ms(0.0, 100.0, t0, 950.0);
+        let mut seen = Vec::new();
+        for i in 0..60 {
+            let now = t0 + Duration::from_millis(i * 15);
+            assert!(t.live(now), "补间期内 live 必须为真（第 {i} 步）");
+            let v = t.value(now);
+            if seen.last().map(|l: &f64| (v - l).abs() > 0.01).unwrap_or(true) {
+                seen.push(v);
+            }
+        }
+        assert!(seen.len() >= 40, "950ms 内只出现 {} 个中间值", seen.len());
+        // 到点后归位、且不再 live
+        let end = t0 + Duration::from_millis(1000);
+        assert!((t.value(end) - 100.0).abs() < 0.01);
+        assert!(!t.live(end));
+        // 短时长（网络卡 320ms）仍然是梯形速度、端点正确
+        t = Tween::with_ms(10.0, 20.0, t0, 320.0);
+        assert!((t.value(t0) - 10.0).abs() < 0.01);
+        assert!((t.value(t0 + Duration::from_millis(160)) - 15.0).abs() < 0.05);
     }
 }

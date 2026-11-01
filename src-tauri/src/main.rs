@@ -2009,7 +2009,8 @@ fn native_cards_exe() -> Option<PathBuf> {
     let cands = [
         exe_dir.join("minicard-bin.exe"),
         exe_dir.join("minicard-cards.exe"),
-        // 开发态：target/debug/mini-card.exe → ../../../native/minicard-bin/target/debug/
+        // 开发态：优先 release 版绘制进程（帧循环 60fps，debug 版明显吃 CPU）
+        exe_dir.join("../../../native/minicard-bin/target/release/minicard-bin.exe"),
         exe_dir.join("../../../native/minicard-bin/target/debug/minicard-bin.exe"),
         exe_dir.join("../../native/minicard-bin/target/debug/minicard-bin.exe"),
     ];

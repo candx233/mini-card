@@ -74,14 +74,21 @@ struct CardWin {
 }
 
 enum State {
-    Perf { show_gpu: bool },
+    Perf {
+        show_gpu: bool,
+        /// 三行条的补间（时长 ≈ 采样间隔，否则一秒一格地跳）
+        tweens: [net::Tween; 3],
+    },
     Disks { warn90: bool },
     Clock(clock::Clock),
     Net(net::NetState),
     Pomo(pomo::Pomo),
     Todo(Vec<todo::Item>),
     Weather,
-    Music,
+    Music {
+        /// (封面 dataURL, 位图)；换曲才重解码
+        cover: Option<(String, ID2D1Bitmap1)>,
+    },
     Calendar(calendar::Calendar, i32, u32),
 }
 
@@ -244,7 +251,7 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
     {
         use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
         use windows::Win32::System::Threading::CreateMutexW;
-        let name: Vec<u16> = "MiniCardNativeLiveSingleInstance ".encode_utf16().collect();
+        let name: Vec<u16> = "MiniCardNativeLiveSingleInstance".encode_utf16().collect();
         let h = unsafe { CreateMutexW(None, true, windows::core::PCWSTR(name.as_ptr())) };
         match h {
             Ok(m) => {
@@ -373,7 +380,14 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
 
             let now = Instant::now();
             let state = match card.kind {
-                CardKind::Performance => State::Perf { show_gpu: card.show_gpu },
+                CardKind::Performance => State::Perf {
+                    show_gpu: card.show_gpu,
+                    tweens: [
+                        net::Tween::with_ms(0.0, 0.0, now, 950.0),
+                        net::Tween::with_ms(0.0, 0.0, now, 950.0),
+                        net::Tween::with_ms(0.0, 0.0, now, 950.0),
+                    ],
+                },
                 CardKind::Disks => State::Disks { warn90: card.warn90 },
                 CardKind::Clock => {
                     let mut c = clock::Clock::new();
@@ -385,7 +399,7 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 CardKind::Pomodoro => State::Pomo(pomo::Pomo::new()),
                 CardKind::Todo => State::Todo(todo_items(&card.todo)),
                 CardKind::Weather => State::Weather,
-                CardKind::Music => State::Music,
+                CardKind::Music => State::Music { cover: None },
                 CardKind::Calendar => {
                     let (y, m, d, _, _, _) = now_parts();
                     State::Calendar(calendar_of(y, m, d), 0, d)
@@ -451,6 +465,7 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
             let lunar_txt = lunar::lunar_text(y, mo, d).unwrap_or_default();
 
             let mut earliest = now + Duration::from_millis(250);
+            let mut drawn = 0usize;
             for win in wins.iter_mut() {
                 if now < win.next_draw {
                     if win.next_draw < earliest {
@@ -458,6 +473,7 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                     }
                     continue;
                 }
+                drawn += 1;
                 let animating = draw_one(
                     win,
                     &snap,
@@ -481,6 +497,18 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 }
             }
 
+            if std::env::var("MC_DRAW_LOG").is_ok() {
+                use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+                static LAST: AtomicU64 = AtomicU64::new(0);
+                static CNT: AtomicUsize = AtomicUsize::new(0);
+                let n = CNT.fetch_add(drawn, Ordering::Relaxed) + drawn;
+                let ms = t_start.elapsed().as_millis() as u64;
+                if ms - LAST.load(Ordering::Relaxed) >= 1000 {
+                    minicard_shell::mlog!("draw {} 次/秒", n);
+                    LAST.store(ms, Ordering::Relaxed);
+                    CNT.store(0, Ordering::Relaxed);
+                }
+            }
             let now2 = Instant::now();
             if earliest > now2 {
                 let wait = (earliest - now2).min(Duration::from_millis(100));
@@ -506,11 +534,24 @@ fn draw_one(
     let glass_pair = win.glass.as_ref().map(|(b, r)| (b, *r));
     let snap_r = snap.read().unwrap();
     let animating = match (&mut win.state, win.kind) {
-        (State::Perf { show_gpu }, _) => {
-            let rows = perf_rows(&snap_r, *show_gpu);
+        (State::Perf { show_gpu, tweens }, _) => {
+            let mut rows = perf_rows(&snap_r, *show_gpu);
+            // 条宽补间：时长照抄 card.html::barMs（采样间隔 ×0.95，钳 300..1500），
+            // 短了就是「一秒跳一格」，用户看到的就是不连续
+            let ms = (win.refresh.as_millis() as f32 * 0.95).clamp(300.0, 1500.0);
+            for (i, row) in rows.iter_mut().enumerate() {
+                let Some(target) = row.pct else { continue };
+                if (tweens[i].to - target as f64).abs() > 0.01 {
+                    let from = tweens[i].value(now);
+                    tweens[i] = net::Tween::with_ms(from, target as f64, now, ms);
+                }
+                // 数字用目标值（文字本来就一秒一跳），条的宽度用补间值
+                row.pct = Some(tweens[i].value(now).clamp(0.0, 100.0) as f32);
+            }
+            let animating = tweens.iter().any(|t| t.live(now));
             let tk = perf::Tokens::perf(win.w, win.h);
             perf::paint(&win.gfx, te, pal, &tk, &rows, glass_pair, false)?;
-            false
+            animating
         }
         (State::Disks { warn90 }, _) => {
             let list: Vec<disks::Disk> = snap_r
@@ -583,7 +624,7 @@ fn draw_one(
             weather::paint(&win.gfx, te, pal, &wk, &wv, glass_pair)?;
             false
         }
-        (State::Music, _) => {
+        (State::Music { cover }, _) => {
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) => music::Music {
@@ -603,7 +644,30 @@ fn draw_one(
                 },
             };
             let mk = music::Tokens::music(win.w, win.h);
-            music::paint(&win.gfx, te, pal, &mk, &mw, glass_pair)?;
+            // 封面：换曲/首次才解码（data URL → 缩到封面尺寸 → 圆角烘 alpha → 上传）
+            if let Some(s) = &m {
+                if !s.cover.is_empty()
+                    && cover.as_ref().map(|(u, _)| u.as_str()) != Some(s.cover.as_str())
+                {
+                    match minicard_draw::image::decode_data_url(&s.cover) {
+                        Ok(img) => {
+                            let px = (win.h - 2.0 * mk.pad) * win.dpi / 96.0;
+                            let side = px.round().max(1.0) as u32;
+                            let mut small = minicard_draw::image::resize_cover(&img, side, side);
+                            minicard_draw::image::bake_round_alpha(
+                                &mut small,
+                                mk.cover_r * win.dpi / 96.0,
+                            );
+                            match win.gfx.bitmap_from_bgra(&small.bgra, small.w, small.h) {
+                                Ok(b) => *cover = Some((s.cover.clone(), b)),
+                                Err(e) => minicard_shell::mlog!("封面上传失败: {e:?}"),
+                            }
+                        }
+                        Err(e) => minicard_shell::mlog!("封面解码失败: {e:?}"),
+                    }
+                }
+            }
+            music::paint(&win.gfx, te, pal, &mk, &mw, glass_pair, cover.as_ref().map(|(_, b)| b))?;
             mw.playing
         }
         (State::Calendar(c, off, built_day), _) => {
@@ -707,7 +771,8 @@ fn click(
                 *c = calendar_for(yy, mo, *off, dd);
             }
         }
-        State::Music => {
+        State::Music { cover } => {
+            let _ = cover;
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) => music::Music {

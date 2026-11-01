@@ -125,6 +125,8 @@ pub fn paint(
     t: &Tokens,
     m: &Music,
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
+    // 真专辑封面（圆角已烘进 alpha）；None = 渐变 + 音符占位
+    cover: Option<&ID2D1Bitmap1>,
 ) -> Result<()> {
     let tree = tree(t, m);
     let mut mm: &TextEngine = te;
@@ -146,7 +148,7 @@ pub fn paint(
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
-        paint_tree(g, te, pal, t, m, &placed)?;
+        paint_tree(g, te, pal, t, m, &placed, cover)?;
         g.pop_clip();
         g.end()?;
         Ok(())
@@ -252,11 +254,29 @@ fn tree(t: &Tokens, m: &Music) -> Node {
         )
 }
 
-fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, m: &Music, pl: &Placed) -> Result<()> {
-    // 封面：渐变 + 音符
+fn paint_tree(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &Palette,
+    t: &Tokens,
+    m: &Music,
+    pl: &Placed,
+    cover: Option<&ID2D1Bitmap1>,
+) -> Result<()> {
+    // 封面：有真专辑图就画图，否则渐变 + 音符占位
     if pl.id == 9001 {
         let r = pl.rect;
         let rect = D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };
+        if let Some(bmp) = cover {
+            // 圆角已经烘进位图的 alpha（见 live 的 `bake_round_cover`），这里直接 cover 铺满
+            let (iw, ih) = unsafe {
+                let sz = bmp.GetPixelSize();
+                (sz.width as f32, sz.height as f32)
+            };
+            let src = minicard_draw::image::cover_src_px(iw, ih, r.w, r.h);
+            minicard_draw::image::draw(g, bmp, src, rect)?;
+            return Ok(());
+        }
         let (grad, stops) = gradient::linear_two(
             135.0,
             rect,
@@ -355,7 +375,7 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, m: &Music, pl
         }
     }
     for c in &pl.children {
-        paint_tree(g, te, pal, t, m, c)?;
+        paint_tree(g, te, pal, t, m, c, cover)?;
     }
     Ok(())
 }

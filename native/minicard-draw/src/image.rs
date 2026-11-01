@@ -155,9 +155,13 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 /// CSS `object-fit: cover`：把源图按比例放大到填满目标框、居中裁切 → 返回源矩形。
 pub fn cover_src(img: &Image, dst_w: f32, dst_h: f32) -> D2D_RECT_F {
-    let (iw, ih) = (img.w as f32, img.h as f32);
+    cover_src_px(img.w as f32, img.h as f32, dst_w, dst_h)
+}
+
+/// 同 [`cover_src`]，但只用像素尺寸（位图已经上传、`Image` 不在了的时候用）。
+pub fn cover_src_px(iw: f32, ih: f32, dst_w: f32, dst_h: f32) -> D2D_RECT_F {
     if iw <= 0.0 || ih <= 0.0 || dst_w <= 0.0 || dst_h <= 0.0 {
-        return D2D_RECT_F { left: 0.0, top: 0.0, right: iw, bottom: ih };
+        return D2D_RECT_F { left: 0.0, top: 0.0, right: iw.max(0.0), bottom: ih.max(0.0) };
     }
     let scale = (dst_w / iw).max(dst_h / ih);
     let (sw, sh) = (dst_w / scale, dst_h / scale);
@@ -432,5 +436,112 @@ mod tests {
         assert_eq!(im.px(2, 0), (0, 0, 0, 9));
         assert_eq!(im.px(0, 1), (0, 7, 0, 0));
         assert_eq!(im.stride(), 12);
+    }
+}
+/// 把圆角烘进预乘 BGRA 的 alpha（4×4 超采样）。
+///
+/// 位图上传后没法再套几何裁剪层（paint 里已经在用同一层做窗口圆角裁剪），
+/// 所以封面这类"带圆角的图"在解码时就把角磨掉，画的时候直接铺 —— 一次开销，之后每帧零成本。
+pub fn bake_round_alpha(img: &mut Image, radius: f32) {
+    if radius <= 0.0 {
+        return;
+    }
+    let (w, h) = (img.w as f32, img.h as f32);
+    let r = radius.min(w / 2.0).min(h / 2.0);
+    let stride = img.stride();
+    // 圆角矩形 SDF（负值 = 内部）
+    let sd = |x: f32, y: f32| -> f32 {
+        let (cx, cy) = (x - w / 2.0, y - h / 2.0);
+        let qx = cx.abs() - (w / 2.0 - r);
+        let qy = cy.abs() - (h / 2.0 - r);
+        let ax = qx.max(0.0);
+        let ay = qy.max(0.0);
+        (ax * ax + ay * ay).sqrt() + qx.max(qy).min(0.0) - r
+    };
+    for py in 0..img.h {
+        for px in 0..img.w {
+            let mut cover = 0.0f32;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let x = px as f32 + (sx as f32 + 0.5) / 4.0;
+                    let y = py as f32 + (sy as f32 + 0.5) / 4.0;
+                    if sd(x, y) <= 0.0 {
+                        cover += 1.0 / 16.0;
+                    }
+                }
+            }
+            if cover >= 0.999 {
+                continue;
+            }
+            let o = py as usize * stride + px as usize * 4;
+            for c in 0..4 {
+                let v = (img.bgra[o + c] as f32 * cover).round() as u8;
+                img.bgra[o + c] = v;
+            }
+        }
+    }
+}
+
+/// 按 `object-fit: cover` 把图缩到目标像素尺寸（双线性 + 居中裁切）。
+///
+/// 为什么要先缩再上传：圆角得在**目标尺寸**上烘（cover 裁切会切掉原图四角，
+/// 在原图上烘的角根本不是画出来的那个角）。
+pub fn resize_cover(img: &Image, dst_w: u32, dst_h: u32) -> Image {
+    let (dw, dh) = (dst_w.max(1), dst_h.max(1));
+    let src = cover_src_px(img.w as f32, img.h as f32, dw as f32, dh as f32);
+    let (sx, sy) = (
+        dw as f32 / (src.right - src.left).max(1e-3),
+        dh as f32 / (src.bottom - src.top).max(1e-3),
+    );
+    let mut out = Image { bgra: vec![0u8; (dw * dh * 4) as usize], w: dw, h: dh };
+    let stride = img.stride();
+    for y in 0..dh {
+        for x in 0..dw {
+            let u = src.left + (x as f32 + 0.5) / sx - 0.5;
+            let v = src.top + (y as f32 + 0.5) / sy - 0.5;
+            let x0 = u.floor().max(0.0) as usize;
+            let y0 = v.floor().max(0.0) as usize;
+            let x1 = (x0 + 1).min(img.w as usize - 1);
+            let y1 = (y0 + 1).min(img.h as usize - 1);
+            let fx = (u - x0 as f32).clamp(0.0, 1.0);
+            let fy = (v - y0 as f32).clamp(0.0, 1.0);
+            let px = |xx: usize, yy: usize, c: usize| img.bgra[yy * stride + xx * 4 + c] as f32;
+            let o = (y * dw + x) as usize * 4;
+            for c in 0..4 {
+                let a = px(x0, y0, c) * (1.0 - fx) + px(x1, y0, c) * fx;
+                let b = px(x0, y1, c) * (1.0 - fx) + px(x1, y1, c) * fx;
+                out.bgra[o + c] = (a * (1.0 - fy) + b * fy).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::*;
+
+    /// 纯色图 + 圆角烘 alpha：中心不透明、四角透明
+    #[test]
+    fn cover_resize_and_round_alpha() {
+        // 预乘 BGRA，A=255（不透明）
+        let mut bgra = vec![0u8; 300 * 300 * 4];
+        for px in bgra.chunks_mut(4) {
+            px[0] = 128;
+            px[1] = 128;
+            px[2] = 128;
+            px[3] = 255;
+        }
+        let mut img = Image { w: 300, h: 300, bgra };
+        let mut small = resize_cover(&img, 100, 100);
+        assert_eq!((small.w, small.h), (100, 100));
+        bake_round_alpha(&mut small, 12.0);
+        let a = |x: usize, y: usize| small.bgra[y * small.stride() + x * 4 + 3];
+        assert!(a(50, 50) > 250, "center must be opaque, got {}", a(50, 50));
+        assert_eq!(a(0, 0), 0, "top-left corner must be cut");
+        assert_eq!(a(99, 0), 0, "top-right corner must be cut");
+        assert_eq!(a(0, 99), 0, "bottom-left corner must be cut");
+        assert!(a(50, 2) > 200, "top edge middle should stay opaque");
+        let _ = &mut img;
     }
 }
