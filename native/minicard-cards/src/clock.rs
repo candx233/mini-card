@@ -100,18 +100,16 @@ impl Clock {
             if want[i] == self.digits[i] {
                 continue;
             }
-            // 上一段没走完就停在那，从当前位置起步（与 CSS 版 `from = cur` 同口径）
+            // 上一段没走完就从当前位置接着走（与 CSS 版 `from = cur` 同口径）
             let cur = self.rolls[i].map(|r| r.at(now)).unwrap_or(Self::cell(self.digits[i]));
-            let mut to = Self::cell(want[i]);
-            // 9 → 0 往上滚要经过补的那一格（第 11 格），到了再瞬归
-            if want[i] == 0 && self.digits[i] == 9 {
-                to = 11.0;
-            }
-            if to < cur {
-                // 倒着走（时间回拨）就退一格，视觉上仍是往上
-                to = cur + 1.0;
-            }
-            self.rolls[i] = Some(Roll::new(cur, to, now));
+            // 口径照抄 `card.html::rollSet(dir=+1)`：**只有跨 9→0** 才绕末尾那一格，
+            // 其余情况直接滚到目标格（反方向也直接滚 —— 早先写成 `to = cur + 1`
+            // 会在数字变小时画成「往上跳一格」，看着就是「先蹦到 9 再变」）。
+            self.rolls[i] = Some(if want[i] < self.digits[i] {
+                Roll::wrap(cur, 11.0, Self::cell(want[i]), now)
+            } else {
+                Roll::new(cur, Self::cell(want[i]), now)
+            });
             self.digits[i] = want[i];
         }
     }
@@ -412,5 +410,58 @@ mod tests {
         c.set(14, 26, now);
         assert!(c.rolls.iter().all(|r| r.is_none()));
         assert!(!c.animating(now));
+    }
+}
+
+#[cfg(test)]
+mod roll_tests {
+    use super::*;
+    use crate::roll::cell_char;
+    use std::time::Duration;
+
+    /// 每一次变化都必须**从原数字滚到目标数字**，且滚完停在规范格（`cell(d)`）。
+    /// 早先的写法在数字变小时走 `to = cur + 1`：画面上先蹦到隔壁数字、随后瞬归目标，
+    /// 看着就是「先跳到 9 再变」；而且索引会一路漂移，永远回不到规范格。
+    #[test]
+    fn 时钟每位都滚到目标并归位() {
+        let t0 = Instant::now();
+        let mut c = Clock::new();
+        c.set(12, 59, t0);
+        let t1 = t0 + Duration::from_millis(400); // 上一段结束
+        c.set(13, 0, t1);
+        let end = t1 + Duration::from_millis(500);
+        let want = [1u8, 3, 0, 0];
+        for i in 0..4 {
+            let idx = c.rolls[i].unwrap().at(end);
+            assert!(
+                (idx - (want[i] as f32 + 1.0)).abs() < 0.01,
+                "第 {i} 位滚完停在 {idx}，应在 {}（数字 {want:?}）",
+                want[i] as f32 + 1.0
+            );
+        }
+        // 个位 9→0：中途只能出现 9 和 0
+        let mut seen = Vec::new();
+        for k in 0..=20 {
+            let now = t1 + Duration::from_millis(k * 15);
+            let idx = c.rolls[3].unwrap().at(now);
+            let ch = cell_char(idx.round() as i32);
+            if seen.last() != Some(&ch) {
+                seen.push(ch);
+            }
+        }
+        assert_eq!(seen, vec!['9', '0'], "个位滚动轨迹 {:?}", seen);
+    }
+
+    /// 分钟十位 5→0（12:59 → 13:00）走的是末尾补格，滚完必须归到 0 那一格
+    #[test]
+    fn 分钟十位跨零归位() {
+        let t0 = Instant::now();
+        let mut c = Clock::new();
+        c.set(12, 59, t0);
+        let t1 = t0 + Duration::from_millis(400);
+        c.set(13, 0, t1);
+        let end = t1 + Duration::from_millis(500);
+        let idx = c.rolls[2].unwrap().at(end);
+        assert!((idx - 1.0).abs() < 0.01, "分钟十位应归到 0（格 1），实得 {idx}");
     }
 }

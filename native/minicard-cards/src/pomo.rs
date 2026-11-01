@@ -213,14 +213,14 @@ impl Pomo {
                 continue;
             }
             let cur = self.rolls[i].map(|r| r.at(now)).unwrap_or(cell(self.shown[i]));
-            let mut to = cell(want[i]);
-            if want[i] == 0 && self.shown[i] == 9 {
-                to = 11.0;
-            }
-            if to < cur {
-                to = cur + 1.0;
-            }
-            self.rolls[i] = Some(Roll::new(cur, to, now));
+            // 口径照抄 `card.html::rollSet(dir=-1)`：倒计时**只有跨 0→9** 才绕开头那一格
+            // （往 0 号格滚，滚完瞬归到 9），其余直接滚到目标格。
+            // 早先的 `to = cur + 1` 把每次「减一」都画成往上加一格 —— 看着像先蹦到 9。
+            self.rolls[i] = Some(if want[i] > self.shown[i] {
+                Roll::wrap(cur, 0.0, cell(want[i]), now)
+            } else {
+                Roll::new(cur, cell(want[i]), now)
+            });
             self.shown[i] = want[i];
         }
     }
@@ -686,5 +686,39 @@ pub fn hit(te: &TextEngine, t: &Tokens, p: &Pomo, now: Instant, x: f32, y: f32) 
         6101 => Some(Hit::Plus),
         _ if (6200..6300).contains(&id) => Some(Hit::Act(id - 6200)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod countdown_roll_tests {
+    use super::*;
+    use crate::roll::cell_char;
+    use std::time::Duration;
+
+    /// 倒计时每次「减一」都要**往下**滚一格：30→29 的个位是 0→9，
+    /// 只许经过补的 9（格 0），不能顺着 1..8 一路走 —— 那就是「先跳到 9」。
+    #[test]
+    fn 倒计时减一不绕远路() {
+        let t0 = Instant::now();
+        let mut p = Pomo::new();
+        p.mode = PomoMode::Run;
+        p.remain_ms = 30_000.0;
+        p.end_at = Some(t0 + Duration::from_millis(30_000));
+        p.tick(t0);
+        let t1 = t0 + Duration::from_millis(1000); // 30s → 29s
+        p.tick(t1);
+        let mut seen = Vec::new();
+        for k in 0..=20 {
+            let now = t1 + Duration::from_millis(k * 15);
+            let idx = p.rolls[3].unwrap().at(now);
+            let ch = cell_char(idx.round() as i32);
+            if seen.last() != Some(&ch) {
+                seen.push(ch);
+            }
+        }
+        assert_eq!(seen, vec!['0', '9'], "个位轨迹 {:?}（应 0→9，不许经过 1..8）", seen);
+        let end = t1 + Duration::from_millis(400);
+        let idx = p.rolls[3].unwrap().at(end);
+        assert!((idx - 10.0).abs() < 0.01, "滚完应归到 9 的规范格 10，实得 {idx}");
     }
 }

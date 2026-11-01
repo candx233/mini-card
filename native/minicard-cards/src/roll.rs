@@ -27,14 +27,25 @@ pub struct Roll {
     pub to: f32,
     pub t0: Instant,
     pub ms: f32,
+    /// 滚完后瞬归到哪一格（跨补格时用：`to` 落在补的 0/9 上，归位到规范格）
+    pub wrap_to: Option<f32>,
 }
 
 impl Roll {
     pub fn new(from: f32, to: f32, t0: Instant) -> Self {
-        Self { from, to, t0, ms: ROLL_MS }
+        Self { from, to, t0, ms: ROLL_MS, wrap_to: None }
+    }
+
+    /// 跨补格的滚动：`to` 是补的 0/9，滚完瞬归到 `wrap_to`（规范格）
+    pub fn wrap(from: f32, to: f32, wrap_to: f32, t0: Instant) -> Self {
+        Self { from, to, t0, ms: ROLL_MS, wrap_to: Some(wrap_to) }
     }
 
     pub fn at(&self, now: Instant) -> f32 {
+        if self.done(now) {
+            // 滚完停在规范格（补格只在这一趟里用）
+            return self.wrap_to.unwrap_or(self.to);
+        }
         let u = ((now - self.t0).as_secs_f32() * 1000.0 / self.ms).clamp(0.0, 1.0);
         let k = 1.0 - (1.0 - u).powi(4);
         self.from + (self.to - self.from) * k
