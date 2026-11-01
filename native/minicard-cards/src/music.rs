@@ -205,17 +205,20 @@ impl CoverFlip<'_> {
     }
 }
 
-/// `perspective: 600px` 的 rotateY 投影：返回该列的**水平位置**（相对封面中心）
-pub fn flip_project_x(x: f32, deg: f32) -> f32 {
+/// `perspective: 600px` 的 rotateY 投影 —— **`perspective-origin` 在 `.mc-body` 中心**
+/// （卡片中心，比封面中心右移 60px），不是封面中心。返回该列在卡内的 x。
+pub fn flip_project_x(x_card: f32, deg: f32, cx: f32, ox: f32) -> f32 {
     let th = deg.to_radians();
-    let z = x * th.sin();
-    (x * th.cos()) * PERSPECTIVE / (PERSPECTIVE + z)
+    let u = x_card - cx;
+    let z = u * th.sin();
+    let s = PERSPECTIVE / (PERSPECTIVE + z);
+    ox + (cx + u * th.cos() - ox) * s
 }
 
-/// 同一列的**纵向缩放**（远边小、近边大）
-pub fn flip_project_scale(x: f32, deg: f32) -> f32 {
+/// 同一列的**纵向缩放**（远边小、近边大）；只跟这列离旋转轴的偏移有关
+pub fn flip_project_scale(x_card: f32, deg: f32, cx: f32) -> f32 {
     let th = deg.to_radians();
-    PERSPECTIVE / (PERSPECTIVE + x * th.sin())
+    PERSPECTIVE / (PERSPECTIVE + (x_card - cx) * th.sin())
 }
 
 /// 按列做透视投影后逐条绘制：`perspective: 600px` 的 rotateY。
@@ -225,6 +228,7 @@ fn draw_flip(
     g: &Gfx,
     bmp: &ID2D1Bitmap1,
     r: minicard_draw::layout::Rect,
+    t: &Tokens,
     deg: f32,
 ) -> Result<()> {
     let (iw, ih) = unsafe {
@@ -232,46 +236,44 @@ fn draw_flip(
         (s.width as f32, s.height as f32)
     };
     let src = minicard_draw::image::cover_src_px(iw, ih, r.w, r.h);
-    let th = deg.to_radians();
-    let (sn, cs) = th.sin_cos();
     let cx = r.x + r.w / 2.0;
     let cy = r.y + r.h / 2.0;
-    // 侧过去时宽度归零，没必要画
-    if cs.abs() < 0.02 {
-        return Ok(());
-    }
-    let (proj, scale_at) = (|x: f32| flip_project_x(x, deg), |x: f32| flip_project_scale(x, deg));
-    let _ = (sn, cs);
+    // CSS：`perspective` 挂在 `.mc-body` 上，默认 `perspective-origin: 50% 50%` = 卡片中心
+    let (ox, oy) = (t.w / 2.0, t.h / 2.0);
+    // 注意：**不要**因为 cos≈0 就整块跳过 —— 侧对镜头时近边被放大、远边被压缩，
+    // 浏览器实测 89°/90° 仍有约 10px 的竖条（见 `透视_与浏览器实测对齐`）。
     let sw = src.right - src.left;
 
     const N: usize = 36;
     for i in 0..N {
-        let l0 = -r.w / 2.0 + r.w * i as f32 / N as f32;
-        let l1 = -r.w / 2.0 + r.w * (i + 1) as f32 / N as f32;
-        let (p0, p1) = (proj(l0), proj(l1));
-        let smid = scale_at((l0 + l1) / 2.0);
+        let x0 = cx - r.w / 2.0 + r.w * i as f32 / N as f32;
+        let x1 = cx - r.w / 2.0 + r.w * (i + 1) as f32 / N as f32;
+        let (p0, p1) = (flip_project_x(x0, deg, cx, ox), flip_project_x(x1, deg, cx, ox));
+        let s = flip_project_scale((x0 + x1) / 2.0, deg, cx);
         let (left, right) = if p0 <= p1 { (p0, p1) } else { (p1, p0) };
         if right - left < 0.05 {
             continue;
         }
+        // 纵向：这一列以 cy 为中心按 s 缩放，再按透视原点做一次偏移
+        let yc = oy + (cy - oy) * s;
         let u0 = src.left + sw * (i as f32 / N as f32);
         let u1 = src.left + sw * ((i + 1) as f32 / N as f32);
         // 0.4px 外扩，防止相邻条之间透出 1px 缝
         let pad = 0.4f32.min((right - left) * 0.4);
         let spad = pad * (sw / r.w);
         let dst = D2D_RECT_F {
-            left: cx + left - pad,
-            top: cy - r.h * smid / 2.0,
-            right: cx + right + pad,
-            bottom: cy + r.h * smid / 2.0,
+            left: left - pad,
+            top: yc - r.h * s / 2.0,
+            right: right + pad,
+            bottom: yc + r.h * s / 2.0,
         };
-        let s = D2D_RECT_F {
+        let src_rect = D2D_RECT_F {
             left: u0 - spad,
             top: src.top,
             right: u1 + spad,
             bottom: src.bottom,
         };
-        minicard_draw::image::draw_linear(g, bmp, s, dst)?;
+        minicard_draw::image::draw_linear(g, bmp, src_rect, dst)?;
     }
     Ok(())
 }
@@ -439,7 +441,7 @@ fn paint_tree(
         let rect = D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };
         if let Some(f) = flip {
             if let Some(bmp) = f.visible() {
-                draw_flip(g, bmp, r, f.angle_deg())?;
+                draw_flip(g, bmp, r, t, f.angle_deg())?;
             }
             return Ok(());
         }
@@ -677,24 +679,64 @@ mod flip_tests {
 
     #[test]
     fn 透视_零度恒等() {
-        for x in [-50.0f32, -10.0, 0.0, 10.0, 50.0] {
-            assert!((flip_project_x(x, 0.0) - x).abs() < 1e-3);
-            assert!((flip_project_scale(x, 0.0) - 1.0).abs() < 1e-6);
+        // 封面中心 (60,60)、透视原点在卡片中心 (120,60)
+        for x in [10.0f32, 50.0, 60.0, 70.0, 110.0] {
+            assert!((flip_project_x(x, 0.0, 60.0, 120.0) - x).abs() < 1e-3);
+            assert!((flip_project_scale(x, 0.0, 60.0) - 1.0).abs() < 1e-6);
         }
     }
 
     #[test]
     fn 透视_远边缩小近边放大() {
-        // deg>0：右半边（x>0）转到后面 → 缩放 < 1；左半边 > 1
-        let s_r = flip_project_scale(40.0, 60.0);
-        let s_l = flip_project_scale(-40.0, 60.0);
+        // deg>0：右边（离轴 +40）转到后面 → 缩放 < 1；左边 > 1
+        let s_r = flip_project_scale(100.0, 60.0, 60.0);
+        let s_l = flip_project_scale(20.0, 60.0, 60.0);
         assert!(s_r < 1.0, "远边应当缩小，实际 {s_r}");
         assert!(s_l > 1.0, "近边应当放大，实际 {s_l}");
-        // 宽度按 cos 收窄（60° → ≈0.5 倍）
-        let w = flip_project_x(50.0, 60.0) - flip_project_x(-50.0, 60.0);
-        assert!((w - 100.0 * 60.0f32.to_radians().cos()).abs() < 12.0, "宽度 {w}");
-        // 90° 附近几乎归零（但仍有宽度，因为透视平行四边形）
-        let w90 = flip_project_x(50.0, 89.0) - flip_project_x(-50.0, 89.0);
-        assert!(w90.abs() < 8.0, "89° 宽度应当极小，实际 {w90}");
+        // 透视原点在右 60px：侧转时整块会往中心拉，跨度比纯 cos 略宽
+        let w = flip_project_x(110.0, 60.0, 60.0, 120.0) - flip_project_x(10.0, 60.0, 60.0, 120.0);
+        let cos_w = 100.0 * 60.0f32.to_radians().cos();
+        assert!(w > cos_w, "带原点偏移应当比纯 cos 宽：{w} vs {cos_w}");
+        assert!(w < cos_w * 1.4, "但不该宽太多：{w}");
+        // 89° 侧对镜头：**不是零**——近边被放大、远边被压缩，两者投影到不同的 x，
+        // 浏览器实测同样是 11.8px 的竖条（见下一条测试）
+        let w89 = flip_project_x(110.0, 89.0, 60.0, 120.0) - flip_project_x(10.0, 89.0, 60.0, 120.0);
+        assert!((w89 - 11.83).abs() < 0.3, "89° 竖条宽度 {w89}，浏览器 11.83");
+    }
+
+    /// 直接拿浏览器的 `getBoundingClientRect` 真值对表（perspective:600px、
+    /// body 220×100 原点 (110,50)、封面 100×100 原点 (50,50)、rotateY(deg)）。
+    #[test]
+    fn 透视_与浏览器实测对齐() {
+        // (角度, 左边缘 x, 宽度 w)
+        let cases = [
+            (0.0f32, 0.0f32, 100.0f32),
+            (30.0, 2.21, 91.76),
+            (45.0, 8.67, 78.05),
+            (60.0, 18.39, 58.97),
+            (75.0, 30.67, 35.77),
+            (85.0, 39.82, 18.81),
+            (89.0, 43.59, 11.83),
+        ];
+        for (deg, want_x, want_w) in cases {
+            let l = flip_project_x(0.0, deg, 50.0, 110.0);
+            let r = flip_project_x(100.0, deg, 50.0, 110.0);
+            assert!((l - want_x).abs() < 0.35, "{deg}° 左缘 {l}，浏览器 {want_x}");
+            assert!((r - l - want_w).abs() < 0.35, "{deg}° 宽度 {}，浏览器 {want_w}", r - l);
+        }
+        // 纵向：封面中心与透视原点同高时，纵向缩放对称、中心不动
+        let s_near = flip_project_scale(0.0, 45.0, 50.0);
+        let s_far = flip_project_scale(100.0, 45.0, 50.0);
+        assert!((s_near - 1.0627).abs() < 0.002, "近边缩放 {s_near}");
+        assert!((s_far - 0.9440).abs() < 0.002, "远边缩放 {s_far}");
+    }
+
+    #[test]
+    fn 透视_原点偏移把封面往中心拉() {
+        // 45° 时：纯中心投影跨度≈75，带原点偏移会更宽且整体右移（朝 120 靠）
+        let (l1, r1) = (flip_project_x(10.0, 45.0, 60.0, 120.0), flip_project_x(110.0, 45.0, 60.0, 120.0));
+        let (l0, r0) = (flip_project_x(10.0, 45.0, 60.0, 60.0), flip_project_x(110.0, 45.0, 60.0, 60.0));
+        assert!(r1 - l1 > r0 - l0, "带原点偏移跨度更大：{} vs {}", r1 - l1, r0 - l0);
+        assert!((l1 - 60.0).abs() > (l0 - 60.0).abs() - 1e-3, "整体朝 120 移动");
     }
 }

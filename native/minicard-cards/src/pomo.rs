@@ -59,6 +59,8 @@ pub struct Tokens {
     pub flank_w: f32,
     pub flank_fs: f32,
     pub flank_lh: f32,
+    /// `.pomo-body .pm-flank { padding: 0 0 0.15rem }` —— grid 居中是在内容盒里，扣掉它再居中
+    pub flank_pad_b: f32,
     pub num_fs: f32,
     pub num_lh: f32,
     pub num_min_w: f32,
@@ -89,6 +91,7 @@ impl Tokens {
             hero_gap: 0.125 * r,
             flank_w: 1.75 * r,
             flank_fs: 1.0 * r,
+            flank_pad_b: 0.15 * r,
             flank_lh: 1.0 * r,
             num_fs: 2.125 * r,
             num_lh: 2.125 * r,
@@ -549,7 +552,12 @@ fn paint_tree(
         // 按钮里 `place-items:center` 居中的是**行盒**，这里用字面框把文字摆到视觉中线
         // DWrite 在给足行盒高度时自己会把行放进盒里，不需要再补偏移
         // 按钮文字同样吸附整像素（参考图墨迹 y 86..98，不吸附会低 1px）
-        let dy = if (6200..6300).contains(&id) {
+        let dy = if (6100..6200).contains(&id) {
+            // `.pm-flank` 是 28×28 的 grid 盒、`place-items:center` 居中的是**行盒**，
+            // 而且它的内容盒要扣掉 padding-bottom 0.15rem(2.4)：
+            // (28 − 2.4 − 16) / 2 = 4.8 —— 少了这一档 −/+ 会整体高 4.8px
+            (pl.rect.h - t.flank_pad_b - spec.line_h) / 2.0
+        } else if (6200..6300).contains(&id) {
             pl.rect.y.round() - pl.rect.y
         } else {
             0.0
