@@ -297,6 +297,35 @@ pub fn run(
     let snap: SharedSnap = data::spawn_sampler();
     let wshared = wx::SharedWeather::default();
     wx::seed(&wshared);
+    // 天气：起一个刷新线程。以前只有 `seed` —— 卡上那张是启动那一刻的缓存，一整天不动。
+    // 现在：城市改了立刻刷，否则 10 分钟一轮（失败 30 秒后重试）。
+    {
+        let ws = wshared.clone();
+        std::thread::spawn(move || {
+            let mut seen = String::new();
+            let mut last = Instant::now() - Duration::from_secs(3600);
+            loop {
+                let cfg = Config::load();
+                let city = cfg.settings.weather_city.clone();
+                let city_changed = city != seen;
+                let due = last.elapsed() >= Duration::from_secs(600);
+                if city_changed || due {
+                    match wx::refresh_local(&ws) {
+                        Ok(s) => {
+                            seen = city;
+                            last = Instant::now();
+                            minicard_shell::mlog!("天气已刷新：{} {}°", s.city, s.temp);
+                        }
+                        Err(e) => {
+                            last = Instant::now() - Duration::from_secs(570);
+                            minicard_shell::mlog!("天气刷新失败: {e}");
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        });
+    }
 
     // SMTC 音乐：core 的 Sampler 每拍更新内部快照，这里只负责起线程 + 读
     std::thread::spawn(|| {
@@ -600,6 +629,13 @@ pub fn run(
                     if blur_changed {
                         blur = nc.settings.glass_blur as f32;
                         minicard_shell::mlog!("config 热载：模糊 {}px（重切玻璃）", blur);
+                    }
+                    // 层级档改了：就地重摆（以前要重启绘制进程）
+                    if !matches_theme_str(nc.settings.z_order, cfg.settings.z_order) && !topmost {
+                        for win in wins.iter() {
+                            apply_z(win.hwnd, nc.settings.z_order);
+                        }
+                        minicard_shell::mlog!("config 热载：层级 {:?}", nc.settings.z_order);
                     }
                     for win in wins.iter_mut() {
                         if blur_changed {
@@ -1110,8 +1146,33 @@ fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
     }
 }
 
+fn matches_theme_str(
+    a: minicard_core::config::ZOrder,
+    b: minicard_core::config::ZOrder,
+) -> bool {
+    format!("{a:?}") == format!("{b:?}")
+}
+
 fn matches_theme(a: minicard_core::config::Theme, b: minicard_core::config::Theme) -> bool {
     format!("{a:?}") == format!("{b:?}")
+}
+
+/// 按 z 档摆窗口：Top = 置顶带；Desktop = 插到 WorkerW 锚点正上方
+fn apply_z(hwnd: HWND, z: minicard_core::config::ZOrder) {
+    use minicard_core::config::ZOrder;
+    unsafe {
+        match z {
+            ZOrder::Top => {
+                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            _ => {
+                let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                if let Err(e) = minicard_shell::desktop::insert_above_desktop(hwnd) {
+                    minicard_shell::mlog!("桌面层插入失败: {e:?}");
+                }
+            }
+        }
+    }
 }
 
 fn win_dpi(hwnd: HWND) -> f32 {
