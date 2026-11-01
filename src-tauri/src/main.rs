@@ -20,6 +20,7 @@ mod weather;
 
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use config::{CardInstance, CardKind, Config, ZOrder};
@@ -217,11 +218,23 @@ fn overlay_main_bounds(w: &WebviewWindow, cfg: &mut Config) {
 
 /// 活着的卡片窗口位置盖进 cfg（窗口没开的卡保持原值）
 fn overlay_card_positions(app: &AppHandle, cfg: &mut Config) {
+    // 原生自绘模式下卡片窗口在**别的进程**里：主窗找不到对应 webview 窗，
+    // 前端手里那份 pos 是旧的 → 必须从盘上取，不然「拖完保存设置」会把位置吃掉。
+    let native = cfg.settings.native_cards;
+    let disk = if native { Some(Config::load()) } else { None };
     for card in cfg.cards.iter_mut() {
         if let Some(w) = app.get_webview_window(&card_label(&card.id)) {
             if let Ok(pos) = w.outer_position() {
                 let s = w.scale_factor().unwrap_or(1.0);
                 card.pos = [(pos.x as f64 / s) as f32, (pos.y as f64 / s) as f32];
+            }
+        } else if let Some(d) = &disk {
+            if let Some(dc) = d.cards.iter().find(|c| c.id == card.id) {
+                card.pos = dc.pos;
+                // 待办勾选也可能是在原生卡上点的
+                if !dc.todo.is_empty() {
+                    card.todo = dc.todo.clone();
+                }
             }
         }
     }
@@ -1984,8 +1997,106 @@ fn create_card(app: &AppHandle, cfg: &Config, card: &CardInstance) {
     });
 }
 
+
+/// 原生自绘进程（`minicard-bin --live`）：一个进程画全部卡片。
+/// 主窗只负责持有句柄，配置仍以 config.toml 为唯一真源。
+static NATIVE_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+/// 找绘制进程的可执行文件：开发态在 native/minicard-bin/target/debug，
+/// 装好的版本跟主程序同目录（`minicard-cards.exe`）。
+fn native_cards_exe() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let cands = [
+        exe_dir.join("minicard-bin.exe"),
+        exe_dir.join("minicard-cards.exe"),
+        // 开发态：target/debug/mini-card.exe → ../../../native/minicard-bin/target/debug/
+        exe_dir.join("../../../native/minicard-bin/target/debug/minicard-bin.exe"),
+        exe_dir.join("../../native/minicard-bin/target/debug/minicard-bin.exe"),
+    ];
+    cands.into_iter().find(|p| p.exists())
+}
+
+/// 字体目录：主程序目录与绘制进程目录都试（开发态两者不在同一层）
+fn font_dir_of(exe_dir: &std::path::Path) -> Option<PathBuf> {
+    let cands = [
+        // 装好的版本：跟主程序同目录
+        exe_dir.join("assets/fonts"),
+        // 开发态（相对主程序 target/debug）
+        exe_dir.join("../../../native/assets/fonts"),
+        exe_dir.join("../../native/assets/fonts"),
+        // 开发态（相对 minicard-bin/target/debug）
+        exe_dir.join("../../../assets/fonts"),
+        exe_dir.join("../../assets/fonts"),
+    ];
+    cands.into_iter().find(|p| p.join("MiSans-Regular.ttf").exists())
+}
+
+/// 保证原生绘制进程在跑（已在跑就什么都不做）
+fn spawn_log(msg: &str) {
+    use std::io::Write;
+    let p = std::env::temp_dir().join("minicard-spawn.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
+fn ensure_native_cards(app: &AppHandle, cfg: &Config) {
+    if NATIVE_CHILD.lock().unwrap().is_some() {
+        return;
+    }
+    let Some(exe) = native_cards_exe() else {
+        spawn_log(&format!("找不到绘制进程，exe_dir={:?}", std::env::current_exe()));
+        let _ = app.emit("native-cards-missing", ());
+        return;
+    };
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--live")
+        .arg("--blur")
+        .arg(cfg.settings.glass_blur.to_string());
+    if let Some(exe_dir) = exe.parent() {
+        if let Some(fd) = font_dir_of(exe_dir) {
+            cmd.arg("--font").arg(fd.join("MiSans-Regular.ttf"));
+        }
+    }
+    // 控制台窗口不要弹出来
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    spawn_log(&format!("spawn {:?} args={:?}", exe, cmd));
+    match cmd.spawn() {
+        Ok(child) => {
+            spawn_log(&format!("spawn ok pid={}", child.id()));
+            *NATIVE_CHILD.lock().unwrap() = Some(child);
+        }
+        Err(e) => {
+            spawn_log(&format!("spawn 失败: {e}"));
+            let _ = app.emit("native-cards-error", e.to_string());
+        }
+    }
+}
+
+fn stop_native_cards() {
+    if let Some(mut c) = NATIVE_CHILD.lock().unwrap().take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
 /// config ↔ 卡片窗口双向同步：enabled 的保证存在，禁用/删掉的关掉
 fn sync_cards(app: &AppHandle, cfg: &Config) {
+    if cfg.settings.native_cards {
+        // 原生自绘：关掉所有 card.html 窗口，起（或复用）绘制进程
+        for card in &cfg.cards {
+            if let Some(w) = app.get_webview_window(&card_label(&card.id)) {
+                let _ = w.close();
+            }
+        }
+        ensure_native_cards(app, cfg);
+        return;
+    }
+    stop_native_cards();
     for card in &cfg.cards {
         let label = card_label(&card.id);
         let exists = app.get_webview_window(&label).is_some();
@@ -3487,6 +3598,7 @@ fn main() {
     app.run(|_app, event| {
         // 退出前补写节流窗口里的最后一次位置（拖完 250ms 内退出也不丢）
         if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+            stop_native_cards();
             flush_pos_now();
         }
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event {

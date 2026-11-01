@@ -341,6 +341,10 @@ pub struct Settings {
     /// 全局热键总开关（设置页那个 switch）；关掉就注销热键，键位与录制结果都留着
     pub hotkey_on: bool,
     pub z_order: ZOrder,
+    /// 卡片走 Rust 自绘（`minicard-bin --live`）而不是 WebView2：
+    /// 打开后主窗不再建 card.html 的窗口，改由一个原生绘制进程把九张卡画出来。
+    #[serde(default)]
+    pub native_cards: bool,
     /// 卡片白色叠加 alpha（玻璃厚度），0-255
     pub glass_alpha: u8,
     /// 玻璃来源：`acrylic`/`mica` = DWM 系统背景材质（真磨砂，Win11 22H2+）；
@@ -367,6 +371,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            native_cards: false,
             autostart: false,
             close_to_tray: true,
             hotkey: "Ctrl+Alt+W".to_owned(),
