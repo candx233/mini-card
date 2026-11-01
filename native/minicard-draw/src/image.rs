@@ -175,6 +175,21 @@ pub fn bitmap(g: &Gfx, img: &Image) -> Result<ID2D1Bitmap1> {
 }
 
 /// 按源矩形画到目标矩形（不裁剪；圆角交给 `draw_round`）。
+/// 线性采样版本：分条做透视投影时用（36 条 × HIGH_QUALITY_CUBIC 太贵，而且条内本来就是等比缩放）
+pub fn draw_linear(g: &Gfx, bmp: &ID2D1Bitmap1, src: D2D_RECT_F, dst: D2D_RECT_F) -> Result<()> {
+    unsafe {
+        g.d2d.DrawBitmap(
+            bmp,
+            Some(&dst),
+            1.0,
+            windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR,
+            Some(&src),
+            None,
+        );
+    }
+    Ok(())
+}
+
 pub fn draw(g: &Gfx, bmp: &ID2D1Bitmap1, src: D2D_RECT_F, dst: D2D_RECT_F) -> Result<()> {
     unsafe {
         g.d2d.DrawBitmap(

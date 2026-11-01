@@ -118,13 +118,162 @@ impl Tokens {
     }
 }
 
-/// 切歌封面翻转：0→90° 转出（old）→ 换图 → 90°→0 转回（new）。
-/// Direct2D 里没有 3D，这里用「横向压扁」(cos) 近似 —— 90° 那刻宽度为 0，肉眼一致。
+/// 切歌封面翻转：照抄 `web/card.html::coverFlip` ——
+/// 转出 0.22s `cubic-bezier(.6,0,.8,.4)` 到 −90°，换图，转回 0.26s `cubic-bezier(.2,.6,.4,1)` 到 0。
+/// 浏览器那边 `.mc-body` 有 `perspective: 600px`，所以是真透视（远边缩小成梯形）；
+/// 纯横向压扁只有「橡皮筋」感，这里按列做透视投影。
 pub struct CoverFlip<'a> {
-    /// 0..1 总进度（460ms）
-    pub t: f32,
+    /// 已经过的时间（秒）
+    pub age: f32,
+    /// +1 = 下一首（向左翻），−1 = 上一首（镜像）
+    pub dir: f32,
     pub old: Option<&'a ID2D1Bitmap1>,
     pub new: Option<&'a ID2D1Bitmap1>,
+}
+
+/// 转出时长（CSS 0.22s）
+pub const FLIP_OUT_S: f32 = 0.22;
+/// 转回时长（CSS 0.26s）
+pub const FLIP_IN_S: f32 = 0.26;
+/// `.mc-body { perspective: 600px }`
+const PERSPECTIVE: f32 = 600.0;
+
+/// CSS 的三次贝塞尔缓动：给定 (x1,y1,x2,y2) 和当前的 x，求 y。
+fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    // 先解 u 使 X(u) = x（牛顿迭代 + 二分兜底，和浏览器一致）
+    let bx = |u: f32| {
+        let v = 1.0 - u;
+        3.0 * v * v * u * x1 + 3.0 * v * u * u * x2 + u * u * u
+    };
+    let dbx = |u: f32| {
+        let v = 1.0 - u;
+        3.0 * v * v * x1 + 6.0 * v * u * (x2 - x1) + 3.0 * u * u * (1.0 - x2)
+    };
+    let mut u = x;
+    for _ in 0..8 {
+        let d = dbx(u);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        let err = bx(u) - x;
+        if err.abs() < 1e-6 {
+            break;
+        }
+        u = (u - err / d).clamp(0.0, 1.0);
+    }
+    if (bx(u) - x).abs() > 1e-4 {
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..24 {
+            let mid = (lo + hi) / 2.0;
+            if bx(mid) < x {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        u = (lo + hi) / 2.0;
+    }
+    let v = 1.0 - u;
+    3.0 * v * v * u * y1 + 3.0 * v * u * u * y2 + u * u * u
+}
+
+impl CoverFlip<'_> {
+    /// 当前角度（度）；转出段是负、转回段从正回到 0
+    pub fn angle_deg(&self) -> f32 {
+        if self.age < FLIP_OUT_S {
+            let u = (self.age / FLIP_OUT_S).clamp(0.0, 1.0);
+            self.dir * -90.0 * cubic_bezier(0.6, 0.0, 0.8, 0.4, u)
+        } else {
+            let v = ((self.age - FLIP_OUT_S) / FLIP_IN_S).clamp(0.0, 1.0);
+            self.dir * 90.0 * (1.0 - cubic_bezier(0.2, 0.6, 0.4, 1.0, v))
+        }
+    }
+
+    /// 这一刻该画哪张图（220ms 处换图，和 CSS 的 setTimeout 一致）
+    fn visible(&self) -> Option<&ID2D1Bitmap1> {
+        if self.age < FLIP_OUT_S {
+            self.old
+        } else {
+            self.new
+        }
+    }
+
+    /// 是否已经翻完
+    pub fn done(&self) -> bool {
+        self.age >= FLIP_OUT_S + FLIP_IN_S
+    }
+}
+
+/// `perspective: 600px` 的 rotateY 投影：返回该列的**水平位置**（相对封面中心）
+pub fn flip_project_x(x: f32, deg: f32) -> f32 {
+    let th = deg.to_radians();
+    let z = x * th.sin();
+    (x * th.cos()) * PERSPECTIVE / (PERSPECTIVE + z)
+}
+
+/// 同一列的**纵向缩放**（远边小、近边大）
+pub fn flip_project_scale(x: f32, deg: f32) -> f32 {
+    let th = deg.to_radians();
+    PERSPECTIVE / (PERSPECTIVE + x * th.sin())
+}
+
+/// 按列做透视投影后逐条绘制：`perspective: 600px` 的 rotateY。
+/// 每一列的水平位置按 x·cosθ·P/(P+x·sinθ) 投影、纵向按 P/(P+x·sinθ) 缩放 ——
+/// 这就是「远边小、近边大」的梯形，也是立体感的来源。
+fn draw_flip(
+    g: &Gfx,
+    bmp: &ID2D1Bitmap1,
+    r: minicard_draw::layout::Rect,
+    deg: f32,
+) -> Result<()> {
+    let (iw, ih) = unsafe {
+        let s = bmp.GetPixelSize();
+        (s.width as f32, s.height as f32)
+    };
+    let src = minicard_draw::image::cover_src_px(iw, ih, r.w, r.h);
+    let th = deg.to_radians();
+    let (sn, cs) = th.sin_cos();
+    let cx = r.x + r.w / 2.0;
+    let cy = r.y + r.h / 2.0;
+    // 侧过去时宽度归零，没必要画
+    if cs.abs() < 0.02 {
+        return Ok(());
+    }
+    let (proj, scale_at) = (|x: f32| flip_project_x(x, deg), |x: f32| flip_project_scale(x, deg));
+    let _ = (sn, cs);
+    let sw = src.right - src.left;
+
+    const N: usize = 36;
+    for i in 0..N {
+        let l0 = -r.w / 2.0 + r.w * i as f32 / N as f32;
+        let l1 = -r.w / 2.0 + r.w * (i + 1) as f32 / N as f32;
+        let (p0, p1) = (proj(l0), proj(l1));
+        let smid = scale_at((l0 + l1) / 2.0);
+        let (left, right) = if p0 <= p1 { (p0, p1) } else { (p1, p0) };
+        if right - left < 0.05 {
+            continue;
+        }
+        let u0 = src.left + sw * (i as f32 / N as f32);
+        let u1 = src.left + sw * ((i + 1) as f32 / N as f32);
+        // 0.4px 外扩，防止相邻条之间透出 1px 缝
+        let pad = 0.4f32.min((right - left) * 0.4);
+        let spad = pad * (sw / r.w);
+        let dst = D2D_RECT_F {
+            left: cx + left - pad,
+            top: cy - r.h * smid / 2.0,
+            right: cx + right + pad,
+            bottom: cy + r.h * smid / 2.0,
+        };
+        let s = D2D_RECT_F {
+            left: u0 - spad,
+            top: src.top,
+            right: u1 + spad,
+            bottom: src.bottom,
+        };
+        minicard_draw::image::draw_linear(g, bmp, s, dst)?;
+    }
+    Ok(())
 }
 
 pub fn paint(
@@ -289,23 +438,8 @@ fn paint_tree(
         let r = pl.rect;
         let rect = D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };
         if let Some(f) = flip {
-            // 0→48%：转出（旧图），48%→100%：转回（新图）
-            let (deg, which) = if f.t < 0.48 {
-                (-90.0 * (f.t / 0.48), f.old)
-            } else {
-                (-90.0 * (1.0 - (f.t - 0.48) / 0.52), f.new)
-            };
-            let sx = deg.to_radians().cos().abs();
-            if let Some(bmp) = which {
-                let sz = unsafe {
-                    let s = bmp.GetPixelSize();
-                    (s.width as f32, s.height as f32)
-                };
-                let src = minicard_draw::image::cover_src_px(sz.0, sz.1, r.w, r.h);
-                let w = (r.w * sx).max(0.5);
-                let cx = r.x + r.w / 2.0;
-                let dst = D2D_RECT_F { left: cx - w / 2.0, top: r.y, right: cx + w / 2.0, bottom: r.bottom() };
-                minicard_draw::image::draw(g, bmp, src, dst)?;
+            if let Some(bmp) = f.visible() {
+                draw_flip(g, bmp, r, f.angle_deg())?;
             }
             return Ok(());
         }
@@ -498,5 +632,69 @@ pub fn hit(te: &TextEngine, t: &Tokens, m_: &Music, x: f32, y: f32) -> Option<Hi
         9301 => Some(Hit::Play),
         9302 => Some(Hit::Next),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod flip_tests {
+    use super::*;
+
+    #[test]
+    fn 缓动端点与单调() {
+        assert!((cubic_bezier(0.6, 0.0, 0.8, 0.4, 0.0) - 0.0).abs() < 1e-3);
+        assert!((cubic_bezier(0.6, 0.0, 0.8, 0.4, 1.0) - 1.0).abs() < 1e-3);
+        assert!((cubic_bezier(0.2, 0.6, 0.4, 1.0, 0.0) - 0.0).abs() < 1e-3);
+        assert!((cubic_bezier(0.2, 0.6, 0.4, 1.0, 1.0) - 1.0).abs() < 1e-3);
+        let mut prev = -1.0;
+        for i in 0..=40 {
+            let y = cubic_bezier(0.6, 0.0, 0.8, 0.4, i as f32 / 40.0);
+            assert!(y >= prev - 1e-4, "缓动必须单调：{} < {}", y, prev);
+            prev = y;
+        }
+        // ease-in 起步慢：x=0.1 时 y 应当远小于 0.1
+        assert!(cubic_bezier(0.6, 0.0, 0.8, 0.4, 0.1) < 0.06);
+        // ease-out 起步快：x=0.1 时 y 应当远大于 0.1
+        assert!(cubic_bezier(0.2, 0.6, 0.4, 1.0, 0.1) > 0.2);
+    }
+
+    #[test]
+    fn 翻转角度两段对接() {
+        let f = |age: f32| CoverFlip { age, dir: 1.0, old: None, new: None };
+        assert!((f(0.0).angle_deg()).abs() < 1e-3);
+        // 转出段结束 = −90°
+        assert!((f(FLIP_OUT_S - 1e-4).angle_deg() + 90.0).abs() < 0.2);
+        // 换图瞬间从 +90° 转回
+        assert!((f(FLIP_OUT_S + 1e-4).angle_deg() - 90.0).abs() < 0.2);
+        // 结束回到 0
+        assert!((f(FLIP_OUT_S + FLIP_IN_S).angle_deg()).abs() < 1e-3);
+        assert!(!f(FLIP_OUT_S).done());
+        assert!(f(FLIP_OUT_S + FLIP_IN_S).done());
+        // 方向镜像
+        let g = CoverFlip { age: FLIP_OUT_S / 2.0, dir: -1.0, old: None, new: None };
+        let h = CoverFlip { age: FLIP_OUT_S / 2.0, dir: 1.0, old: None, new: None };
+        assert!((g.angle_deg() + h.angle_deg()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn 透视_零度恒等() {
+        for x in [-50.0f32, -10.0, 0.0, 10.0, 50.0] {
+            assert!((flip_project_x(x, 0.0) - x).abs() < 1e-3);
+            assert!((flip_project_scale(x, 0.0) - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn 透视_远边缩小近边放大() {
+        // deg>0：右半边（x>0）转到后面 → 缩放 < 1；左半边 > 1
+        let s_r = flip_project_scale(40.0, 60.0);
+        let s_l = flip_project_scale(-40.0, 60.0);
+        assert!(s_r < 1.0, "远边应当缩小，实际 {s_r}");
+        assert!(s_l > 1.0, "近边应当放大，实际 {s_l}");
+        // 宽度按 cos 收窄（60° → ≈0.5 倍）
+        let w = flip_project_x(50.0, 60.0) - flip_project_x(-50.0, 60.0);
+        assert!((w - 100.0 * 60.0f32.to_radians().cos()).abs() < 12.0, "宽度 {w}");
+        // 90° 附近几乎归零（但仍有宽度，因为透视平行四边形）
+        let w90 = flip_project_x(50.0, 89.0) - flip_project_x(-50.0, 89.0);
+        assert!(w90.abs() < 8.0, "89° 宽度应当极小，实际 {w90}");
     }
 }

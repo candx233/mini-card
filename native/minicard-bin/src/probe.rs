@@ -607,7 +607,8 @@ pub fn music_flip(
     let red = mk([200, 40, 40])?;
     let green = mk([40, 190, 60])?;
     let flip = CoverFlip {
-        t: (ms as f32 / 460.0).clamp(0.0, 1.0),
+        age: ms as f32 / 1000.0,
+        dir: 1.0,
         old: Some(&red),
         new: Some(&green),
     };

@@ -88,9 +88,13 @@ enum State {
     Music {
         /// (封面 dataURL, 位图)；换曲才重解码
         cover: Option<(String, ID2D1Bitmap1)>,
-        /// 翻转中的旧封面 + 起始时刻（460ms）
+        /// 翻转中的旧封面 + 起始时刻（0.22s 转出 + 0.26s 转回）
         prev: Option<ID2D1Bitmap1>,
         flip_t0: Option<Instant>,
+        /// +1 = 下一首（向左翻），−1 = 上一首
+        flip_dir: f32,
+        /// 仅 `MC_FLIP_DEMO=1` 用：下一次自动翻转的时刻（没有真换曲时也能看动画）
+        demo_t0: Option<Instant>,
     },
     Calendar(calendar::Calendar, i32, u32),
 }
@@ -402,7 +406,7 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 CardKind::Pomodoro => State::Pomo(pomo::Pomo::new()),
                 CardKind::Todo => State::Todo(todo_items(&card.todo)),
                 CardKind::Weather => State::Weather,
-                CardKind::Music => State::Music { cover: None, prev: None, flip_t0: None },
+                CardKind::Music => State::Music { cover: None, prev: None, flip_t0: None, flip_dir: 1.0, demo_t0: None },
                 CardKind::Calendar => {
                     let (y, m, d, _, _, _) = now_parts();
                     State::Calendar(calendar_of(y, m, d), 0, d)
@@ -649,7 +653,7 @@ fn draw_one(
             weather::paint(&win.gfx, te, pal, &wk, &wv, glass_pair)?;
             false
         }
-        (State::Music { cover, prev, flip_t0 }, _) => {
+        (State::Music { cover, prev, flip_t0, flip_dir, demo_t0 }, _) => {
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) => music::Music {
@@ -687,6 +691,7 @@ fn draw_one(
                                 Ok(b) => {
                                     // 换曲：旧图留作翻转的「转出面」
                                     if cover.is_some() {
+                                        minicard_shell::mlog!("music flip start（dir {}）", *flip_dir);
                                         *prev = cover.take().map(|(_, b)| b);
                                         *flip_t0 = Some(now);
                                     }
@@ -699,9 +704,19 @@ fn draw_one(
                     }
                 }
             }
-            let flip = flip_t0.map(|t0| {
-                let t = ((now - t0).as_secs_f32() / 0.46).clamp(0.0, 1.0);
-                music::CoverFlip { t, old: prev.as_ref(), new: cover.as_ref().map(|(_, b)| b) }
+            // 开发用：MC_FLIP_DEMO=1 时每 2s 自翻一次（没有真换曲也能验动画）
+            if std::env::var_os("MC_FLIP_DEMO").is_some() && cover.is_some() {
+                let due = demo_t0.map(|t| now >= t).unwrap_or(true);
+                if due && flip_t0.is_none() {
+                    *flip_t0 = Some(now);
+                    *demo_t0 = Some(now + Duration::from_millis(2000));
+                }
+            }
+            let flip = flip_t0.map(|t0| music::CoverFlip {
+                age: (now - t0).as_secs_f32(),
+                dir: *flip_dir,
+                old: prev.as_ref().or(cover.as_ref().map(|(_, b)| b)),
+                new: cover.as_ref().map(|(_, b)| b),
             });
             music::paint(
                 &win.gfx,
@@ -713,7 +728,10 @@ fn draw_one(
                 cover.as_ref().map(|(_, b)| b),
                 flip.as_ref(),
             )?;
-            let flipping = flip_t0.map(|t0| (now - t0).as_secs_f32() < 0.46).unwrap_or(false);
+            let flipping = flip
+                .as_ref()
+                .map(|f| !f.done())
+                .unwrap_or(false);
             if !flipping {
                 *flip_t0 = None;
             }
@@ -834,8 +852,8 @@ fn click(
                 *c = calendar_for(yy, mo, *off, dd);
             }
         }
-        State::Music { cover, prev, flip_t0 } => {
-            let _ = (&cover, &prev, &flip_t0);
+        State::Music { cover, prev, flip_t0, flip_dir, demo_t0 } => {
+            let _ = (&cover, &prev, &flip_t0, &flip_dir, &demo_t0);
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) => music::Music {
@@ -855,6 +873,12 @@ fn click(
             };
             let mk = music::Tokens::music(win.w, win.h);
             if let Some(h) = music::hit(te, &mk, &mw, x, y) {
+                // 翻转方向跟着按钮走（CSS 里 d=−1 镜像）
+                match h {
+                    music::Hit::Prev => *flip_dir = -1.0,
+                    music::Hit::Next => *flip_dir = 1.0,
+                    music::Hit::Play => {}
+                }
                 let cmd = match h {
                     music::Hit::Prev => "previous",
                     music::Hit::Play => "toggle",
