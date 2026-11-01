@@ -187,6 +187,23 @@ fn load_wallpaper() -> Option<glass::Wall> {
     Some(glass::Wall { bgra: img.bgra, w: img.w, h: img.h })
 }
 
+/// 卡片自己的圆角半径 —— **必须**从对应卡的 `Tokens` 取。
+/// 曾经统一按性能卡的公式算（`min(w/240, h/120)`），而网络/番茄钟的基准是 120×120
+/// （k=1 → 半径 16），于是窗口裁剪半径只有 8，比卡片本身还紧，圆角里多出一块硬边。
+pub fn radius_of(kind: CardKind, w: f32, h: f32) -> f32 {
+    match kind {
+        CardKind::Performance => perf::Tokens::perf(w, h).radius,
+        CardKind::Disks => disks::Tokens::disks(w, h, 1).radius,
+        CardKind::Clock => clock::Tokens::clock(w, h).radius,
+        CardKind::NetRate => net::Tokens::net(w, h, 1.044, 0.282).radius,
+        CardKind::Pomodoro => pomo::Tokens::pomo(w, h).radius,
+        CardKind::Todo => todo::Tokens::todo(w, h).radius,
+        CardKind::Weather => weather::Tokens::weather(w, h).radius,
+        CardKind::Music => music::Tokens::music(w, h).radius,
+        CardKind::Calendar => calendar::Tokens::cal(w, h).radius,
+    }
+}
+
 /// 卡片落在哪块屏（物理像素）：返回 (left, top, w, h)
 fn monitor_of(x: i32, y: i32) -> (f32, f32, f32, f32) {
     use windows::Win32::Foundation::POINT;
@@ -313,7 +330,7 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
             } as f32;
             let w_px = (win_w * dpi / 96.0).round() as u32;
             let h_px = (win_h * dpi / 96.0).round() as u32;
-            let radius = 16.0 * (win_w / 240.0).min(win_h / 120.0).clamp(0.4, 2.5);
+            let radius = radius_of(card.kind, win_w, win_h);
             let mut gfx = Gfx::new(hwnd, w_px, h_px, dpi, radius)?;
             gfx.text_dx = 0.0;
 

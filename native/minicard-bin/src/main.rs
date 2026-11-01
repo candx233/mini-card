@@ -528,7 +528,19 @@ fn main() -> Result<()> {
         )?;
 
         let tokens = Tokens::perf(args.w, args.h);
-        let mut gfx = gfx::Gfx::new(hwnd, w_px, h_px, dpi, tokens.radius)?;
+        // 裁剪半径必须跟「正在画的那张卡」一致，否则小卡（网络/番茄钟，半径 16）会被裁紧
+        let clip_radius = match args.probe.as_deref() {
+            Some("disks") => live::radius_of(minicard_core::config::CardKind::Disks, args.w, args.h),
+            Some("clock") => live::radius_of(minicard_core::config::CardKind::Clock, args.w, args.h),
+            Some("net") => live::radius_of(minicard_core::config::CardKind::NetRate, args.w, args.h),
+            Some("pomo") => live::radius_of(minicard_core::config::CardKind::Pomodoro, args.w, args.h),
+            Some("todo") => live::radius_of(minicard_core::config::CardKind::Todo, args.w, args.h),
+            Some("weather") => live::radius_of(minicard_core::config::CardKind::Weather, args.w, args.h),
+            Some("music") => live::radius_of(minicard_core::config::CardKind::Music, args.w, args.h),
+            Some("calendar") => live::radius_of(minicard_core::config::CardKind::Calendar, args.w, args.h),
+            _ => tokens.radius,
+        };
+        let mut gfx = gfx::Gfx::new(hwnd, w_px, h_px, dpi, clip_radius)?;
         gfx.dump = args.dump.clone();
         gfx.embolden_off = args.emb_off;
         gfx.embolden_a = args.emb_a;
