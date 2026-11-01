@@ -217,6 +217,139 @@ impl Dock {
     /// 改这个值必须同步 web/dock.html 的 `DIV_EXTRA` 与 web/index.html 的 `dockWinSize()`。
     pub const DIVIDER_EXTRA: f32 = 8.0;
 
+    /// 边距恒 18（条宽与内容差恒 36，分隔线额外宽度两边都算）
+    pub const PAD: f32 = 18.0;
+    /// 图标之间恒 12（有分组线再加 `DIVIDER_EXTRA`）
+    pub const GAP: f32 = 12.0;
+    /// 放大上限：`1 + 36/size`（48 档 = 1.75）
+    pub const KMAX_EXTRA: f32 = 36.0;
+    /// 余弦窗口宽 = 5×图标（`dock.html` 的 `BUMP_W`）
+    pub const BUMP_W_MUL: f32 = 5.0;
+    /// 条以上的窗口预留（悬停气泡 + 右键菜单，取大者；`dock.html` 同口径）
+    pub const TOP_RESERVE: f32 = 172.0;
+    /// 悬停时窗口区域往上放开多少（`DOCK_HOVER_EXTRA`）
+    pub const HOVER_EXTRA: f32 = 72.0;
+    /// 悬停余量（= 图标最大长出的高度，48 档 = 26.4 → 向上取 28）
+    pub const MARGIN: f32 = 28.0;
+
+    /// 放大上限（1.75 @ 48）
+    pub fn k_max(&self) -> f32 {
+        1.0 + Self::KMAX_EXTRA / self.size as f32
+    }
+
+    /// 第 i 个图标的**静止**中心（窗内 x；窗左边 = 侧向预留）
+    pub fn rest_cx(&self, side: f32, i: usize) -> f32 {
+        side + self.item_center_x(i)
+    }
+
+    /// 指针在 `px`（窗内 x）时的每项放大系数（`ease` = 0 表示没进场）
+    pub fn scales_at(&self, side: f32, px: f32, ease: f32) -> Vec<f32> {
+        let size = self.size as f32;
+        let bump = size * Self::BUMP_W_MUL;
+        let kmax = self.k_max();
+        (0..self.items.len())
+            .map(|i| {
+                let u = (self.rest_cx(side, i) - px) / bump + 0.5;
+                let b = if u <= 0.0 || u >= 1.0 {
+                    0.0
+                } else {
+                    (1.0 - (u * 2.0 * std::f32::consts::PI).cos()) / 2.0
+                };
+                (1.0 + self.mag as f32 / 100.0 * b * ease).min(kmax)
+            })
+            .collect()
+    }
+
+    /// 宽度累加 + **整行居中**（`dock.html::layoutPos`）：返回各图标中心（窗内 x）。
+    /// 指针只改各图标宽度，行中轴永远是窗心 —— 所以不会「跟着指针漂」。
+    pub fn row_centers(&self, win_w: f32, ks: &[f32]) -> Vec<f32> {
+        let size = self.size as f32;
+        let n = self.items.len().min(ks.len());
+        let mut out = vec![0.0f32; n];
+        if n == 0 {
+            return out;
+        }
+        let sum: f32 = ks[..n].iter().map(|k| size * k).sum();
+        let gaps: f32 = (0..n.saturating_sub(1)).map(|i| self.gap_after(i)).sum();
+        let mut x = (win_w - (sum + gaps)) / 2.0;
+        for i in 0..n {
+            let w = size * ks[i];
+            out[i] = x + w / 2.0;
+            x += w + self.gap_after(i);
+        }
+        out
+    }
+
+    /// 悬停态固定条宽 = 扫遍指针位置的最大行宽 + 2×PAD（`dock.html::maxRowW`）
+    pub fn bar_width_max(&self, win_w: f32) -> f32 {
+        let n = self.items.len();
+        if n == 0 {
+            return 24.0;
+        }
+        let size = self.size as f32;
+        let side = (win_w - self.bar_width()) / 2.0;
+        let lo = side - size;
+        let hi = side + self.bar_width() + size;
+        let gaps: f32 = (0..n - 1).map(|i| self.gap_after(i)).sum();
+        let mut best = 0.0f32;
+        let mut px = lo;
+        while px <= hi + 0.001 {
+            let ks = self.scales_at(side, px, 1.0);
+            let sum: f32 = ks.iter().map(|k| size * k).sum();
+            best = best.max(sum + gaps + 2.0 * Self::PAD);
+            px += 2.0;
+        }
+        (best * 10.0).round() / 10.0
+    }
+
+    /// 侧向预留（逻辑 px）：悬停时条向两侧外扩，窗口两侧要留出这么多，
+    /// 免得外扩的玻璃/图标被窗口边缘裁掉。算法与 `dock.html` 的逐帧布局**同一套**
+    /// （扫指针位置，取「以指针下图标为锚、两侧让位」这一布局的上界）。
+    pub fn side_reserve(&self) -> f32 {
+        let n = self.items.len();
+        if n == 0 {
+            return 6.0;
+        }
+        let size = self.size as f32;
+        let bar = self.bar_width();
+        let pad = Self::PAD;
+        let kmax = self.k_max();
+        let mag = self.mag as f32;
+        let rest = |i: usize| self.item_center_x(i);
+        let mut worst = 0.0f32;
+        let mut probe = 0.0f32;
+        while probe <= bar + 0.001 {
+            let ks: Vec<f32> = (0..n)
+                .map(|i| {
+                    let dd = (probe - rest(i)).abs() / (size * 1.3);
+                    (1.0 + mag / 100.0 * (-(dd * dd)).exp()).min(kmax)
+                })
+                .collect();
+            let j = (0..n)
+                .min_by(|a, b| {
+                    (probe - rest(*a))
+                        .abs()
+                        .partial_cmp(&(probe - rest(*b)).abs())
+                        .unwrap()
+                })
+                .unwrap();
+            let mut pos = vec![0.0f32; n];
+            pos[j] = rest(j);
+            for i in (j + 1)..n {
+                pos[i] = pos[i - 1] + size * ks[i - 1] / 2.0 + self.gap_after(i - 1) + size * ks[i] / 2.0;
+            }
+            for i in (0..j).rev() {
+                pos[i] = pos[i + 1] - size * ks[i + 1] / 2.0 - self.gap_after(i) - size * ks[i] / 2.0;
+            }
+            let row_l = pos[0] - size * ks[0] / 2.0;
+            let row_r = pos[n - 1] + size * ks[n - 1] / 2.0;
+            worst = worst.max(pad - row_l).max(row_r + pad - bar);
+            probe += 2.0;
+        }
+        worst.ceil() + 2.0
+    }
+
+
     /// 第 i 个条目**之前**有几条分隔线（首个条目即使标了也不算 —— 它前面没有图标）。
     pub fn dividers_before(&self, i: usize) -> usize {
         let last = i.min(self.items.len().saturating_sub(1));

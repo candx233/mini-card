@@ -39,7 +39,13 @@ impl Calendar {
 
     /// 从「今天是几号」推出整月网格（周一起始）——与 `calPageHtml` 同口径：
     /// `offset = (day_of_week(1号) + 6) % 7`、`total = ceil((offset+天数)/7)*7`。
-    pub fn build(year: i32, month: u32, first_weekday: u32, days_in_month: u32, today: u32) -> Self {
+    pub fn build(
+        year: i32,
+        month: u32,
+        first_weekday: u32,
+        days_in_month: u32,
+        today: u32,
+    ) -> Self {
         let offset = (first_weekday + 6) % 7;
         let total = ((offset + days_in_month + 6) / 7) * 7;
         let mut cells = Vec::with_capacity(total as usize);
@@ -56,15 +62,27 @@ impl Calendar {
                     today: false,
                 });
             } else if d as u32 > days_in_month {
-                cells.push(Cell { day: (d as u32 - days_in_month), other: true, today: false });
+                cells.push(Cell {
+                    day: (d as u32 - days_in_month),
+                    other: true,
+                    today: false,
+                });
             } else {
-                cells.push(Cell { day: d as u32, other: false, today: d as u32 == today });
+                cells.push(Cell {
+                    day: d as u32,
+                    other: false,
+                    today: d as u32 == today,
+                });
             }
         }
-        Self { year, month, holiday: String::new(), cells }
+        Self {
+            year,
+            month,
+            holiday: String::new(),
+            cells,
+        }
     }
 }
-
 
 /// 星期几（0=周日）—— Sakamoto 公式
 pub fn weekday(y: i32, m: u32, d: u32) -> u32 {
@@ -230,15 +248,39 @@ pub fn paint(
         g.begin()?;
         g.push_clip()?;
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -308,7 +350,10 @@ fn tree(t: &Tokens, c: &Calendar) -> Node {
 
     // 星期行
     let mut wd = Node::new(Dir::Row).style(move |s| s.size(Dim::Pct(1.0), Dim::Px(t.wd_lh)));
-    for (i, w) in ["一", "二", "三", "四", "五", "六", "日"].iter().enumerate() {
+    for (i, w) in ["一", "二", "三", "四", "五", "六", "日"]
+        .iter()
+        .enumerate()
+    {
         wd = wd.child(
             text_node_aligned(w, t.wd_fs, t.wd_lh, 400, 2)
                 .id(9520 + i as u32)
@@ -339,20 +384,30 @@ fn tree(t: &Tokens, c: &Calendar) -> Node {
             let id = 9600 + idx as u32;
             let is_today = cell.map(|x| x.today && !x.other).unwrap_or(false);
             row = row.child(
-                text_node_aligned(&txt, t.day_fs, t.day_lh, if is_today { 600 } else { 400 }, 2)
-                    .id(id)
-                    .style(move |s| {
-                        // 今日格的 `<i>` 是 22×22，会把整格撑到 22 高（比普通格高 4.5），
-                        // 居中后数字比邻居高 2.25px —— 这是 CSS 的实际行为，必须照做
-                        let h = if is_today { Dim::Px(t.chip) } else { Dim::Px(t.day_lh) };
-                        // 交叉轴居中要靠 **self_align**：写 align 只是设置「自己的子元素」怎么排，
-                        // 父行的 align-items 默认 stretch 会把格子拉满行高、数字贴顶（差 2.5px）
-                        s.grow(1.0)
-                            .basis(0.0)
-                            .size(Dim::Auto, h)
-                            .self_align(Align::Center)
-                            .justify(Justify::Center)
-                    }),
+                text_node_aligned(
+                    &txt,
+                    t.day_fs,
+                    t.day_lh,
+                    if is_today { 600 } else { 400 },
+                    2,
+                )
+                .id(id)
+                .style(move |s| {
+                    // 今日格的 `<i>` 是 22×22，会把整格撑到 22 高（比普通格高 4.5），
+                    // 居中后数字比邻居高 2.25px —— 这是 CSS 的实际行为，必须照做
+                    let h = if is_today {
+                        Dim::Px(t.chip)
+                    } else {
+                        Dim::Px(t.day_lh)
+                    };
+                    // 交叉轴居中要靠 **self_align**：写 align 只是设置「自己的子元素」怎么排，
+                    // 父行的 align-items 默认 stretch 会把格子拉满行高、数字贴顶（差 2.5px）
+                    s.grow(1.0)
+                        .basis(0.0)
+                        .size(Dim::Auto, h)
+                        .self_align(Align::Center)
+                        .justify(Justify::Center)
+                }),
             );
         }
         grid = grid.child(row);
@@ -365,27 +420,18 @@ fn tree(t: &Tokens, c: &Calendar) -> Node {
         })
         .child(
             Node::new(Dir::Column)
-                .style(move |s| {
-                    s.grow(1.0)
-                        .basis(0.0)
-                        .gap(t.body_gap)
-                        .align(Align::Stretch)
-                })
+                .style(move |s| s.grow(1.0).basis(0.0).gap(t.body_gap).align(Align::Stretch))
                 .child(head)
                 .child(
                     Node::new(Dir::Column)
                         .style(move |s| {
-                            s.grow(1.0)
-                                .basis(0.0)
-                                .gap(t.page_gap)
-                                .align(Align::Stretch)
+                            s.grow(1.0).basis(0.0).gap(t.page_gap).align(Align::Stretch)
                         })
                         .child(wd)
                         .child(grid),
                 ),
         )
 }
-
 
 /// 鼠标是否落在某个矩形里（卡片内坐标）
 fn hovering(g: &Gfx, r: &minicard_draw::layout::Rect) -> bool {
@@ -395,7 +441,14 @@ fn hovering(g: &Gfx, r: &minicard_draw::layout::Rect) -> bool {
     }
 }
 
-fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar, pl: &Placed) -> Result<()> {
+fn paint_tree(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &Palette,
+    t: &Tokens,
+    c: &Calendar,
+    pl: &Placed,
+) -> Result<()> {
     // 导航按钮：1px 描边吸附 + 居中箭头
     if pl.id == 9510 || pl.id == 9511 {
         let px = pl.rect.x.round();
@@ -406,17 +459,33 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
         let s = sz / 24.0;
         let cx = px + (pw - sz) / 2.0;
         let cy = py + (ph - sz) / 2.0;
-        let d = if pl.id == 9510 { "M14.5 6l-6 6 6 6" } else { "M9.5 6l6 6-6 6" };
+        let d = if pl.id == 9510 {
+            "M14.5 6l-6 6 6 6"
+        } else {
+            "M9.5 6l6 6-6 6"
+        };
         if hovering(g, &pl.rect) {
             set_color(g, pal.fg_soft)?;
             fill_round(
                 g,
-                D2D_RECT_F { left: px as f32, top: py as f32, right: (px + pw) as f32, bottom: (py + ph) as f32 },
+                D2D_RECT_F {
+                    left: px as f32,
+                    top: py as f32,
+                    right: (px + pw) as f32,
+                    bottom: (py + ph) as f32,
+                },
                 6.0,
             )?;
         }
         let p = Path::svg(d).scale(cx, cy, s);
-        set_color(g, if hovering(g, &pl.rect) { pal.fg } else { pal.muted })?;
+        set_color(
+            g,
+            if hovering(g, &pl.rect) {
+                pal.fg
+            } else {
+                pal.muted
+            },
+        )?;
         stroke_path(g, &p, 2.0 * s, true)?;
         return Ok(());
     }
@@ -462,7 +531,11 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
             pal.fg
         };
         // 跨月格 32% 不透明：用颜色 alpha（套 opacity 层会叠加，实测 0.32 → 0.08）
-        let color = if other { D2D1_COLOR_F { a: 0.32, ..color } } else { color };
+        let color = if other {
+            D2D1_COLOR_F { a: 0.32, ..color }
+        } else {
+            color
+        };
         set_color(g, color)?;
         // 宽度必须**恰好**等于盒子：多给 2px 在居中时会把文字推右 1px（实测 dx 趋势揭示的）
         let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, TextMode::Clip)?;
@@ -477,7 +550,10 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
         let dx = 0.0;
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: pl.rect.x + dx + g.text_dx, Y: pl.rect.y + dy + g.text_dy },
+                Vector2 {
+                    X: pl.rect.x + dx + g.text_dx,
+                    Y: pl.rect.y + dy + g.text_dy,
+                },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -489,7 +565,10 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, c: &Calendar,
                 for (ox, oy) in [(-off, 0.0), (off, 0.0)] {
                     set_color(g, D2D1_COLOR_F { a, ..color })?;
                     g.d2d.DrawTextLayout(
-                        Vector2 { X: pl.rect.x + dx + ox, Y: pl.rect.y + dy + oy },
+                        Vector2 {
+                            X: pl.rect.x + dx + ox,
+                            Y: pl.rect.y + dy + oy,
+                        },
                         &lay,
                         &g.brush,
                         D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -557,7 +636,10 @@ mod tests {
         assert!(c.cells[34].other, "最后一格属次月");
         assert!(!c.cells[33].other, "30 号在本月");
         // 跨月格子要显示真实日期（9 月 28/29/30、11 月 1），不是空白
-        assert_eq!(c.cells[0].day, 28, "10 月 1 日周四 → 前 3 格是 9 月 28/29/30");
+        assert_eq!(
+            c.cells[0].day, 28,
+            "10 月 1 日周四 → 前 3 格是 9 月 28/29/30"
+        );
         assert_eq!(c.cells[2].day, 30);
         assert_eq!(c.cells[34].day, 1, "末尾是 11 月 1 日");
     }

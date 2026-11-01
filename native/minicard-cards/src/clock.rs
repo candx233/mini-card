@@ -80,7 +80,10 @@ pub struct Clock {
 
 impl Clock {
     pub fn new() -> Self {
-        Self { digits: [0; 4], rolls: [None; 4] }
+        Self {
+            digits: [0; 4],
+            rolls: [None; 4],
+        }
     }
 
     /// 条上的格子序号（口径在 `roll::cell`）。
@@ -101,7 +104,9 @@ impl Clock {
                 continue;
             }
             // 上一段没走完就从当前位置接着走（与 CSS 版 `from = cur` 同口径）
-            let cur = self.rolls[i].map(|r| r.at(now)).unwrap_or(Self::cell(self.digits[i]));
+            let cur = self.rolls[i]
+                .map(|r| r.at(now))
+                .unwrap_or(Self::cell(self.digits[i]));
             // 只有「往上走一格」才滚（9→0 走末尾补格）；跨多位直接落位 ——
             // 5→0 这种一口气滚 6 格在 300ms 里只会糊成一片。
             let up_one = crate::roll::step_delta(self.digits[i], want[i]) == 1;
@@ -162,15 +167,39 @@ pub fn paint(
         g.begin()?;
         g.push_clip()?;
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -294,12 +323,20 @@ fn paint_tree(
         );
     } else if let Some(spec) = p.text() {
         let fmt = te.format_spec(spec, minicard_draw::text::Mode::Clip)?;
-        let lay = te.layout_spec(spec, p.rect.w, spec.line_h + 8.0, minicard_draw::text::Mode::Clip)?;
+        let lay = te.layout_spec(
+            spec,
+            p.rect.w,
+            spec.line_h + 8.0,
+            minicard_draw::text::Mode::Clip,
+        )?;
         let _ = fmt;
         set_color(g, pal.shadow)?;
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: p.rect.x, Y: p.rect.y + 0.833 },
+                Vector2 {
+                    X: p.rect.x,
+                    Y: p.rect.y + 0.833,
+                },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -308,7 +345,10 @@ fn paint_tree(
         set_color(g, pal.muted)?;
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: p.rect.x, Y: p.rect.y },
+                Vector2 {
+                    X: p.rect.x,
+                    Y: p.rect.y,
+                },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -387,9 +427,18 @@ mod tests {
         assert!((r.at(now) - r.from).abs() < 0.01, "起步 {:?}", r.at(now));
         assert!((r.at(now + Duration::from_millis(300)) - r.to).abs() < 0.01);
         let mid = r.at(now + Duration::from_millis(120));
-        assert!(mid > r.from && mid < r.to, "中途 {mid} 应在 {}..{} 之间", r.from, r.to);
+        assert!(
+            mid > r.from && mid < r.to,
+            "中途 {mid} 应在 {}..{} 之间",
+            r.from,
+            r.to
+        );
         // easeOutQuart：前 1/3 时间应走掉一半以上行程
-        assert!(mid - r.from > (r.to - r.from) * 0.5, "前 40% 走了 {:?}", mid - r.from);
+        assert!(
+            mid - r.from > (r.to - r.from) * 0.5,
+            "前 40% 走了 {:?}",
+            mid - r.from
+        );
     }
 
     #[test]
@@ -466,6 +515,9 @@ mod roll_tests {
         c.set(13, 0, t1);
         let end = t1 + Duration::from_millis(500);
         let idx = c.idx(2, end);
-        assert!((idx - 1.0).abs() < 0.01, "分钟十位应归到 0（格 1），实得 {idx}");
+        assert!(
+            (idx - 1.0).abs() < 0.01,
+            "分钟十位应归到 0（格 1），实得 {idx}"
+        );
     }
 }

@@ -33,9 +33,9 @@ pub struct Tokens {
     pub w: f32,
     pub h: f32,
     #[allow(dead_code)]
-    pub k: f32,      // 缩放比
+    pub k: f32, // 缩放比
     #[allow(dead_code)]
-    pub r: f32,      // 根字号 = 16k（CSS 里 1rem）
+    pub r: f32, // 根字号 = 16k（CSS 里 1rem）
     pub radius: f32, // border-radius: 1rem
     pub pad_lr: f32,
     pub pad_tb: f32,
@@ -102,15 +102,39 @@ pub fn paint(
 
         // ② 背景：磨砂层 / 白纱 / 描边（是「卡的皮」，不是内容，不进树）
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -119,7 +143,15 @@ pub fn paint(
         paint_tree(g, te, pal, rows, &placed, placed.rect, snap_text)?;
 
         if pal.debug_alpha {
-            set_color(g, D2D1_COLOR_F { r: 1.0, g: 0.0, b: 0.0, a: 0.5 })?;
+            set_color(
+                g,
+                D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.5,
+                },
+            )?;
             fill_round(g, full, t.radius)?;
         }
 
@@ -191,11 +223,21 @@ fn paint_tree(
             y = y.round();
         }
         let fmt = te.format_cached(spec.size, spec.line_h, spec.align)?;
-        let lay = te.layout_cached(spec.align, &fmt, &spec.s, box_w, spec.line_h + 8.0, spec.tabular)?;
+        let lay = te.layout_cached(
+            spec.align,
+            &fmt,
+            &spec.s,
+            box_w,
+            spec.line_h + 8.0,
+            spec.tabular,
+        )?;
         set_color(g, pal.shadow)?;
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: p.rect.x, Y: y + 0.833 },
+                Vector2 {
+                    X: p.rect.x,
+                    Y: y + 0.833,
+                },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -228,5 +270,10 @@ fn paint_tree(
 }
 
 fn to_d2d(r: Rect) -> D2D_RECT_F {
-    D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() }
+    D2D_RECT_F {
+        left: r.x,
+        top: r.y,
+        right: r.right(),
+        bottom: r.bottom(),
+    }
 }

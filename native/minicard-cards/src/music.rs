@@ -105,7 +105,7 @@ impl Tokens {
             artist_lh: 0.8125 * r * 1.25,
             prog_gap: 0.375 * r,
             prog_mb: 0.5 * r,
-            bar_h: 0.3125 * r,   // `.mc-prog .bar` 把通条覆写成 0.3125rem（5px）
+            bar_h: 0.3125 * r, // `.mc-prog .bar` 把通条覆写成 0.3125rem（5px）
             time_fs: 0.625 * r,
             time_lh: 0.625 * r,
             acts_gap: 0.25 * r,
@@ -248,7 +248,10 @@ fn draw_flip(
     for i in 0..N {
         let x0 = cx - r.w / 2.0 + r.w * i as f32 / N as f32;
         let x1 = cx - r.w / 2.0 + r.w * (i + 1) as f32 / N as f32;
-        let (p0, p1) = (flip_project_x(x0, deg, cx, ox), flip_project_x(x1, deg, cx, ox));
+        let (p0, p1) = (
+            flip_project_x(x0, deg, cx, ox),
+            flip_project_x(x1, deg, cx, ox),
+        );
         let s = flip_project_scale((x0 + x1) / 2.0, deg, cx);
         let (left, right) = if p0 <= p1 { (p0, p1) } else { (p1, p0) };
         if right - left < 0.05 {
@@ -298,15 +301,39 @@ pub fn paint(
         g.begin()?;
         g.push_clip()?;
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -353,7 +380,11 @@ fn tree(t: &Tokens, m: &Music) -> Node {
         )
         .child(
             text_node(
-                if m.artist.is_empty() { "—" } else { &m.artist },
+                if m.artist.is_empty() {
+                    "—"
+                } else {
+                    &m.artist
+                },
                 t.artist_fs,
                 t.artist_lh,
                 400,
@@ -405,17 +436,11 @@ fn tree(t: &Tokens, m: &Music) -> Node {
         })
         .child(
             Node::new(Dir::Row)
-                .style(move |s| {
-                    s.grow(1.0)
-                        .basis(0.0)
-                        .align(Align::Center)
-                        .gap(t.body_gap)
-                })
+                .style(move |s| s.grow(1.0).basis(0.0).align(Align::Center).gap(t.body_gap))
                 .child(cover)
                 .child(col),
         )
 }
-
 
 /// 鼠标是否落在某个矩形里（卡片内坐标）
 fn hovering(g: &Gfx, r: &minicard_draw::layout::Rect) -> bool {
@@ -438,7 +463,12 @@ fn paint_tree(
     // 封面：有真专辑图就画图，否则渐变 + 音符占位
     if pl.id == 9001 {
         let r = pl.rect;
-        let rect = D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };
+        let rect = D2D_RECT_F {
+            left: r.x,
+            top: r.y,
+            right: r.right(),
+            bottom: r.bottom(),
+        };
         if let Some(f) = flip {
             if let Some(bmp) = f.visible() {
                 draw_flip(g, bmp, r, t, f.angle_deg())?;
@@ -458,8 +488,14 @@ fn paint_tree(
         let (grad, stops) = gradient::linear_two(
             135.0,
             rect,
-            D2D1_COLOR_F { a: 0.72, ..pal.accent },
-            D2D1_COLOR_F { a: 0.26, ..pal.accent },
+            D2D1_COLOR_F {
+                a: 0.72,
+                ..pal.accent
+            },
+            D2D1_COLOR_F {
+                a: 0.26,
+                ..pal.accent
+            },
         );
         gradient::fill_round(g, rect, t.cover_r, &grad, &stops)?;
         // 音符居中
@@ -480,7 +516,12 @@ fn paint_tree(
         set_color(g, pal.track)?;
         fill_round(
             g,
-            D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() },
+            D2D_RECT_F {
+                left: r.x,
+                top: r.y,
+                right: r.right(),
+                bottom: r.bottom(),
+            },
             rad,
         )?;
         let w = r.w * m.pct() / 100.0;
@@ -488,7 +529,12 @@ fn paint_tree(
             set_color(g, pal.fill)?;
             fill_round(
                 g,
-                D2D_RECT_F { left: r.x, top: r.y, right: r.x + w, bottom: r.bottom() },
+                D2D_RECT_F {
+                    left: r.x,
+                    top: r.y,
+                    right: r.x + w,
+                    bottom: r.bottom(),
+                },
                 rad,
             )?;
         }
@@ -507,14 +553,24 @@ fn paint_tree(
             set_color(g, pal.fg_soft)?;
             fill_round(
                 g,
-                D2D_RECT_F { left: px + 0.5, top: py + 0.5, right: px + pw - 0.5, bottom: py + ph - 0.5 },
+                D2D_RECT_F {
+                    left: px + 0.5,
+                    top: py + 0.5,
+                    right: px + pw - 0.5,
+                    bottom: py + ph - 0.5,
+                },
                 6.0,
             )?;
         }
         set_color(g, if hov { pal.fg44 } else { pal.badge_border })?;
         stroke_round(
             g,
-            D2D_RECT_F { left: px + 0.5, top: py + 0.5, right: px + pw - 0.5, bottom: py + ph - 0.5 },
+            D2D_RECT_F {
+                left: px + 0.5,
+                top: py + 0.5,
+                right: px + pw - 0.5,
+                bottom: py + ph - 0.5,
+            },
             t.btn_r,
             1.0,
         )?;
@@ -554,7 +610,10 @@ fn paint_tree(
         let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, mode)?;
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: pl.rect.x, Y: pl.rect.y },
+                Vector2 {
+                    X: pl.rect.x,
+                    Y: pl.rect.y,
+                },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -609,11 +668,17 @@ mod tests {
         assert!((m.pct() - 25.4166).abs() < 0.01, "pct {}", m.pct());
         assert_eq!(m.pos_text(), "01:01");
         // 超出时长要夹住
-        let over = Music { position_ms: 999_000, ..m.clone() };
+        let over = Music {
+            position_ms: 999_000,
+            ..m.clone()
+        };
         assert!((over.pct() - 100.0).abs() < 0.001);
         assert_eq!(over.pos_text(), "16:39");
         // 时长为 0 不能除零
-        let zero = Music { duration_ms: 0, ..m };
+        let zero = Music {
+            duration_ms: 0,
+            ..m
+        };
         assert_eq!(zero.pct(), 0.0);
     }
 }
@@ -661,7 +726,12 @@ mod flip_tests {
 
     #[test]
     fn 翻转角度两段对接() {
-        let f = |age: f32| CoverFlip { age, dir: 1.0, old: None, new: None };
+        let f = |age: f32| CoverFlip {
+            age,
+            dir: 1.0,
+            old: None,
+            new: None,
+        };
         assert!((f(0.0).angle_deg()).abs() < 1e-3);
         // 转出段结束 = −90°
         assert!((f(FLIP_OUT_S - 1e-4).angle_deg() + 90.0).abs() < 0.2);
@@ -672,8 +742,18 @@ mod flip_tests {
         assert!(!f(FLIP_OUT_S).done());
         assert!(f(FLIP_OUT_S + FLIP_IN_S).done());
         // 方向镜像
-        let g = CoverFlip { age: FLIP_OUT_S / 2.0, dir: -1.0, old: None, new: None };
-        let h = CoverFlip { age: FLIP_OUT_S / 2.0, dir: 1.0, old: None, new: None };
+        let g = CoverFlip {
+            age: FLIP_OUT_S / 2.0,
+            dir: -1.0,
+            old: None,
+            new: None,
+        };
+        let h = CoverFlip {
+            age: FLIP_OUT_S / 2.0,
+            dir: 1.0,
+            old: None,
+            new: None,
+        };
         assert!((g.angle_deg() + h.angle_deg()).abs() < 1e-3);
     }
 
@@ -700,8 +780,12 @@ mod flip_tests {
         assert!(w < cos_w * 1.4, "但不该宽太多：{w}");
         // 89° 侧对镜头：**不是零**——近边被放大、远边被压缩，两者投影到不同的 x，
         // 浏览器实测同样是 11.8px 的竖条（见下一条测试）
-        let w89 = flip_project_x(110.0, 89.0, 60.0, 120.0) - flip_project_x(10.0, 89.0, 60.0, 120.0);
-        assert!((w89 - 11.83).abs() < 0.3, "89° 竖条宽度 {w89}，浏览器 11.83");
+        let w89 =
+            flip_project_x(110.0, 89.0, 60.0, 120.0) - flip_project_x(10.0, 89.0, 60.0, 120.0);
+        assert!(
+            (w89 - 11.83).abs() < 0.3,
+            "89° 竖条宽度 {w89}，浏览器 11.83"
+        );
     }
 
     /// 直接拿浏览器的 `getBoundingClientRect` 真值对表（perspective:600px、
@@ -721,8 +805,15 @@ mod flip_tests {
         for (deg, want_x, want_w) in cases {
             let l = flip_project_x(0.0, deg, 50.0, 110.0);
             let r = flip_project_x(100.0, deg, 50.0, 110.0);
-            assert!((l - want_x).abs() < 0.35, "{deg}° 左缘 {l}，浏览器 {want_x}");
-            assert!((r - l - want_w).abs() < 0.35, "{deg}° 宽度 {}，浏览器 {want_w}", r - l);
+            assert!(
+                (l - want_x).abs() < 0.35,
+                "{deg}° 左缘 {l}，浏览器 {want_x}"
+            );
+            assert!(
+                (r - l - want_w).abs() < 0.35,
+                "{deg}° 宽度 {}，浏览器 {want_w}",
+                r - l
+            );
         }
         // 纵向：封面中心与透视原点同高时，纵向缩放对称、中心不动
         let s_near = flip_project_scale(0.0, 45.0, 50.0);
@@ -734,9 +825,23 @@ mod flip_tests {
     #[test]
     fn 透视_原点偏移把封面往中心拉() {
         // 45° 时：纯中心投影跨度≈75，带原点偏移会更宽且整体右移（朝 120 靠）
-        let (l1, r1) = (flip_project_x(10.0, 45.0, 60.0, 120.0), flip_project_x(110.0, 45.0, 60.0, 120.0));
-        let (l0, r0) = (flip_project_x(10.0, 45.0, 60.0, 60.0), flip_project_x(110.0, 45.0, 60.0, 60.0));
-        assert!(r1 - l1 > r0 - l0, "带原点偏移跨度更大：{} vs {}", r1 - l1, r0 - l0);
-        assert!((l1 - 60.0).abs() > (l0 - 60.0).abs() - 1e-3, "整体朝 120 移动");
+        let (l1, r1) = (
+            flip_project_x(10.0, 45.0, 60.0, 120.0),
+            flip_project_x(110.0, 45.0, 60.0, 120.0),
+        );
+        let (l0, r0) = (
+            flip_project_x(10.0, 45.0, 60.0, 60.0),
+            flip_project_x(110.0, 45.0, 60.0, 60.0),
+        );
+        assert!(
+            r1 - l1 > r0 - l0,
+            "带原点偏移跨度更大：{} vs {}",
+            r1 - l1,
+            r0 - l0
+        );
+        assert!(
+            (l1 - 60.0).abs() > (l0 - 60.0).abs() - 1e-3,
+            "整体朝 120 移动"
+        );
     }
 }

@@ -102,18 +102,32 @@ pub struct Tween {
 
 impl Tween {
     pub fn new(from: f64, to: f64, now: Instant) -> Self {
-        Self { from, to, t0: now, ms: TWEEN_MS }
+        Self {
+            from,
+            to,
+            t0: now,
+            ms: TWEEN_MS,
+        }
     }
 
     /// 指定时长的补间（性能卡用：时长 ≈ 采样间隔，短了会一格一格跳）
     pub fn with_ms(from: f64, to: f64, now: Instant, ms: f32) -> Self {
-        Self { from, to, t0: now, ms: ms.max(120.0) }
+        Self {
+            from,
+            to,
+            t0: now,
+            ms: ms.max(120.0),
+        }
     }
 
     pub fn value(&self, now: Instant) -> f64 {
         let u = ((now - self.t0).as_secs_f32() * 1000.0 / self.ms).clamp(0.0, 1.0);
         // 梯形速度：s(u) = 2u² (u<.5) / 1-2(1-u)² (u≥.5)
-        let k = if u < 0.5 { 2.0 * u * u } else { 1.0 - 2.0 * (1.0 - u) * (1.0 - u) };
+        let k = if u < 0.5 {
+            2.0 * u * u
+        } else {
+            1.0 - 2.0 * (1.0 - u) * (1.0 - u)
+        };
         self.from + (self.to - self.from) * k as f64
     }
 
@@ -171,15 +185,39 @@ pub fn paint(
         g.begin()?;
         g.push_clip()?;
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -187,11 +225,23 @@ pub fn paint(
         paint_tree(g, te, pal, t, &placed)?;
 
         // 分隔线：rows 盒的 50%，走 padding box（1px）
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         let y = t.h / 2.0;
         fill_rect(
             g,
-            D2D_RECT_F { left: t.pad_lr, top: y, right: t.w - t.pad_lr, bottom: y + 1.0 },
+            D2D_RECT_F {
+                left: t.pad_lr,
+                top: y,
+                right: t.w - t.pad_lr,
+                bottom: y + 1.0,
+            },
         )?;
 
         g.pop_clip();
@@ -236,7 +286,10 @@ fn tree(t: &Tokens, up_n: &str, up_u: &str, dn_n: &str, dn_u: &str, pal: &Palett
             tabular: false,
             spacing_em: 0.02,
         })
-        .style(|s| s.mar([0.0, 0.0, 0.0, t.unit_gap]).self_align(Align::Baseline));
+        .style(|s| {
+            s.mar([0.0, 0.0, 0.0, t.unit_gap])
+                .self_align(Align::Baseline)
+        });
         Node::new(Dir::Row)
             .style(|s| {
                 s.grow(1.0)
@@ -246,7 +299,12 @@ fn tree(t: &Tokens, up_n: &str, up_u: &str, dn_n: &str, dn_u: &str, pal: &Palett
                     .gap(t.row_gap)
             })
             .child(a)
-            .child(Node::new(Dir::Row).style(|s| s.align(Align::Baseline)).child(n).child(u))
+            .child(
+                Node::new(Dir::Row)
+                    .style(|s| s.align(Align::Baseline))
+                    .child(n)
+                    .child(u),
+            )
     };
 
     Node::new(Dir::Column)
@@ -266,14 +324,26 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, p: &Placed) -
     if let Some(spec) = p.text() {
         let fmt = te.format_spec(spec, minicard_draw::text::Mode::Clip)?;
         let _ = fmt;
-        let lay = te.layout_spec(spec, p.rect.w, spec.line_h + 8.0, minicard_draw::text::Mode::Clip)?;
+        let lay = te.layout_spec(
+            spec,
+            p.rect.w,
+            spec.line_h + 8.0,
+            minicard_draw::text::Mode::Clip,
+        )?;
         // 箭头：CSS 的相对定位只挪墨迹、不占布局 → 这里画的时候左移
-        let dx = if (5000..5100).contains(&p.id) { -t.arrow_shift } else { 0.0 };
+        let dx = if (5000..5100).contains(&p.id) {
+            -t.arrow_shift
+        } else {
+            0.0
+        };
         let muted = (5000..5100).contains(&p.id) == false && spec.size == t.unit_fs;
         set_color(g, if muted { pal.muted } else { pal.fg })?;
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: p.rect.x + dx, Y: p.rect.y },
+                Vector2 {
+                    X: p.rect.x + dx,
+                    Y: p.rect.y,
+                },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -348,7 +418,12 @@ mod tests {
         let shown = st.up.value(mid);
         assert!(shown > 0.0 && shown < 1_000_000.0, "中途值 {shown}");
         st.set(2_000_000.0, 0.0, mid);
-        assert!((st.up.from - shown).abs() < 1.0, "应从 {} 起步，实际 {}", shown, st.up.from);
+        assert!(
+            (st.up.from - shown).abs() < 1.0,
+            "应从 {} 起步，实际 {}",
+            shown,
+            st.up.from
+        );
         // 走完落在新目标
         let done = mid + std::time::Duration::from_millis(400);
         assert!((st.up.value(done) - 2_000_000.0).abs() < 1.0);
@@ -395,7 +470,11 @@ mod tween_tests {
             let now = t0 + Duration::from_millis(i * 15);
             assert!(t.live(now), "补间期内 live 必须为真（第 {i} 步）");
             let v = t.value(now);
-            if seen.last().map(|l: &f64| (v - l).abs() > 0.01).unwrap_or(true) {
+            if seen
+                .last()
+                .map(|l: &f64| (v - l).abs() > 0.01)
+                .unwrap_or(true)
+            {
                 seen.push(v);
             }
         }

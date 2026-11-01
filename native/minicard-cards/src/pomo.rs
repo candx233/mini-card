@@ -101,7 +101,7 @@ impl Tokens {
             track_gap: 0.3125 * r,
             acts_gap: 0.375 * r,
             btn_h: 1.5625 * r,
-            btn_fs: 0.875 * r,   // CSS: .pm-btn font-size 0.875rem（13→14px 六改定稿）
+            btn_fs: 0.875 * r, // CSS: .pm-btn font-size 0.875rem（13→14px 六改定稿）
         }
     }
 }
@@ -215,7 +215,9 @@ impl Pomo {
             if want[i] == self.shown[i] {
                 continue;
             }
-            let cur = self.rolls[i].map(|r| r.at(now)).unwrap_or(cell(self.shown[i]));
+            let cur = self.rolls[i]
+                .map(|r| r.at(now))
+                .unwrap_or(cell(self.shown[i]));
             // 倒计时只有「往下走一格」才滚（0→9 走开头补格）；跨多位直接落位 ——
             // 25:00 → 24:59 的秒十位是 0→5（跳 5 格），以前会绕补格闪一下 9 → 看上去像 99。
             let down_one = crate::roll::step_delta(self.shown[i], want[i]) == 9;
@@ -268,15 +270,39 @@ pub fn paint(
         g.begin()?;
         g.push_clip()?;
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -304,7 +330,11 @@ fn text_node(s: &str, size: f32, lh: f32, weight: u16, ls: f32) -> Node {
 }
 
 fn tree(t: &Tokens, p: &Pomo, mode: PomoMode, _now: Instant) -> Node {
-    let gap = if mode == PomoMode::Set { t.gap_set } else { t.gap_run };
+    let gap = if mode == PomoMode::Set {
+        t.gap_set
+    } else {
+        t.gap_run
+    };
 
     // 头：min-height 撑住，文字自身居中且上移 0.5px
     let head = Node::new(Dir::Row)
@@ -332,7 +362,11 @@ fn tree(t: &Tokens, p: &Pomo, mode: PomoMode, _now: Instant) -> Node {
             })
     };
     let hero = Node::new(Dir::Row)
-        .style(|s| s.align(Align::Center).justify(Justify::Center).gap(t.hero_gap))
+        .style(|s| {
+            s.align(Align::Center)
+                .justify(Justify::Center)
+                .gap(t.hero_gap)
+        })
         .child(flank("−", 6100))
         .child(
             text_node(&p.dur.to_string(), t.num_fs, t.num_lh, 600, t.spacing_em)
@@ -380,14 +414,17 @@ fn tree(t: &Tokens, p: &Pomo, mode: PomoMode, _now: Instant) -> Node {
         PomoMode::Paused => (vec!["继续", "重设"], vec![1, 2]),
         PomoMode::Done => (vec!["回到设定"], vec![3]),
     };
-    let acts_mt = if mode == PomoMode::Set { 0.0 } else { 0.375 * t.r };
-    let mut acts = Node::new(Dir::Row)
-        .style(move |s| {
-            s.size(Dim::Pct(1.0), Dim::Px(t.btn_h))
-                .gap(t.acts_gap)
-                .align(Align::Stretch)
-                .mar([acts_mt, 0.0, 0.0, 0.0])
-        });
+    let acts_mt = if mode == PomoMode::Set {
+        0.0
+    } else {
+        0.375 * t.r
+    };
+    let mut acts = Node::new(Dir::Row).style(move |s| {
+        s.size(Dim::Pct(1.0), Dim::Px(t.btn_h))
+            .gap(t.acts_gap)
+            .align(Align::Stretch)
+            .mar([acts_mt, 0.0, 0.0, 0.0])
+    });
     for (i, l) in labels.iter().enumerate() {
         acts = acts.child(
             text_node(l, t.btn_fs, t.btn_h, 400, 0.0)
@@ -428,7 +465,6 @@ fn tree(t: &Tokens, p: &Pomo, mode: PomoMode, _now: Instant) -> Node {
         .child(body)
 }
 
-
 /// 鼠标是否落在某个矩形里（卡片内坐标）
 fn hovering(g: &Gfx, r: &minicard_draw::layout::Rect) -> bool {
     match g.hover {
@@ -454,7 +490,12 @@ fn paint_tree(
         set_color(g, pal.track)?;
         fill_round(
             g,
-            D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() },
+            D2D_RECT_F {
+                left: r.x,
+                top: r.y,
+                right: r.right(),
+                bottom: r.bottom(),
+            },
             t.bar_h / 2.0,
         )?;
         let w = r.w * fill_pct / 100.0;
@@ -462,7 +503,12 @@ fn paint_tree(
             set_color(g, pal.fill)?;
             fill_round(
                 g,
-                D2D_RECT_F { left: r.x, top: r.y, right: r.x + w, bottom: r.bottom() },
+                D2D_RECT_F {
+                    left: r.x,
+                    top: r.y,
+                    right: r.x + w,
+                    bottom: r.bottom(),
+                },
                 t.bar_h / 2.0,
             )?;
         }
@@ -482,7 +528,11 @@ fn paint_tree(
             tabular: true,
             spacing_em: t.spacing_em,
         };
-        let col = if mode == PomoMode::Done { pal.muted } else { pal.fg };
+        let col = if mode == PomoMode::Done {
+            pal.muted
+        } else {
+            pal.fg
+        };
         return draw_digit(
             g,
             te,
@@ -514,8 +564,13 @@ fn paint_tree(
             set_color(g, pal.fg_soft)?;
             fill_round(
                 g,
-                D2D_RECT_F { left: px + 0.5, top: py + 0.5, right: px + pw - 0.5, bottom: py + ph - 0.5 },
-                6.0,   // 按钮圆角（CSS 0.375rem @16px = 6）
+                D2D_RECT_F {
+                    left: px + 0.5,
+                    top: py + 0.5,
+                    right: px + pw - 0.5,
+                    bottom: py + ph - 0.5,
+                },
+                6.0, // 按钮圆角（CSS 0.375rem @16px = 6）
             )?;
         }
         set_color(g, if hov { pal.fg44 } else { pal.badge_border })?;
@@ -564,7 +619,10 @@ fn paint_tree(
         };
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: pl.rect.x + dx, Y: pl.rect.y + dy },
+                Vector2 {
+                    X: pl.rect.x + dx,
+                    Y: pl.rect.y + dy,
+                },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -645,7 +703,11 @@ mod tests {
         assert!((p.pct(now) - 0.0).abs() < 0.01, "设定态应为 0");
         p.mode = PomoMode::Run;
         p.end_at = Some(now + Duration::from_millis(p.total_ms() as u64 / 2));
-        assert!((p.pct(now) - 50.0).abs() < 0.5, "过半应为 50，实际 {}", p.pct(now));
+        assert!(
+            (p.pct(now) - 50.0).abs() < 0.5,
+            "过半应为 50，实际 {}",
+            p.pct(now)
+        );
         p.end_at = Some(now);
         assert!((p.pct(now) - 100.0).abs() < 0.01);
     }
@@ -674,7 +736,10 @@ mod tests {
         p.toggle(t1);
         assert_eq!(p.mode, PomoMode::Paused);
         let left = p.remain_ms;
-        assert!((left - 24.0 * 60000.0).abs() < 1000.0, "暂停应记住约 24 分钟，实际 {left}");
+        assert!(
+            (left - 24.0 * 60000.0).abs() < 1000.0,
+            "暂停应记住约 24 分钟，实际 {left}"
+        );
         // 暂停期间不流逝
         let t2 = t1 + Duration::from_secs(30);
         assert_eq!(p.remain(t2), left);
@@ -749,7 +814,12 @@ mod countdown_roll_tests {
                 seen.push(ch);
             }
         }
-        assert_eq!(seen, vec!['5'], "秒十位轨迹 {:?}（应直接是 5，不许经过 9）", seen);
+        assert_eq!(
+            seen,
+            vec!['5'],
+            "秒十位轨迹 {:?}（应直接是 5，不许经过 9）",
+            seen
+        );
     }
 
     #[test]
@@ -771,10 +841,17 @@ mod countdown_roll_tests {
                 seen.push(ch);
             }
         }
-        assert_eq!(seen, vec!['0', '9'], "个位轨迹 {:?}（应 0→9，不许经过 1..8）", seen);
+        assert_eq!(
+            seen,
+            vec!['0', '9'],
+            "个位轨迹 {:?}（应 0→9，不许经过 1..8）",
+            seen
+        );
         let end = t1 + Duration::from_millis(400);
         let idx = p.idx(3, end);
-        assert!((idx - 10.0).abs() < 0.01, "滚完应归到 9 的规范格 10，实得 {idx}");
+        assert!(
+            (idx - 10.0).abs() < 0.01,
+            "滚完应归到 9 的规范格 10，实得 {idx}"
+        );
     }
 }
-

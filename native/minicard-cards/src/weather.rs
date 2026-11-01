@@ -143,7 +143,7 @@ impl Tokens {
             radius: 1.0 * r,
             pad_v: 0.625 * r,
             pad_h: 1.0 * r,
-            stack_pt: 0.0625 * r,   // 实测：0.1667rem 会把内容压下去 1px（与 604 行的 padding-block 冲突，按实测取 1px）
+            stack_pt: 0.0625 * r, // 实测：0.1667rem 会把内容压下去 1px（与 604 行的 padding-block 冲突，按实测取 1px）
             top_gap: 0.75 * r,
             city_fs: 1.25 * r,
             city_lh: 1.25 * r * 1.15,
@@ -165,7 +165,7 @@ impl Tokens {
             t_fs: 0.90625 * r,
             air_mt: 0.4375 * r,
             air_fs: 1.0625 * r,
-            air_lh: 1.0625 * r * 1.55,   // .w-air 没写 line-height，实测行盒 26.34（17px × 1.55）
+            air_lh: 1.0625 * r * 1.55, // .w-air 没写 line-height，实测行盒 26.34（17px × 1.55）
         }
     }
 }
@@ -186,15 +186,39 @@ pub fn paint(
         g.begin()?;
         g.push_clip()?;
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -264,21 +288,16 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
         let label = d.map(|x| x.label.clone()).unwrap_or_default();
         let mut col = Node::new(Dir::Column)
             .id(8100 + i)
-            .style(move |s| {
-                s.grow(1.0)
-                    .basis(0.0)
-                    .align(Align::Center)
-                    .gap(t.day_gap)
-            })
+            .style(move |s| s.grow(1.0).basis(0.0).align(Align::Center).gap(t.day_gap))
             .child(text_node(&label, t.day_fs, t.day_lh, 400).id(8110 + i))
-            .child(
-                Node::new(Dir::Row)
-                    .id(8120 + i)
-                    .style(move |s| {
-                        s.size(Dim::Px(t.day_ic), Dim::Px(t.day_ic))
-                            .mar([t.day_ic_mt, 0.0, t.day_ic_mb, 0.0])
-                    }),
-            );
+            .child(Node::new(Dir::Row).id(8120 + i).style(move |s| {
+                s.size(Dim::Px(t.day_ic), Dim::Px(t.day_ic)).mar([
+                    t.day_ic_mt,
+                    0.0,
+                    t.day_ic_mb,
+                    0.0,
+                ])
+            }));
         // 温度行：hi(白) / sep(灰) / lo(灰)，基线对齐
         let (hi, lo) = match d {
             Some(x) => (deg(x.hi), deg(x.lo)),
@@ -342,14 +361,26 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
                 )
                 .child(
                     Node::new(Dir::Row)
-                        .style(move |s| s.size(Dim::Pct(1.0), Dim::Px(t.air_lh)).mar([t.air_mt, 0.0, 0.0, 0.0]))
+                        .style(move |s| {
+                            s.size(Dim::Pct(1.0), Dim::Px(t.air_lh))
+                                .mar([t.air_mt, 0.0, 0.0, 0.0])
+                        })
                         .child(air_row),
                 ),
         )
 }
 
 /// 画一个 24 网格的图标：`size` 是边长，`off` 是原版对 viewBox 的平移
-fn draw_icon(g: &Gfx, pal: &Palette, name: &str, x: f32, y: f32, size: f32, stroke: f32, opacity: f32) -> Result<()> {
+fn draw_icon(
+    g: &Gfx,
+    pal: &Palette,
+    name: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+    stroke: f32,
+    opacity: f32,
+) -> Result<()> {
     let (d, (ox, oy), circles, nc) = icon_paths(name);
     let s = size / 24.0;
     // viewBox 平移 (ox, oy) 等价于把内容反向平移 (-ox, -oy)
@@ -373,7 +404,14 @@ fn draw_icon(g: &Gfx, pal: &Palette, name: &str, x: f32, y: f32, size: f32, stro
     Ok(())
 }
 
-fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, w: &Weather, pl: &Placed) -> Result<()> {
+fn paint_tree(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &Palette,
+    t: &Tokens,
+    w: &Weather,
+    pl: &Placed,
+) -> Result<()> {
     // 当前天气大图标
     if pl.id == 8010 {
         draw_icon(
@@ -392,7 +430,16 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, w: &Weather, 
     if (8120..8130).contains(&pl.id) {
         let i = (pl.id - 8120) as usize;
         let code = w.days.get(i).map(|d| d.code).unwrap_or(3);
-        draw_icon(g, pal, icon_of(code), pl.rect.x, pl.rect.y, t.day_ic, t.day_stroke, 1.0)?;
+        draw_icon(
+            g,
+            pal,
+            icon_of(code),
+            pl.rect.x,
+            pl.rect.y,
+            t.day_ic,
+            t.day_stroke,
+            1.0,
+        )?;
         return Ok(());
     }
     // 三日块的两条分隔线
@@ -402,11 +449,31 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, w: &Weather, 
         // 向下取整：浏览器把 109.42 处的 1px 边框画在第 109 行（不是 110）
         let top = r.y.floor();
         let bottom = r.bottom().floor() - 1.0;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
-        fill_rect(g, D2D_RECT_F { left: r.x, top, right: r.right(), bottom: top + 1.0 })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         fill_rect(
             g,
-            D2D_RECT_F { left: r.x, top: bottom, right: r.right(), bottom: bottom + 1.0 },
+            D2D_RECT_F {
+                left: r.x,
+                top,
+                right: r.right(),
+                bottom: top + 1.0,
+            },
+        )?;
+        fill_rect(
+            g,
+            D2D_RECT_F {
+                left: r.x,
+                top: bottom,
+                right: r.right(),
+                bottom: bottom + 1.0,
+            },
         )?;
     }
 
@@ -427,7 +494,10 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, w: &Weather, 
         };
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: pl.rect.x + dx, Y: pl.rect.y },
+                Vector2 {
+                    X: pl.rect.x + dx,
+                    Y: pl.rect.y,
+                },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -505,15 +575,14 @@ mod icon_tests {
     /// 之前 cloudSun 只画出 7×6 px 的一小块，就是弧段没被解析出来。
     #[test]
     fn 七个图标都能解析出形体() {
-        for name in ["sun", "cloudSun", "cloud", "drizzle", "rain", "snow", "thunder"] {
+        for name in [
+            "sun", "cloudSun", "cloud", "drizzle", "rain", "snow", "thunder",
+        ] {
             let (d, _, circles, nc) = super::icon_paths(name);
             let mut total = 0usize;
             for seg in d.split('M').filter(|s| !s.is_empty()) {
                 let p = Path::svg(&format!("M{seg}"));
-                assert!(
-                    !p.cmds.is_empty(),
-                    "图标 {name} 的子路径 {seg:?} 解析为空"
-                );
+                assert!(!p.cmds.is_empty(), "图标 {name} 的子路径 {seg:?} 解析为空");
                 total += p.cmds.len();
             }
             let len: f32 = d
@@ -523,7 +592,11 @@ mod icon_tests {
                 .sum();
             assert!(total >= 4, "图标 {name} 只解析出 {total} 段");
             // 圆体（太阳本体 / 雪粒）不在 path 里，按周长补上
-            let circ: f32 = circles.iter().take(nc).map(|c| 2.0 * std::f32::consts::PI * c.2).sum();
+            let circ: f32 = circles
+                .iter()
+                .take(nc)
+                .map(|c| 2.0 * std::f32::consts::PI * c.2)
+                .sum();
             assert!(
                 len + circ > 25.0,
                 "图标 {name} 总长只有 {:.1}（viewBox 24 单位内应 >25，疑似漏了主体段）",

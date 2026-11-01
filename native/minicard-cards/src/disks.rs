@@ -150,15 +150,39 @@ pub fn paint(
         g.push_clip()?;
 
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -278,7 +302,10 @@ pub fn tree_hook(t: &Tokens, disks: &[Disk]) -> Node {
 pub fn dump_layout(p: &Placed, depth: usize) {
     let pad = " ".repeat(depth * 2);
     let role = if p.text().is_some() {
-        format!("text {:?}", p.text().map(|s| s.s.clone()).unwrap_or_default())
+        format!(
+            "text {:?}",
+            p.text().map(|s| s.s.clone()).unwrap_or_default()
+        )
     } else if (1000..2000).contains(&p.id) {
         "bar".to_string()
     } else if (2500..3000).contains(&p.id) {
@@ -328,7 +355,14 @@ fn paint_tree(
             (p.rect.x, box_w)
         };
         let fmt = te.format_cached(spec.size, spec.line_h, spec.align)?;
-        let lay = te.layout_cached(spec.align, &fmt, &spec.s, w, parent.h.max(spec.line_h) + 8.0, spec.tabular)?;
+        let lay = te.layout_cached(
+            spec.align,
+            &fmt,
+            &spec.s,
+            w,
+            parent.h.max(spec.line_h) + 8.0,
+            spec.tabular,
+        )?;
         // 徽标字母没有阴影（CSS 只在 .card 上给 text-shadow，理论上所有字都有；
         // 但徽标是 mono 小字，实测与浏览器一致的做法是照画）
         // 硬边副本 → 换成 CSS 的模糊阴影（0 0.833px 1.667px black 45%）
@@ -348,10 +382,21 @@ fn paint_tree(
             }
             for (ox, oy, wt) in taps {
                 let a = 0.45 * wt / total;
-                set_color(g, D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a })?;
+                set_color(
+                    g,
+                    D2D1_COLOR_F {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a,
+                    },
+                )?;
                 unsafe {
                     g.d2d.DrawTextLayout(
-                        Vector2 { X: x + ox, Y: p.rect.y + 0.833 + oy },
+                        Vector2 {
+                            X: x + ox,
+                            Y: p.rect.y + 0.833 + oy,
+                        },
                         &lay,
                         &g.brush,
                         D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -368,7 +413,16 @@ fn paint_tree(
         } else {
             false
         };
-        set_color(g, if is_badge { pal.muted } else if warn { pal.warn } else { pal.fg })?;
+        set_color(
+            g,
+            if is_badge {
+                pal.muted
+            } else if warn {
+                pal.warn
+            } else {
+                pal.fg
+            },
+        )?;
         unsafe {
             g.d2d.DrawTextLayout(
                 Vector2 { X: x, Y: p.rect.y },
@@ -401,5 +455,10 @@ fn paint_tree(
 }
 
 fn to_d2d(r: Rect) -> D2D_RECT_F {
-    D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() }
+    D2D_RECT_F {
+        left: r.x,
+        top: r.y,
+        right: r.right(),
+        bottom: r.bottom(),
+    }
 }

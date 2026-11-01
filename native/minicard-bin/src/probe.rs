@@ -644,7 +644,8 @@ pub fn dock_sheet(
     let running = vec![false; d.items.len()];
     let refs: Vec<Option<&windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>> =
         bitmaps.iter().map(|o| o.as_ref()).collect();
-    dock::paint(g, te, pal, &t, &d, &refs, &running, None)
+    let geo = t.geo(&d, None, 0.0);
+    dock::paint(g, te, pal, &t, &d, &geo, &refs, &running, None)
 }
 
 /// 与 `src-tauri/src/dock.rs::ensure_icon` 同一套缓存命名（FNV-1a over 规范化路径）

@@ -160,8 +160,14 @@ pub fn animating(items: &[Item], now: Instant) -> bool {
                 .check_t0
                 .map(|t0| (now - t0).as_secs_f32() < 0.28)
                 .unwrap_or(false);
-        let popping = it.pop_t0.map(|t0| (now - t0).as_secs_f32() < 0.42).unwrap_or(false);
-        let moving = it.mv_t0.map(|t0| (now - t0).as_secs_f32() < 0.30).unwrap_or(false);
+        let popping = it
+            .pop_t0
+            .map(|t0| (now - t0).as_secs_f32() < 0.42)
+            .unwrap_or(false);
+        let moving = it
+            .mv_t0
+            .map(|t0| (now - t0).as_secs_f32() < 0.30)
+            .unwrap_or(false);
         drawing || popping || moving
     })
 }
@@ -183,15 +189,39 @@ pub fn paint(
         g.begin()?;
         g.push_clip()?;
         if let Some((bmp, rect)) = glass {
-            g.d2d.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
         }
-        let full = D2D_RECT_F { left: 0.0, top: 0.0, right: t.w, bottom: t.h };
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: t.w,
+            bottom: t.h,
+        };
         set_color(g, pal.veil)?;
         fill_round(g, full, t.radius)?;
-        set_color(g, if g.hover.is_some() { pal.fg30 } else { pal.border })?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
         stroke_round(
             g,
-            D2D_RECT_F { left: 0.5, top: 0.5, right: t.w - 0.5, bottom: t.h - 0.5 },
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: t.w - 0.5,
+                bottom: t.h - 0.5,
+            },
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
@@ -216,11 +246,10 @@ fn text_node(s: &str, size: f32, lh: f32, weight: u16) -> Node {
 }
 
 fn tree(t: &Tokens, items: &[Item]) -> Node {
-    let root = Node::new(Dir::Column)
-        .style(|s| {
-            s.size(Dim::Px(t.w), Dim::Px(t.h))
-                .pad([t.pad_v, t.pad_h, t.pad_v, t.pad_h])
-        });
+    let root = Node::new(Dir::Column).style(|s| {
+        s.size(Dim::Px(t.w), Dim::Px(t.h))
+            .pad([t.pad_v, t.pad_h, t.pad_v, t.pad_h])
+    });
 
     if items.is_empty() {
         // 空态：两行居中（11px 副行 85% 不透明）
@@ -234,8 +263,13 @@ fn tree(t: &Tokens, items: &[Item]) -> Node {
             })
             .child(text_node("暂无待办", 0.875 * t.r, 0.875 * t.r * 1.3, 400).id(7001))
             .child(
-                text_node("在主界面 · 参数 里添加", 0.6875 * t.r, 0.6875 * t.r * 1.3, 400)
-                    .id(7002),
+                text_node(
+                    "在主界面 · 参数 里添加",
+                    0.6875 * t.r,
+                    0.6875 * t.r * 1.3,
+                    400,
+                )
+                .id(7002),
             );
         return root.child(empty);
     }
@@ -243,14 +277,13 @@ fn tree(t: &Tokens, items: &[Item]) -> Node {
     let idx = shown(items);
     let more = items.len() - idx.len();
 
-    let mut rows = Node::new(Dir::Column)
-        .style(|s| {
-            s.grow(1.0)
-                .basis(0.0)
-                .justify(Justify::Center)
-                .gap(t.row_gap)
-                .align(Align::Stretch)
-        });
+    let mut rows = Node::new(Dir::Column).style(|s| {
+        s.grow(1.0)
+            .basis(0.0)
+            .justify(Justify::Center)
+            .gap(t.row_gap)
+            .align(Align::Stretch)
+    });
     for (row, &i) in idx.iter().enumerate() {
         let it = &items[i];
         let ck = Node::new(Dir::Row)
@@ -302,12 +335,27 @@ fn paint_tree(
     if (7300..7400).contains(&pl.id) {
         let row = (pl.id - 7300) as usize;
         let order = shown(items);
-        let d = order.get(row).map(|&i| items[i].move_dy(now)).unwrap_or(0.0);
+        let d = order
+            .get(row)
+            .map(|&i| items[i].move_dy(now))
+            .unwrap_or(0.0);
         if let Some((mx, my)) = g.hover {
-            let r = minicard_draw::layout::Rect { y: pl.rect.y + d, ..pl.rect };
+            let r = minicard_draw::layout::Rect {
+                y: pl.rect.y + d,
+                ..pl.rect
+            };
             if mx >= r.x && my >= r.y && mx < r.x + r.w && my < r.y + r.h {
                 set_color(g, pal.fg_soft)?;
-                fill_round(g, D2D_RECT_F { left: r.x, top: r.y, right: r.x + r.w, bottom: r.y + r.h }, 6.0)?;
+                fill_round(
+                    g,
+                    D2D_RECT_F {
+                        left: r.x,
+                        top: r.y,
+                        right: r.x + r.w,
+                        bottom: r.y + r.h,
+                    },
+                    6.0,
+                )?;
             }
         }
         for c in &pl.children {
@@ -344,14 +392,24 @@ fn paint_tree(
             set_color(g, pal.accent)?;
             fill_round(
                 g,
-                D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() },
+                D2D_RECT_F {
+                    left: r.x,
+                    top: r.y,
+                    right: r.right(),
+                    bottom: r.bottom(),
+                },
                 rad,
             )?;
         } else {
             set_color(g, pal.badge_border)?;
             stroke_round(
                 g,
-                D2D_RECT_F { left: r.x + 0.5, top: r.y + 0.5, right: r.right() - 0.5, bottom: r.bottom() - 0.5 },
+                D2D_RECT_F {
+                    left: r.x + 0.5,
+                    top: r.y + 0.5,
+                    right: r.right() - 0.5,
+                    bottom: r.bottom() - 0.5,
+                },
                 rad - 0.5,
                 1.0,
             )?;
@@ -368,11 +426,13 @@ fn paint_tree(
 
     if let Some(spec) = pl.text() {
         // 完成的行：muted + 删除线
-        let done_row = (7200..7300).contains(&pl.id)
-            && {
-                let row = (pl.id - 7200) as usize;
-                shown(items).get(row).map(|&i| items[i].done).unwrap_or(false)
-            };
+        let done_row = (7200..7300).contains(&pl.id) && {
+            let row = (pl.id - 7200) as usize;
+            shown(items)
+                .get(row)
+                .map(|&i| items[i].done)
+                .unwrap_or(false)
+        };
         let color = if done_row || pl.id == 7001 || pl.id == 7002 || pl.id == 7401 {
             pal.muted
         } else {
@@ -396,7 +456,7 @@ fn paint_tree(
         // 删除线：文字中线（CSS text-decoration: line-through 约在基线上方 ~0.3em）
         if done_row {
             let w = te.measure(spec, 0.0).0.min(pl.rect.w);
-            let mid = pl.rect.y + dy + spec.line_h * 0.5;   // 必须跟行一起位移，否则勾完横线留在原地
+            let mid = pl.rect.y + dy + spec.line_h * 0.5; // 必须跟行一起位移，否则勾完横线留在原地
             set_color(g, pal.muted)?;
             let line = Path::polyline(&[(pl.rect.x, mid), (pl.rect.x + w, mid)]);
             stroke_path(g, &line, 1.0, false)?;
@@ -456,7 +516,9 @@ mod tests {
     use super::*;
 
     fn five() -> Vec<Item> {
-        (0..5).map(|i| Item::new(format!("任务{i}"), i == 1)).collect()
+        (0..5)
+            .map(|i| Item::new(format!("任务{i}"), i == 1))
+            .collect()
     }
 
     #[test]
@@ -486,7 +548,10 @@ mod tests {
         assert!((done - 1.0).abs() < 0.001, "300ms 后应满，实际 {done}");
         // 取消勾选立刻归零，不回放
         it.set_done(false, now + std::time::Duration::from_millis(500));
-        assert_eq!(it.progress(now + std::time::Duration::from_millis(600)), 0.0);
+        assert_eq!(
+            it.progress(now + std::time::Duration::from_millis(600)),
+            0.0
+        );
     }
 }
 

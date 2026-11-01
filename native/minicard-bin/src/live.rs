@@ -18,7 +18,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
-use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, ScreenToClient, SetWindowRgn};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -85,14 +85,77 @@ struct CardWin {
 
 /// Dock 自绘窗口（D0：静态条；D1 接 hover 放大）
 struct DockWin {
-    #[allow(dead_code)]
     hwnd: HWND,
     gfx: Gfx,
     t: minicard_cards::dock::Tokens,
     icons: Vec<Option<ID2D1Bitmap1>>,
     /// 壁纸切片（与卡片同一口径：pad + 高斯模糊）
     glass: Option<(ID2D1Bitmap1, D2D_RECT_F)>,
+    /// 窗口左上角（屏幕物理 px）—— 指针换算用
+    origin: (i32, i32),
+    /// 该窗的 DPI（指针/区域换算）
+    dpi: f32,
+    /// 布局用的指针 x（窗内逻辑 px）；离场保留最后位置，收缩才不会往左吸
+    px: f32,
+    /// 进场进度 0..1 与速度（临界阻尼 τ=50ms）
+    ease: f32,
+    ease_v: f32,
+    /// 当前窗口区域是「只有条」还是「含上方 72」
+    region_open: bool,
+    /// 本条最后画的那一帧的几何指纹（避免静置时重复重绘）
+    last_sig: u64,
+    /// 醒来的时刻（悬停时 60fps 轮询光标）
     next_draw: Instant,
+    /// 下一次「静置兜底重绘」的时刻（1s，与醒来节拍分开）
+    next_paint: Instant,
+}
+
+/// 窗口区域：`open=false` 只放玻璃条（上方预留既不可见也不吃点击）；
+/// `open=true` 往上放开 `HOVER_EXTRA`（放大图标 + 名字气泡要看得见、点得到）。
+unsafe fn dock_region(dw: &DockWin, dpi: f32, open: bool) {
+    let s = dpi / 96.0;
+    let side = dw.t.side * s;
+    let top = if open {
+        (dw.t.top - minicard_core::config::Dock::HOVER_EXTRA).max(0.0) * s
+    } else {
+        dw.t.top * s
+    };
+    let right = (dw.t.w - dw.t.side) * s;
+    let bottom = dw.t.h * s;
+    let rgn = CreateRoundRectRgn(
+        side.round() as i32,
+        top.round() as i32,
+        right.round() as i32,
+        bottom.round() as i32,
+        (40.0 * s).round() as i32,
+        (40.0 * s).round() as i32,
+    );
+    let _ = SetWindowRgn(dw.hwnd, Some(rgn), true);
+}
+
+impl DockWin {
+    /// 指针（屏幕 px）→ 窗内逻辑坐标；返回是否落在「激活区」内
+    fn pointer(&self, dpi: f32) -> Option<f32> {
+        let mut pt = windows::Win32::Foundation::POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let s = dpi / 96.0;
+        let x = (pt.x - self.origin.0) as f32 / s;
+        let y = (pt.y - self.origin.1) as f32 / s;
+        // 激活区：条本身；进场后往上放开 HOVER_EXTRA
+        let grow = if self.ease > 0.002 {
+            minicard_core::config::Dock::HOVER_EXTRA
+        } else {
+            0.0
+        };
+        let in_bar = x >= 0.0 && x <= self.t.w && y >= self.t.top - grow && y <= self.t.h;
+        if in_bar {
+            Some(x.clamp(0.0, self.t.w))
+        } else {
+            None
+        }
+    }
 }
 
 
@@ -515,9 +578,10 @@ pub fn run(
             let dk = minicard_cards::dock::Tokens::dock(&d);
             let w_px = (dk.w * dpi_sys / 96.0).round() as i32;
             let h_px = (dk.h * dpi_sys / 96.0).round() as i32;
-            // 条底贴屏幕底：窗口 y = 配置 y（配置口径 = 虚拟 92 框的上边缘）
+            // 窗口 = 条 + 两侧预留（悬停外扩）/ 条高 + 顶部预留（气泡、菜单）；
+            // `d.y` 的口径是「虚拟 92 框的上边缘」= 条顶 − 28（与外壳 dock_window_rect 一致）
             let x = (d.cx - dk.w / 2.0).round() as i32;
-            let y = d.y.round() as i32;
+            let y = (d.y + minicard_core::config::Dock::MARGIN - dk.top).round() as i32;
             let mut ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
             if matches!(d.z, minicard_core::config::ZOrder::Top) {
                 ex |= WS_EX_TOPMOST;
@@ -595,14 +659,26 @@ pub fn run(
                     }
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     minicard_shell::mlog!("Dock 自绘：{} 项，窗口 {}×{}", d.items.len(), w_px, h_px);
-                    dock_win = Some(DockWin {
+                    let dk_dpi = dpi;
+                    let mut dw = DockWin {
                         hwnd,
                         gfx,
                         t: dk,
                         icons,
                         glass: glass_pair,
+                        origin: (x, y),
+                        dpi: dk_dpi,
+                        px: dk.w / 2.0,
+                        ease: 0.0,
+                        ease_v: 0.0,
+                        region_open: false,
+                        last_sig: 0,
                         next_draw: Instant::now(),
-                    });
+                        next_paint: Instant::now(),
+                    };
+                    dock_region(&dw, dk_dpi, false);
+                    dw.next_draw = Instant::now();
+                    dock_win = Some(dw);
                 }
                 Err(e) => minicard_shell::mlog!("Dock 窗口创建失败: {e:?}"),
             }
@@ -788,21 +864,80 @@ pub fn run(
                 *CARD_RECTS.lock().unwrap() = rects;
             }
 
-            // Dock：1Hz 重绘（D1 接 hover 后改成 60fps）
+            // Dock：悬停放大（每帧算，指针不动就不重绘）
             if let Some(dw) = dock_win.as_mut() {
-                if now >= dw.next_draw {
-                    // 借用拆分：glass 是不可变借用、paint 要 &mut self
+                let dpi = dw.dpi;
+                // 验收用：`MC_DOCK_DEMO=<窗内 x>` 把指针钉死，不依赖真鼠标（截图取证）
+                let demo_x = std::env::var("MC_DOCK_DEMO").ok().and_then(|s| s.parse::<f32>().ok());
+                let hit = match demo_x {
+                    Some(x) => Some(x),
+                    None => dw.pointer(dpi),
+                };
+                // 进出场：临界阻尼（τ=50ms），与 dock.html 同一个时钟感
+                let target = if hit.is_some() { 1.0 } else { 0.0 };
+                if let Some(x) = hit {
+                    dw.px = x;
+                }
+                let moving = (dw.ease - target).abs() > 0.0015 || dw.ease_v.abs() > 0.01;
+                if moving {
+                    let dt = (now - dw.next_draw.min(now)).as_secs_f32().min(0.05);
+                    let dt = if dt <= 0.0 { 1.0 / 60.0 } else { dt };
+                    let (e, v) = minicard_cards::dock::step_ease(dw.ease, dw.ease_v, target, dt, 0.05);
+                    dw.ease = e;
+                    dw.ease_v = v;
+                } else if target == 0.0 {
+                    dw.ease = 0.0;
+                    dw.ease_v = 0.0;
+                } else {
+                    dw.ease = 1.0;
+                    dw.ease_v = 0.0;
+                }
+                // 区域跟着放/收（放：放大图标 + 气泡要能看见、能点）
+                let want_open = dw.ease > 0.002;
+                if want_open != dw.region_open {
+                    dock_region(dw, dpi, want_open);
+                    dw.region_open = want_open;
+                }
+                if std::env::var("MC_DOCK_LOG").is_ok() {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static LAST: AtomicU64 = AtomicU64::new(0);
+                    let ms = t_start.elapsed().as_millis() as u64;
+                    if ms - LAST.load(Ordering::Relaxed) >= 900 {
+                        LAST.store(ms, Ordering::Relaxed);
+                        let mut pt = windows::Win32::Foundation::POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        minicard_shell::mlog!(
+                            "dock 诊断：光标 ({},{}) 原点 {:?} hit={:?} ease={:.3}",
+                            pt.x, pt.y, dw.origin, hit, dw.ease
+                        );
+                    }
+                }
+                let sig = (dw.ease * 4096.0) as u64 * 1_000_003
+                    + (dw.px * 8.0) as u64
+                    + hit.is_some() as u64;
+                // 静置兜底 1s 一回；悬停但指针不动**不重绘**（否则白烧 60fps）
+                let idle_due = now >= dw.next_paint;
+                if moving || sig != dw.last_sig || idle_due {
+                    dw.next_paint = now + Duration::from_millis(1000);
                     let DockWin { gfx, t: tk, icons, glass, .. } = dw;
                     let refs: Vec<Option<&ID2D1Bitmap1>> =
                         icons.iter().map(|o| o.as_ref()).collect();
                     let running = vec![false; icons.len()];
                     let gg = glass.as_ref().map(|(b, r)| (b, *r));
+                    let geo = tk.geo(&cfg.dock, Some(dw.px), dw.ease);
                     let r = minicard_cards::dock::paint(
-                        gfx, &te, &pal, tk, &cfg.dock, &refs, &running, gg,
+                        gfx, &te, &pal, tk, &cfg.dock, &geo, &refs, &running, gg,
                     );
                     let _ = r;
-                    dw.next_draw = now + Duration::from_millis(1000);
+                    dw.last_sig = sig;
                 }
+                // 悬停/动画中 60fps 醒着（只读光标，几乎不费 CPU）；静置 1s 一回
+                dw.next_draw = now
+                    + if moving || hit.is_some() {
+                        Duration::from_micros(16_667)
+                    } else {
+                        Duration::from_millis(1000)
+                    };
             }
 
             let mut earliest = now + Duration::from_millis(250);
@@ -835,6 +970,13 @@ pub fn run(
                     };
                 if win.next_draw < earliest {
                     earliest = win.next_draw;
+                }
+            }
+
+            // Dock 的唤醒时刻也要算进等待（否则放大动画会被 100ms 的睡眠掐成 10fps）
+            if let Some(dw) = dock_win.as_ref() {
+                if dw.next_draw < earliest {
+                    earliest = dw.next_draw;
                 }
             }
 

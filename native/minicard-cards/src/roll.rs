@@ -33,12 +33,24 @@ pub struct Roll {
 
 impl Roll {
     pub fn new(from: f32, to: f32, t0: Instant) -> Self {
-        Self { from, to, t0, ms: ROLL_MS, wrap_to: None }
+        Self {
+            from,
+            to,
+            t0,
+            ms: ROLL_MS,
+            wrap_to: None,
+        }
     }
 
     /// 跨补格的滚动：`to` 是补的 0/9，滚完瞬归到 `wrap_to`（规范格）
     pub fn wrap(from: f32, to: f32, wrap_to: f32, t0: Instant) -> Self {
-        Self { from, to, t0, ms: ROLL_MS, wrap_to: Some(wrap_to) }
+        Self {
+            from,
+            to,
+            t0,
+            ms: ROLL_MS,
+            wrap_to: Some(wrap_to),
+        }
     }
 
     pub fn at(&self, now: Instant) -> f32 {
@@ -91,7 +103,12 @@ pub fn draw_digit(
 ) -> Result<()> {
     push_clip(
         g,
-        D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + cell_h },
+        D2D_RECT_F {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + cell_h,
+        },
     );
     set_color(g, color)?;
     let lo = idx.floor() as i32;
