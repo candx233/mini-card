@@ -332,6 +332,10 @@ pub enum Theme {
     Dark,
 }
 
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -357,6 +361,13 @@ pub struct Settings {
     pub accent: [u8; 3],
     /// 设置页「软件更新 → 自动检查」：启动后自动查一次 GitHub Release
     pub update_auto: bool,
+    /// 拖动时磁吸 + 出对齐辅助线（关掉就是完全自由摆放）
+    #[serde(default = "yes")]
+    pub snap_on_drag: bool,
+    /// **卡片之间的固定间距**（逻辑 px）。0 = 只做边缘/中线对齐；
+    /// >0 = 拖到邻居旁边时按这个间距吸附（吸的是「邻居边缘 ± 间距」）
+    #[serde(default)]
+    pub card_gap: f32,
     /// 天气城市显示名（"" = 自动：按网络归属地猜，猜错了在界面里改）
     pub weather_city: String,
     /// 天气坐标；None 且 weather_city 为空时走自动检测
@@ -372,6 +383,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             native_cards: false,
+            snap_on_drag: true,
+            card_gap: 0.0,
             autostart: false,
             close_to_tray: true,
             hotkey: "Ctrl+Alt+W".to_owned(),

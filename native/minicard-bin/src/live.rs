@@ -50,6 +50,12 @@ struct Drag {
 }
 
 static DRAG: Mutex<Option<Drag>> = Mutex::new(None);
+/// 所有卡片当前屏幕矩形（物理 px）——磁吸要拿邻居位置，窗口线程里查这张表
+static CARD_RECTS: Mutex<Vec<(isize, crate::guide::R4)>> = Mutex::new(Vec::new());
+/// 磁吸参数（逻辑 px，按拖动窗口的 DPI 换算成物理 px）
+static SNAP_TOL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(crate::guide::TOL);
+static SNAP_GAP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static SNAP_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// 一张卡窗口 + 它自己的绘制状态
 struct CardWin {
@@ -439,11 +445,23 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 glass_off: (0.0, 0.0),
             });
         }
-        minicard_shell::mlog!("live：{} 张卡窗口", wins.len());
+        // 磁吸参数 + 辅助线窗口
+        SNAP_ON.store(cfg.settings.snap_on_drag, std::sync::atomic::Ordering::Relaxed);
+        SNAP_GAP.store(cfg.settings.card_gap.round() as i32, std::sync::atomic::Ordering::Relaxed);
+        let _ = crate::guide::ensure_overlay();
+        minicard_shell::mlog!(
+            "live：{} 张卡窗口（磁吸 {}，固定间距 {}px）",
+            wins.len(),
+            if cfg.settings.snap_on_drag { "开" } else { "关" },
+            cfg.settings.card_gap
+        );
 
         // 帧循环：自节拍 16.667ms（与单窗模式同一套），消息循环与绘制交替
         let _timer = windows::Win32::Media::timeBeginPeriod(1);
         let t_start = Instant::now();
+        let mut cfg_mtime = std::fs::metadata(minicard_core::config::path())
+            .and_then(|m| m.modified())
+            .ok();
         loop {
             // 先把消息吃完
             let mut msg = MSG::default();
@@ -537,6 +555,41 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                         win.next_draw = now;
                     }
                 }
+            }
+
+            // config 热载：磁吸开关 / 固定间距改完不用重启绘制进程
+            {
+                let now_m = std::fs::metadata(minicard_core::config::path())
+                    .and_then(|m| m.modified())
+                    .ok();
+                if now_m != cfg_mtime {
+                    cfg_mtime = now_m;
+                    {
+                        let nc = Config::load();
+                        SNAP_ON.store(nc.settings.snap_on_drag, std::sync::atomic::Ordering::Relaxed);
+                        SNAP_GAP.store(
+                            nc.settings.card_gap.round() as i32,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        minicard_shell::mlog!(
+                            "config 热载：磁吸 {}，固定间距 {}px",
+                            if nc.settings.snap_on_drag { "开" } else { "关" },
+                            nc.settings.card_gap
+                        );
+                    }
+                }
+            }
+
+            // 刷新邻居矩形表（磁吸用；每帧一次 GetWindowRect，9 张卡可忽略）
+            {
+                let mut rects = Vec::with_capacity(wins.len());
+                for win in wins.iter() {
+                    let mut r = RECT::default();
+                    if GetWindowRect(win.hwnd, &mut r).is_ok() {
+                        rects.push((win.hwnd.0 as isize, (r.left, r.top, r.right, r.bottom)));
+                    }
+                }
+                *CARD_RECTS.lock().unwrap() = rects;
             }
 
             let mut earliest = now + Duration::from_millis(250);
@@ -1017,6 +1070,25 @@ fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
     }
 }
 
+fn win_dpi(hwnd: HWND) -> f32 {
+    unsafe { GetDpiForWindow(hwnd) as f32 }
+}
+
+/// 窗口所在显示器的工作区（排除任务栏），物理 px
+fn work_area(hwnd: HWND) -> Option<crate::guide::R4> {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    unsafe {
+        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+            let w = mi.rcWork;
+            Some((w.left, w.top, w.right, w.bottom))
+        } else {
+            None
+        }
+    }
+}
+
 /// 显式收尾：D2D/DComp 的窗口资源在进程退出路径上不一定能干净释放，
 /// 直接 exit(0) 让脚本/托盘拿到确定的返回码（实测 return Ok 会得到 122/2170 这种怪码）。
 fn clean_exit() -> ! {
@@ -1059,11 +1131,44 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         d.moved = true;
                     }
                     if d.moved {
+                        let (mut nx, mut ny) = (d.wx + dx, d.wy + dy);
+                        // 磁吸（对齐 + 固定间距）：位移直接并进落点，跟手不抖
+                        if SNAP_ON.load(std::sync::atomic::Ordering::Relaxed) {
+                            let mut wr = RECT::default();
+                            let _ = GetWindowRect(hwnd, &mut wr);
+                            let (w, h) = (wr.right - wr.left, wr.bottom - wr.top);
+                            let dpi = win_dpi(hwnd);
+                            let k = dpi / 96.0;
+                            let tol = (SNAP_TOL.load(std::sync::atomic::Ordering::Relaxed) as f32 * k).round() as i32;
+                            let gap = (SNAP_GAP.load(std::sync::atomic::Ordering::Relaxed) as f32 * k).round() as i32;
+                            let others: Vec<crate::guide::R4> = CARD_RECTS
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .filter(|(id, _)| *id != hwnd.0 as isize)
+                                .map(|(_, r)| *r)
+                                .collect();
+                            let work = work_area(hwnd);
+                            let s = crate::guide::compute(
+                                (nx, ny, nx + w, ny + h),
+                                &others,
+                                work,
+                                tol,
+                                gap,
+                            );
+                            nx += s.dx;
+                            ny += s.dy;
+                            if s.lines.is_empty() {
+                                crate::guide::hide();
+                            } else {
+                                crate::guide::show_lines(&s.lines);
+                            }
+                        }
                         let _ = SetWindowPos(
                             hwnd,
                             None,
-                            d.wx + dx,
-                            d.wy + dy,
+                            nx,
+                            ny,
                             0,
                             0,
                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
@@ -1076,6 +1181,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_LBUTTONUP => {
             let d = DRAG.lock().unwrap().take();
             let _ = ReleaseCapture();
+            crate::guide::hide();
             if let Some(d) = d {
                 if d.hwnd == hwnd.0 as isize {
                     if d.moved {

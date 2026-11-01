@@ -510,8 +510,13 @@
                   <input class="input axis-num" id="cx-y" type="number" step="1" aria-label="Y 坐标">
                   <input class="axis-range" id="rng-cx-y" type="range" step="1" min="0" max="1000" value="0" aria-label="Y 坐标滑条">
                 </div>
+                <div class="axis-row">
+                  <span class="axis-k">间距</span>
+                  <input class="input axis-num" id="cx-gap" type="number" step="1" min="0" max="200" aria-label="卡片之间的固定间距">
+                  <input class="axis-range" id="rng-cx-gap" type="range" step="1" min="0" max="120" value="0" aria-label="卡片之间的固定间距滑条">
+                </div>
                 <div class="pos-foot">
-                  <span class="hint">自由摆放 · 拖到屏幕边或其它卡片会磁吸</span>
+                  <span class="hint">间距 0 = 只对齐边缘/中线；填数字 = 卡片之间固定留这么多</span>
                   <button class="linkbtn" id="cx-locate" style="display:inline-flex;align-items:center;gap:6px;padding-left:0">
                     <svg viewBox="0 0 24 24" style="width:13px;height:13px;stroke:currentColor;stroke-width:1.9;fill:none;stroke-linecap:round"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
                     在桌面上高亮
@@ -1248,6 +1253,26 @@
       paint(ry);
       posLive(+rx.value, +ry.value, false);
     });
+
+    // 卡片之间的固定间距（全局设置；绘制进程会热载 config，不用重启）
+    var ge = $('#cx-gap'), rg = $('#rng-cx-gap');
+    function paintGap() {
+      var g = Math.max(0, Math.min(200, Math.round(Number(CFG.settings.card_gap) || 0)));
+      if (ge) ge.value = g;
+      if (rg) rg.value = Math.min(120, g);
+    }
+    function setGap(v) {
+      var g = Math.max(0, Math.min(200, Math.round(Number(v) || 0)));
+      CFG.settings.card_gap = g;
+      paintGap();
+      save();
+    }
+    if (rg) rg.addEventListener('input', function () { setGap(rg.value); });
+    if (ge) {
+      ge.addEventListener('change', function () { setGap(ge.value); });
+      ge.addEventListener('input', function () { setGap(ge.value); });
+    }
+    paintGap();
     if (rx) rx.addEventListener('change', function () {
       POS_DRAG = 0; paint(rx); posLive(+rx.value, +ry.value, true);
     });
