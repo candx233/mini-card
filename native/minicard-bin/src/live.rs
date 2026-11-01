@@ -254,7 +254,17 @@ fn monitor_of(x: i32, y: i32) -> (f32, f32, f32, f32) {
     }
 }
 
-pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmost: bool, exit_after: Option<u64>) -> Result<()> {
+pub fn run(
+    mut cfg: Config,
+    te: Arc<TextEngine>,
+    pal_in: Palette,
+    blur_in: f32,
+    topmost: bool,
+    exit_after: Option<u64>,
+) -> Result<()> {
+    // 热载用：强调色/主题/玻璃厚度改完不必重启绘制进程
+    let mut pal = pal_in;
+    let mut blur = blur_in;
     // 层级以 config 的 z_order 为准；`--live-topmost` 只是取证覆盖
     let z = if topmost {
         minicard_core::config::ZOrder::Top
@@ -557,26 +567,56 @@ pub fn run(mut cfg: Config, te: Arc<TextEngine>, pal: Palette, blur: f32, topmos
                 }
             }
 
-            // config 热载：磁吸开关 / 固定间距改完不用重启绘制进程
+            // config 热载：设置/卡片选项改完不用重启绘制进程
             {
                 let now_m = std::fs::metadata(minicard_core::config::path())
                     .and_then(|m| m.modified())
                     .ok();
                 if now_m != cfg_mtime {
                     cfg_mtime = now_m;
-                    {
-                        let nc = Config::load();
-                        SNAP_ON.store(nc.settings.snap_on_drag, std::sync::atomic::Ordering::Relaxed);
-                        SNAP_GAP.store(
-                            nc.settings.card_gap.round() as i32,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                    let nc = Config::load();
+                    SNAP_ON.store(nc.settings.snap_on_drag, std::sync::atomic::Ordering::Relaxed);
+                    SNAP_GAP.store(
+                        nc.settings.card_gap.round() as i32,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    // 强调色 / 主题 / 玻璃厚度 → 重建调色板
+                    let pal_changed = nc.settings.accent != cfg.settings.accent
+                        || nc.settings.glass_alpha != cfg.settings.glass_alpha
+                        || !matches_theme(nc.settings.theme, cfg.settings.theme);
+                    if pal_changed {
+                        let dark = !matches!(nc.settings.theme, minicard_core::config::Theme::Light);
+                        pal = Palette::new(nc.settings.glass_alpha as f32, false)
+                            .with_accent(nc.settings.accent, dark);
                         minicard_shell::mlog!(
-                            "config 热载：磁吸 {}，固定间距 {}px",
-                            if nc.settings.snap_on_drag { "开" } else { "关" },
-                            nc.settings.card_gap
+                            "config 热载：强调色 rgb{:?} / 玻璃 {}/100 / 主题 {:?}",
+                            nc.settings.accent,
+                            nc.settings.glass_alpha,
+                            nc.settings.theme
                         );
                     }
+                    // 模糊强度 → 重切所有玻璃
+                    let blur_changed = nc.settings.glass_blur != cfg.settings.glass_blur;
+                    if blur_changed {
+                        blur = nc.settings.glass_blur as f32;
+                        minicard_shell::mlog!("config 热载：模糊 {}px（重切玻璃）", blur);
+                    }
+                    for win in wins.iter_mut() {
+                        if blur_changed {
+                            reslice(win, &wall, blur);
+                        }
+                        if let Some(card) = nc.cards.get(win.cfg_idx) {
+                            win.refresh =
+                                Duration::from_millis(card.refresh_ms.clamp(200, 60_000));
+                            match &mut win.state {
+                                State::Perf { show_gpu, .. } => *show_gpu = card.show_gpu,
+                                State::Disks { warn90 } => *warn90 = card.warn90,
+                                _ => {}
+                            }
+                        }
+                        win.next_draw = now;
+                    }
+                    cfg = nc;
                 }
             }
 
@@ -1070,6 +1110,10 @@ fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
     }
 }
 
+fn matches_theme(a: minicard_core::config::Theme, b: minicard_core::config::Theme) -> bool {
+    format!("{a:?}") == format!("{b:?}")
+}
+
 fn win_dpi(hwnd: HWND) -> f32 {
     unsafe { GetDpiForWindow(hwnd) as f32 }
 }
@@ -1200,7 +1244,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             LRESULT(0)
         }
+        WM_CAPTURECHANGED => {
+            if let Some(d) = DRAG.lock().unwrap().take() {
+                if d.hwnd == hwnd.0 as isize && d.moved {
+                    let _ = EVENTS.lock().unwrap().push(UiEvent::DragEnd { hwnd: hwnd.0 as isize });
+                }
+            }
+            crate::guide::hide();
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            crate::guide::hide();
             PostQuitMessage(0);
             LRESULT(0)
         }

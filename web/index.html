@@ -739,6 +739,15 @@
               </div>
             </div>
           </div>
+          <div class="sitem">
+            <div><h3>桌面卡片渲染</h3><span class="meta">原生自绘更快；WebView 是可随时回退的旧路</span></div>
+            <div class="sctl">
+              <div class="opts" data-group="natcards">
+                <button class="opt" data-val="web">WebView</button>
+                <button class="opt" data-val="native">原生自绘</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="panel">
@@ -1613,6 +1622,22 @@
           // 失败时回读真实状态，别让界面骗人
           invoke('autostart_state').then(paintAuto).catch(function () {});
           toast('设置失败：' + e);
+        });
+      });
+    }
+    var natg = $('[data-group="natcards"]');
+    if (natg) {
+      $$('.opt', natg).forEach(function (o) {
+        o.classList.toggle('sel', (o.dataset.val === 'native') === !!CFG.settings.native_cards);
+        o.addEventListener('click', function () {
+          var next = (o.dataset.val === 'native');
+          if (next === !!CFG.settings.native_cards) return;
+          $$('.opt', natg).forEach(function (x) { x.classList.remove('sel'); });
+          o.classList.add('sel');
+          CFG.settings.native_cards = next;
+          save().then(function () {
+            toast(next ? '已切到原生自绘卡片' : '已切回 WebView 卡片');
+          });
         });
       });
     }
