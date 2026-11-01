@@ -286,7 +286,7 @@ impl App {
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
-                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar"
+                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar" || name == "dock"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -301,6 +301,7 @@ impl App {
                     "calendar" => probe::calendar_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "music" => probe::music_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "music-flip" => probe::music_flip(&self.gfx, &self.te, &self.pal, self.roll_ms),
+                    "dock" => probe::dock_sheet(&self.gfx, &self.te, &self.pal),
                     "weather" => probe::weather_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "todo" => probe::todo_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "pomo" => probe::pomo_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout, self.pomo_remain),
@@ -540,6 +541,7 @@ fn main() -> Result<()> {
             Some("weather") => live::radius_of(minicard_core::config::CardKind::Weather, args.w, args.h),
             Some("music") => live::radius_of(minicard_core::config::CardKind::Music, args.w, args.h),
             Some("calendar") => live::radius_of(minicard_core::config::CardKind::Calendar, args.w, args.h),
+            Some("dock") => minicard_cards::dock::RADIUS,
             _ => tokens.radius,
         };
         let mut gfx = gfx::Gfx::new(hwnd, w_px, h_px, dpi, clip_radius)?;

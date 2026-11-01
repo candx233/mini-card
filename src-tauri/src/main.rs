@@ -2709,6 +2709,16 @@ fn push_dock_glass(app: &AppHandle, w: &WebviewWindow) {
 /// config ↔ Dock 窗口双向同步：enabled 保证存在（尺寸档/条目数变了就 set_size + 按 cx 回推左上角），
 /// 关掉就关窗；最新 payload 推给页面。
 fn sync_dock(app: &AppHandle, cfg: &Config) {
+    // `dock.native` = Dock 也走 Rust 自绘：这条 WebView 窗彻底不建，
+    // 由 minicard-bin 里的 dock 模块画（回退：把 native 设回 false 即可）
+    if cfg.dock.native {
+        if let Some(w) = app.get_webview_window(dock_label()) {
+            let _ = w.close();
+            DOCK_HWND.store(0, Ordering::Relaxed);
+            DOCK_DESKTOP_LOCK.store(false, Ordering::Relaxed);
+        }
+        return;
+    }
     if cfg.dock.enabled && app.get_webview_window(dock_label()).is_none() {
         create_dock(app, cfg);
     }

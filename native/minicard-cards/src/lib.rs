@@ -3,6 +3,7 @@
 pub mod calendar;
 pub mod clock;
 pub mod disks;
+pub mod dock;
 pub mod lunar;
 pub mod music;
 pub mod net;

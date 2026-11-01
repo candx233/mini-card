@@ -83,6 +83,19 @@ struct CardWin {
     glass_off: (f32, f32),
 }
 
+/// Dock 自绘窗口（D0：静态条；D1 接 hover 放大）
+struct DockWin {
+    #[allow(dead_code)]
+    hwnd: HWND,
+    gfx: Gfx,
+    t: minicard_cards::dock::Tokens,
+    icons: Vec<Option<ID2D1Bitmap1>>,
+    /// 壁纸切片（与卡片同一口径：pad + 高斯模糊）
+    glass: Option<(ID2D1Bitmap1, D2D_RECT_F)>,
+    next_draw: Instant,
+}
+
+
 enum State {
     Perf {
         show_gpu: bool,
@@ -488,6 +501,113 @@ pub fn run(
         SNAP_ON.store(cfg.settings.snap_on_drag, std::sync::atomic::Ordering::Relaxed);
         SNAP_GAP.store(cfg.settings.card_gap.round() as i32, std::sync::atomic::Ordering::Relaxed);
         let _ = crate::guide::ensure_overlay();
+        // ── Dock 自绘（dock.enabled && dock.native） ──
+        minicard_shell::mlog!(
+            "dock 配置：enabled={} native={} items={} path={:?}",
+            cfg.dock.enabled,
+            cfg.dock.native,
+            cfg.dock.items.len(),
+            minicard_core::config::path()
+        );
+        let mut dock_win: Option<DockWin> = None;
+        if cfg.dock.enabled && cfg.dock.native {
+            let d = cfg.dock.clone();
+            let dk = minicard_cards::dock::Tokens::dock(&d);
+            let w_px = (dk.w * dpi_sys / 96.0).round() as i32;
+            let h_px = (dk.h * dpi_sys / 96.0).round() as i32;
+            // 条底贴屏幕底：窗口 y = 配置 y（配置口径 = 虚拟 92 框的上边缘）
+            let x = (d.cx - dk.w / 2.0).round() as i32;
+            let y = d.y.round() as i32;
+            let mut ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+            if matches!(d.z, minicard_core::config::ZOrder::Top) {
+                ex |= WS_EX_TOPMOST;
+            }
+            let title: Vec<u16> = "MiniCardLive · Dock"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            match CreateWindowExW(
+                ex,
+                cls,
+                windows::core::PCWSTR(title.as_ptr()),
+                WS_POPUP,
+                x,
+                y,
+                w_px,
+                h_px,
+                None,
+                None,
+                Some(hinst.into()),
+                None,
+            ) {
+                Ok(hwnd) => {
+                    let dpi = {
+                        let d = GetDpiForWindow(hwnd);
+                        if d == 0 { dpi_sys as u32 } else { d }
+                    } as f32;
+                    let w_p = (dk.w * dpi / 96.0).round() as u32;
+                    let h_p = (dk.h * dpi / 96.0).round() as u32;
+                    let mut gfx = Gfx::new(hwnd, w_p, h_p, dpi, minicard_cards::dock::RADIUS)?;
+                    gfx.text_dx = 0.0;
+                    // 图标：与外壳同一套缓存命名
+                    let mut icons: Vec<Option<ID2D1Bitmap1>> = Vec::new();
+                    for it in &d.items {
+                        let bmp = dock_icon_path(it)
+                            .and_then(|p| minicard_draw::image::decode_file(&p).ok())
+                            .and_then(|img| minicard_draw::image::bitmap(&gfx, &img).ok());
+                        icons.push(bmp);
+                    }
+                    // 玻璃：与卡片同口径（按所在屏切壁纸 + pad + 高斯模糊）
+                    let pad_px = ((blur * 3.0).max(60.0) * dpi / 96.0).round() as i32;
+                    let mon = monitor_of(x, y);
+                    let glass_pair = match &wall {
+                        Some(w) => {
+                            let cap = glass::from_wallpaper(
+                                w,
+                                (mon.2, mon.3),
+                                (x as f32 - mon.0, y as f32 - mon.1),
+                                (w_px as u32, h_px as u32),
+                                pad_px as f32,
+                                blur * dpi / 96.0,
+                            );
+                            match gfx.bitmap_from_bgra(&cap.bgra, cap.w, cap.h) {
+                                Ok(b) => {
+                                    let pad_dip = pad_px as f32 * 96.0 / dpi;
+                                    Some((
+                                        b,
+                                        D2D_RECT_F {
+                                            left: -pad_dip,
+                                            top: -pad_dip,
+                                            right: dk.w + pad_dip,
+                                            bottom: dk.h + pad_dip,
+                                        },
+                                    ))
+                                }
+                                Err(_) => None,
+                            }
+                        }
+                        None => None,
+                    };
+                    if matches!(d.z, minicard_core::config::ZOrder::Desktop) {
+                        if let Err(e) = minicard_shell::desktop::insert_above_desktop(hwnd) {
+                            minicard_shell::mlog!("Dock 桌面层插入失败: {e:?}");
+                        }
+                    }
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    minicard_shell::mlog!("Dock 自绘：{} 项，窗口 {}×{}", d.items.len(), w_px, h_px);
+                    dock_win = Some(DockWin {
+                        hwnd,
+                        gfx,
+                        t: dk,
+                        icons,
+                        glass: glass_pair,
+                        next_draw: Instant::now(),
+                    });
+                }
+                Err(e) => minicard_shell::mlog!("Dock 窗口创建失败: {e:?}"),
+            }
+        }
+
         minicard_shell::mlog!(
             "live：{} 张卡窗口（磁吸 {}，固定间距 {}px）",
             wins.len(),
@@ -666,6 +786,23 @@ pub fn run(
                     }
                 }
                 *CARD_RECTS.lock().unwrap() = rects;
+            }
+
+            // Dock：1Hz 重绘（D1 接 hover 后改成 60fps）
+            if let Some(dw) = dock_win.as_mut() {
+                if now >= dw.next_draw {
+                    // 借用拆分：glass 是不可变借用、paint 要 &mut self
+                    let DockWin { gfx, t: tk, icons, glass, .. } = dw;
+                    let refs: Vec<Option<&ID2D1Bitmap1>> =
+                        icons.iter().map(|o| o.as_ref()).collect();
+                    let running = vec![false; icons.len()];
+                    let gg = glass.as_ref().map(|(b, r)| (b, *r));
+                    let r = minicard_cards::dock::paint(
+                        gfx, &te, &pal, tk, &cfg.dock, &refs, &running, gg,
+                    );
+                    let _ = r;
+                    dw.next_draw = now + Duration::from_millis(1000);
+                }
             }
 
             let mut earliest = now + Duration::from_millis(250);
@@ -1173,6 +1310,35 @@ fn apply_z(hwnd: HWND, z: minicard_core::config::ZOrder) {
             }
         }
     }
+}
+
+/// Dock 图标缓存路径：与 `src-tauri/src/dock.rs::ensure_icon` 同一套命名
+/// （FNV-1a over 小写、反斜杠、去尾斜杠的路径）。缓存没有就返回 None（落首字母色块）。
+fn dock_icon_path(it: &minicard_core::config::DockItem) -> Option<std::path::PathBuf> {
+    if !it.icon.is_empty() {
+        let p = std::path::PathBuf::from(&it.icon);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if it.path.trim().is_empty() || it.path.starts_with("http") {
+        return None;
+    }
+    let norm = it
+        .path
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in norm.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let base = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let p = base.join("mini-card").join("icons").join(format!("{h:016x}.png"));
+    if p.exists() { Some(p) } else { None }
 }
 
 fn win_dpi(hwnd: HWND) -> f32 {

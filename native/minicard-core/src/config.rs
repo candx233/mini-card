@@ -170,6 +170,9 @@ pub struct Dock {
     pub z: ZOrder,
     /// 隐藏系统桌面图标（HKCU\...\Explorer\Advanced\HideIcons）
     pub hide_desktop_icons: bool,
+    /// Dock 走 Rust 自绘（`minicard-bin` 里的 dock 模块）而不是 dock.html
+    #[serde(default)]
+    pub native: bool,
     /// 边缘自动隐藏（P6，先只留字段，行为不实现）
     pub auto_hide: bool,
     pub items: Vec<DockItem>,
@@ -186,6 +189,7 @@ impl Default for Dock {
             mag: 55,
             z: ZOrder::Top,
             hide_desktop_icons: false,
+            native: false,
             auto_hide: false,
             items: Vec::new(),
         }

@@ -614,3 +614,67 @@ pub fn music_flip(
     };
     minicard_cards::music::paint(g, te, pal, &t, &m, None, Some(&green), Some(&flip))
 }
+
+
+/// Dock 自绘探针：按 config 的 [dock] 画一条静态条（真图标 + 分组线 + 运行点）。
+/// 尺寸用 `--w/--h` 指定，应当等于 `Dock::bar_width()` × (`bar_height()+28`)。
+pub fn dock_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+) -> Result<()> {
+    use minicard_cards::dock::{self, Tokens};
+
+    let cfg = minicard_core::config::Config::load();
+    let d = cfg.dock.clone();
+    let t = Tokens::dock(&d);
+
+    // 图标：%APPDATA%\mini-card\icons\<fnv1a(小写反斜杠路径)>.png
+    let mut bitmaps: Vec<Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>> = Vec::new();
+    for it in &d.items {
+        let path = icon_cache_path(it);
+        match path.and_then(|p| minicard_draw::image::decode_file(&p).ok()) {
+            Some(img) => match minicard_draw::image::bitmap(g, &img) {
+                Ok(b) => bitmaps.push(Some(b)),
+                Err(_) => bitmaps.push(None),
+            },
+            None => bitmaps.push(None),
+        }
+    }
+    let running = vec![false; d.items.len()];
+    let refs: Vec<Option<&windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>> =
+        bitmaps.iter().map(|o| o.as_ref()).collect();
+    dock::paint(g, te, pal, &t, &d, &refs, &running, None)
+}
+
+/// 与 `src-tauri/src/dock.rs::ensure_icon` 同一套缓存命名（FNV-1a over 规范化路径）
+fn icon_cache_path(it: &minicard_core::config::DockItem) -> Option<std::path::PathBuf> {
+    if !it.icon.is_empty() {
+        let p = std::path::PathBuf::from(&it.icon);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if it.path.trim().is_empty() || it.path.starts_with("http") {
+        return None;
+    }
+    let norm = it
+        .path
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in norm.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let base = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let p = base.join("mini-card").join("icons").join(format!("{h:016x}.png"));
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
