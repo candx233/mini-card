@@ -28,6 +28,22 @@ const RADIUS: f32 = 12.0;
 const FS: f32 = 13.0;
 const TEXT_PAD: f32 = 10.0;
 
+/// 菜单锚点（屏幕像素）：水平中心 + 底边应该落在哪。
+/// Dock 的用法是「图标中心 x」+「条顶再往上 6px」，跟 `web/dock.html` 的 `.menu{bottom: bar + 6}` 一致。
+#[derive(Clone, Copy)]
+pub struct Anchor {
+    pub cx: i32,
+    pub bottom: i32,
+}
+
+/// 由锚点算出菜单窗左上角（屏幕像素），屏幕内夹紧。
+/// 菜单要「贴着条往上长」，所以是底边对齐而不是左上角对齐。
+pub fn place(anchor: Anchor, w_px: i32, h_px: i32, screen: (i32, i32)) -> (i32, i32) {
+    let x = (anchor.cx - w_px / 2).min(screen.0 - w_px - 8).max(8);
+    let y = (anchor.bottom - h_px).max(8);
+    (x, y)
+}
+
 /// 一项：(文案, 危险色?)
 #[derive(Clone)]
 pub struct Item {
@@ -128,7 +144,7 @@ fn ensure_class() -> bool {
 
 /// 弹出菜单并阻塞到有结果。返回选中的下标（None = 取消/点到外面）。
 pub fn show(
-    screen: (i32, i32),
+    anchor: Anchor,
     items: &[Item],
     te: &TextEngine,
     pal: &Palette,
@@ -169,11 +185,18 @@ pub fn show(
     let w_px = (w_dip * s).round() as i32;
     let h_px = (h_dip * s).round() as i32;
 
-    // 屏幕内夹紧
     let mw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let mh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let x = screen.0.min(mw - w_px - 8).max(8);
-    let y = screen.1.min(mh - h_px - 8).max(8);
+    let (x, y) = place(anchor, w_px, h_px, (mw, mh));
+    minicard_shell::mlog!(
+        "menu：{}×{} 锚点 cx={} bottom={} → rect {x},{y} {}×{}",
+        w_dip.round(),
+        h_dip.round(),
+        anchor.cx,
+        anchor.bottom,
+        w_px,
+        h_px
+    );
 
     let hwnd = unsafe {
         let hinst = GetModuleHandleW(None).unwrap_or_default();
@@ -406,4 +429,54 @@ pub fn paint(
         g.end()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1920×1080 屏，菜单 208×108：底边贴锚点，水平以图标中心居中
+    #[test]
+    fn 贴条往上长() {
+        let a = Anchor { cx: 760, bottom: 997 };
+        let (x, y) = place(a, 208, 108, (1920, 1080));
+        assert_eq!((x, y), (760 - 104, 997 - 108));
+        assert_eq!(x + 208 / 2, a.cx);      // 水平居中于图标
+        assert_eq!(y + 108, a.bottom);      // 底边 = 锚点（条顶再往上 6px）
+    }
+
+    /// 靠左的图标：菜单会出窗口 → 夹到 x=8，仍不越过右边界
+    #[test]
+    fn 左侧夹紧() {
+        let (x, y) = place(Anchor { cx: 40, bottom: 997 }, 208, 108, (1920, 1080));
+        assert_eq!(x, 8);
+        assert_eq!(y, 889);
+    }
+
+    /// 靠右：x = 屏宽 - 菜单宽 - 8
+    #[test]
+    fn 右侧夹紧() {
+        let (x, _) = place(Anchor { cx: 1900, bottom: 997 }, 208, 108, (1920, 1080));
+        assert_eq!(x, 1920 - 208 - 8);
+    }
+
+    /// 真机实测口径：Dock 窗原点 (426,831)、条顶窗内 172、第 5 个图标中心 384、dpi 96
+    /// → 锚点 (810, 997)，菜单 208×108 → rect (706, 889)，底边正好离条顶 6px
+    #[test]
+    fn dock_实测锚点() {
+        let a = Anchor {
+            cx: 426 + 384,
+            bottom: 831 + 172 - 6,
+        };
+        let (x, y) = place(a, 208, 108, (1920, 1080));
+        assert_eq!((x, y), (706, 889));
+        assert_eq!(y + 108, 831 + 172 - 6); // 底边 = 条顶 - 6
+    }
+
+    /// 锚点离屏顶太近：y 至少 8，不会跑出去
+    #[test]
+    fn 顶部夹紧() {
+        let (_, y) = place(Anchor { cx: 600, bottom: 100 }, 208, 108, (1920, 1080));
+        assert_eq!(y, 8);
+    }
 }

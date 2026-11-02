@@ -50,6 +50,9 @@ static EVENTS: Mutex<Vec<UiEvent>> = Mutex::new(Vec::new());
 static DOCK_SNAP: Mutex<Option<(minicard_cards::dock::Tokens, minicard_cards::dock::Geo)>> =
     Mutex::new(None);
 
+/// Dock 窗在屏幕上的原点 + dpi（菜单要按屏幕像素定位，窗口线程拿不到 `dw`）
+static DOCK_ORIGIN: Mutex<Option<(i32, i32, f32)>> = Mutex::new(None);
+
 /// 按下但还没抬手：`(图标下标, 按下时的窗内坐标)`。超过 4px 才算拖拽（与卡片同阈值）
 static DOCK_PRESS: Mutex<Option<(usize, f32, f32)>> = Mutex::new(None);
 
@@ -696,6 +699,7 @@ pub fn run(
                     }
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     minicard_shell::mlog!("Dock 自绘：{} 项，窗口 {}×{}", d.items.len(), w_px, h_px);
+                    *DOCK_ORIGIN.lock().unwrap() = Some((x, y, dpi));
                     let dk_dpi = dpi;
                     let mut dw = DockWin {
                         hwnd,
@@ -863,8 +867,9 @@ pub fn run(
                                         item.name,
                                         rows.len()
                                     );
+                                    let anchor = dock_anchor(&tk, &geo, Some(i), x);
                                     let pick = crate::menu::show(
-                                        (sx, sy),
+                                        anchor,
                                         &rows,
                                         &te,
                                         &pal,
@@ -899,6 +904,7 @@ pub fn run(
                                 }
                                 None => {
                                     // 条空白区：添加应用 / Dock 设置
+                                    let anchor = dock_anchor(&tk, &geo, None, x);
                                     let rows = vec![
                                         crate::menu::Item {
                                             label: "添加应用…".into(),
@@ -912,7 +918,7 @@ pub fn run(
                                         },
                                     ];
                                     let pick = crate::menu::show(
-                                        (sx, sy),
+                                        anchor,
                                         &rows,
                                         &te,
                                         &pal,
@@ -2065,6 +2071,7 @@ fn dock_rebuild(
         dw.icons.push(bmp);
     }
     dw.origin = (x, y);
+    *DOCK_ORIGIN.lock().unwrap() = Some((x, y, dw.dpi));
     dw.running = vec![false; d.items.len()];
     dw.drag_from = None;
     dw.settle_t0 = None;
@@ -2080,6 +2087,27 @@ fn dock_rebuild(
         h_px
     );
     Ok(())
+}
+
+/// 菜单锚点：图标中心（空白区就用指针 x）+ 条顶往上 6px，全是屏幕像素。
+fn dock_anchor(
+    tk: &minicard_cards::dock::Tokens,
+    geo: &minicard_cards::dock::Geo,
+    hit: Option<usize>,
+    fallback_dip: f32,
+) -> crate::menu::Anchor {
+    let (ox, oy, dpi) = DOCK_ORIGIN
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or((0, 0, 96.0));
+    let s = if dpi > 0.0 { dpi / 96.0 } else { 1.0 };
+    // 有命中就对齐图标中心；空白区就对齐指针 x（再让 place() 做屏幕夹紧）
+    let cx_dip = hit.map(|i| geo.cx[i]).unwrap_or(fallback_dip);
+    crate::menu::Anchor {
+        cx: ox + (cx_dip * s).round() as i32,
+        bottom: oy + (tk.top * s).round() as i32 - (6.0 * s).round() as i32,
+    }
 }
 
 fn win_dpi(hwnd: HWND) -> f32 {
