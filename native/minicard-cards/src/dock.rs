@@ -594,6 +594,25 @@ mod tests {
         d
     }
 
+
+    /// 静置态（mag=0）图标中心真值：`web/dock.html` 里 `.item` 的 rect 实测
+    /// left = 18,78,138,198,258,326,386,446,506,566,634,694,754,814,874,934（相对 .dock），
+    /// 宽 48 → 中心 = left + 24 + 条左 34。
+    #[test]
+    fn 静置态图标中心与浏览器一致() {
+        let d = dock_real();
+        let t = Tokens::dock(&d);
+        let g = t.geo(&d, None, 0.0);
+        let want = [
+            76.0, 136.0, 196.0, 256.0, 316.0, 384.0, 444.0, 504.0, 564.0, 624.0, 692.0, 752.0,
+            812.0, 872.0, 932.0, 992.0,
+        ];
+        assert_eq!(g.cx.len(), want.len());
+        for (i, w) in want.iter().enumerate() {
+            assert!((g.cx[i] - w).abs() < 0.01, "cx[{i}] = {} 应为 {w}", g.cx[i]);
+        }
+    }
+
     #[test]
     fn 窗口几何与浏览器一致() {
         let d = dock_real();

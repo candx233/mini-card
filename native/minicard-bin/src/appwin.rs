@@ -261,48 +261,54 @@ pub fn reveal_in_explorer(path: &str) -> Result<(), String> {
     }
 }
 
-/// Dock 右键菜单：返回用户选了哪一项（0 = 取消/关掉）。
-/// `items` = (命令 id, 文案, 是否禁用)，id 由调用方分配。
-pub fn popup_menu(
-    owner: isize,
-    screen: (i32, i32),
-    items: &[(u32, String, bool)],
-) -> u32 {
+
+/// 「添加应用」用的系统文件选择框（comdlg32 的 GetOpenFileNameW，同步阻塞）
+pub fn pick_exe() -> Option<String> {
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+    let mut buf = [0u16; 1024];
+    let filter: Vec<u16> = "程序 (*.exe;*.lnk) *.exe;*.lnk 所有文件 (*.*) *.*  "
+        .encode_utf16()
+        .collect();
+    let title: Vec<u16> = "选择要添加到 Dock 的程序 ".encode_utf16().collect();
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: windows::core::PCWSTR(filter.as_ptr()),
+        lpstrFile: windows::core::PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: windows::core::PCWSTR(title.as_ptr()),
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+        ..Default::default()
+    };
+    let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+    if !ok.as_bool() {
+        return None;
+    }
+    let n = buf.iter().position(|c| *c == 0).unwrap_or(0);
+    if n == 0 {
+        None
+    } else {
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+/// 唤出迷你卡片主窗（Dock 右键「Dock 设置」走这条，不需要跟外壳加 IPC）
+pub fn raise_main_window() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, DestroyMenu, SetForegroundWindow, TrackPopupMenu,
-        MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+        FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
     };
     unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            return 0;
+        let Ok(h) = FindWindowW(
+            windows::core::w!("Tauri Window"),
+            windows::core::w!("Mini Card"),
+        ) else {
+            return false;
         };
-        for (id, label, disabled) in items {
-            let w = wide(label);
-            let flags = if *disabled {
-                MF_STRING | MF_GRAYED
-            } else {
-                MF_STRING
-            };
-            let _ = AppendMenuW(menu, flags, *id as usize, windows::core::PCWSTR(w.as_ptr()));
-        }
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
-        let cancel = wide("取消");
-        let _ = AppendMenuW(menu, MF_STRING, 0usize, windows::core::PCWSTR(cancel.as_ptr()));
-        let hwnd = windows::Win32::Foundation::HWND(owner as *mut _);
-        // 不抢前台的话菜单点外面不会消失（经典 Win32 坑）
-        let _ = SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
-            screen.0,
-            screen.1,
-            Some(0),
-            hwnd,
-            None,
-        );
-        let _ = DestroyMenu(menu);
-        cmd.0 as u32
+        let _ = ShowWindow(h, if IsIconic(h).as_bool() { SW_RESTORE } else { SW_SHOW });
+        let _ = SetForegroundWindow(h);
     }
+    true
 }
 
 #[cfg(test)]

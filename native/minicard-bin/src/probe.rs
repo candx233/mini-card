@@ -699,3 +699,41 @@ pub fn cal_flip(
     let t = calendar::Tokens::cal(240.0, 180.0);
     calendar::paint(g, te, pal, &t, &c, None)
 }
+
+/// 自绘右键菜单出图（`--probe menu` / `--probe menu-hover`）
+pub fn menu_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    hover: Option<usize>,
+) -> Result<()> {
+    let items = vec![
+        crate::menu::Item { label: "打开所在文件夹".into(), danger: false, disabled: false },
+        crate::menu::Item { label: "从 Dock 移除".into(), danger: true, disabled: false },
+        crate::menu::Item { label: "在此前加分隔线".into(), danger: false, disabled: false },
+        crate::menu::Item { label: "取消".into(), danger: false, disabled: false },
+    ];
+    // 先铺一层假壁纸（渐变），好看清圆角与描边
+    unsafe {
+        g.begin()?;
+        let full = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: 260.0,
+            bottom: 160.0,
+        };
+        minicard_draw::paint::set_color(
+            g,
+            windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+                r: 0.36,
+                g: 0.42,
+                b: 0.52,
+                a: 1.0,
+            },
+        )?;
+        g.d2d.FillRectangle(&full, &g.brush);
+        g.end()?;
+    }
+    crate::menu::paint(g, te, pal, &items, hover, 208.0, 140.0, None, 0.0)
+}
+

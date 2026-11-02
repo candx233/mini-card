@@ -828,45 +828,66 @@ pub fn run(
                     UiEvent::DockMenu { x, y, sx, sy } => {
                         let snap = DOCK_SNAP.lock().unwrap().clone();
                         if let Some((tk, geo)) = snap {
+                            let hwnd = dock_win.as_ref().map(|d| d.hwnd.0 as isize).unwrap_or(0);
                             match minicard_cards::dock::hit(&tk, &geo, x, y) {
                                 Some(i) => {
-                                    let Some(item) = cfg.dock.items.get(i).cloned() else { continue };
+                                    let Some(item) = cfg.dock.items.get(i).cloned() else {
+                                        continue;
+                                    };
                                     let is_url = item.path.starts_with("http");
-                                    let mut rows: Vec<(u32, String, bool)> = vec![
-                                        (1, "打开所在文件夹".into(), is_url),
-                                        (2, "从 Dock 移除".into(), false),
+                                    let mut rows: Vec<crate::menu::Item> = vec![
+                                        crate::menu::Item {
+                                            label: "打开所在文件夹".into(),
+                                            danger: false,
+                                            disabled: is_url,
+                                        },
+                                        crate::menu::Item {
+                                            label: "从 Dock 移除".into(),
+                                            danger: true,
+                                            disabled: false,
+                                        },
                                     ];
                                     if i > 0 {
-                                        rows.push((
-                                            3,
-                                            if item.divider_before {
+                                        rows.push(crate::menu::Item {
+                                            label: if item.divider_before {
                                                 "移除前面的分隔线".into()
                                             } else {
                                                 "在此前加分隔线".into()
                                             },
-                                            false,
-                                        ));
+                                            danger: false,
+                                            disabled: false,
+                                        });
                                     }
-                                    let hwnd = dock_win.as_ref().map(|d| d.hwnd.0 as isize).unwrap_or(0);
                                     minicard_shell::mlog!(
                                         "dock 右键：条目 [{i}] {} 菜单 {} 项",
                                         item.name,
                                         rows.len()
                                     );
-                                    let pick = crate::appwin::popup_menu(hwnd, (sx, sy), &rows);
-                                    minicard_shell::mlog!("dock 右键选择：{pick}");
+                                    let pick = crate::menu::show(
+                                        (sx, sy),
+                                        &rows,
+                                        &te,
+                                        &pal,
+                                        hwnd,
+                                        wall.as_ref(),
+                                        blur,
+                                        monitor_of(sx, sy),
+                                    );
+                                    minicard_shell::mlog!("dock 右键选择：{pick:?}");
                                     match pick {
-                                        1 => {
-                                            if let Err(e) = crate::appwin::reveal_in_explorer(&item.path) {
+                                        Some(0) => {
+                                            if let Err(e) =
+                                                crate::appwin::reveal_in_explorer(&item.path)
+                                            {
                                                 minicard_shell::mlog!("打开文件夹失败：{e}");
                                             }
                                         }
-                                        2 => {
+                                        Some(1) => {
                                             cfg.dock.items.remove(i);
                                             save_cfg(&cfg);
                                             dock_need_rebuild = true;
                                         }
-                                        3 => {
+                                        Some(2) => {
                                             if let Some(it) = cfg.dock.items.get_mut(i) {
                                                 it.divider_before = !it.divider_before;
                                             }
@@ -877,7 +898,54 @@ pub fn run(
                                     }
                                 }
                                 None => {
-                                    minicard_shell::mlog!("dock 右键：条空白区（菜单暂未实现）");
+                                    // 条空白区：添加应用 / Dock 设置
+                                    let rows = vec![
+                                        crate::menu::Item {
+                                            label: "添加应用…".into(),
+                                            danger: false,
+                                            disabled: false,
+                                        },
+                                        crate::menu::Item {
+                                            label: "Dock 设置".into(),
+                                            danger: false,
+                                            disabled: false,
+                                        },
+                                    ];
+                                    let pick = crate::menu::show(
+                                        (sx, sy),
+                                        &rows,
+                                        &te,
+                                        &pal,
+                                        hwnd,
+                                        wall.as_ref(),
+                                        blur,
+                                        monitor_of(sx, sy),
+                                    );
+                                    minicard_shell::mlog!("dock 空白区菜单选择：{pick:?}");
+                                    match pick {
+                                        Some(0) => {
+                                            if let Some(path) = crate::appwin::pick_exe() {
+                                                let name = std::path::Path::new(&path)
+                                                    .file_stem()
+                                                    .map(|s| s.to_string_lossy().to_string())
+                                                    .unwrap_or_else(|| path.clone());
+                                                cfg.dock.items.push(minicard_core::config::DockItem {
+                                                    name,
+                                                    path: path.clone(),
+                                                    ..Default::default()
+                                                });
+                                                save_cfg(&cfg);
+                                                dock_need_rebuild = true;
+                                                minicard_shell::mlog!("dock 添加：{path}");
+                                            }
+                                        }
+                                        Some(1) => {
+                                            if !crate::appwin::raise_main_window() {
+                                                minicard_shell::mlog!("没找到主窗口（可能在托盘里）");
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                         }

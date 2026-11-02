@@ -9,6 +9,7 @@
 mod anim;
 mod guide;
 mod appwin;
+mod menu;
 mod live;
 mod probe;
 
@@ -287,7 +288,7 @@ impl App {
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
-                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar" || name == "dock" || name == "cal-flip"
+                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar" || name == "dock" || name == "cal-flip" || name == "menu" || name == "menu-hover"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -303,6 +304,8 @@ impl App {
                     "music" => probe::music_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "music-flip" => probe::music_flip(&self.gfx, &self.te, &self.pal, self.roll_ms),
                     "dock" => probe::dock_sheet(&self.gfx, &self.te, &self.pal),
+                    "menu" => probe::menu_sheet(&self.gfx, &self.te, &self.pal, None),
+                    "menu-hover" => probe::menu_sheet(&self.gfx, &self.te, &self.pal, Some(1)),
                     "cal-flip" => probe::cal_flip(&self.gfx, &self.te, &self.pal, self.roll_ms),
                     "weather" => probe::weather_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
                     "todo" => probe::todo_sheet(&self.gfx, &self.te, &self.pal, self.debug_layout),
