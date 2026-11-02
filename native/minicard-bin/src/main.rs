@@ -8,6 +8,7 @@
 
 mod anim;
 mod guide;
+mod appwin;
 mod live;
 mod probe;
 

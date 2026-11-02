@@ -71,6 +71,7 @@ impl Tokens {
 }
 
 /// 一帧的放大布局（全部是**窗内**逻辑坐标）
+#[derive(Clone)]
 pub struct Geo {
     pub ks: Vec<f32>,
     /// 各图标中心 x
@@ -292,6 +293,21 @@ pub fn paint(
     Ok(())
 }
 
+/// 窗内坐标 (x, y) 命中哪个图标（用**画出来的**那一帧 `Geo`，与绘制同源）。
+/// 盒子 = 图标视觉框（`size·k` 见方、底边贴 `icon_bottom`），再往下多认 6px 让运行点也能点。
+pub fn hit(t: &Tokens, geo: &Geo, x: f32, y: f32) -> Option<usize> {
+    let bottom = t.icon_bottom();
+    for (i, &cx) in geo.cx.iter().enumerate() {
+        let k = geo.ks.get(i).copied().unwrap_or(1.0);
+        let half = t.size * k / 2.0;
+        let top = bottom - t.size * k;
+        if x >= cx - half && x <= cx + half && y >= top && y <= bottom + 6.0 {
+            return Some(i);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +495,38 @@ mod tests {
         for (i, p) in want_p {
             assert!((g.cx[i] - p).abs() < 0.002, "pos[{i}] = {} 应为 {p}", g.cx[i]);
         }
+    }
+
+    /// 命中测试：静止态点每个图标中心都命中自己，落在两图标之间返回 None
+    #[test]
+    fn 命中测试与绘制同源() {
+        let d = dock_real();
+        let t = Tokens::dock(&d);
+        let g = t.geo(&d, None, 0.0);
+        for i in 0..16 {
+            let hit = hit(&t, &g, g.cx[i], t.icon_bottom() - t.size / 2.0);
+            assert_eq!(hit, Some(i), "第 {i} 个中心");
+        }
+        // 两个图标正中间的空隙（静止态 gap 12，中心右侧 24+6 = 30 处必然是空隙）
+        assert_eq!(hit(&t, &g, g.cx[3] + 30.0, t.icon_bottom() - t.size / 2.0), None);
+        // 条上方 40px（放大预留区）不该命中
+        assert_eq!(hit(&t, &g, g.cx[5], t.icon_bottom() - t.size - 40.0), None);
+    }
+
+    /// 放大态：点放大后的图标边缘也算命中（盒子跟着 k 变）
+    #[test]
+    fn 放大态命中跟着视觉盒子() {
+        let d = dock_real();
+        let t = Tokens::dock(&d);
+        let px = t.side + d.item_center_x(8);
+        let g = t.geo(&d, Some(px), 1.0);
+        let k = g.ks[8];
+        assert!(k > 1.4, "{k}");
+        let half = t.size * k / 2.0;
+        // 视觉框右沿内 1px：命中
+        assert_eq!(hit(&t, &g, g.cx[8] + half - 1.0, t.icon_bottom() - 8.0), Some(8));
+        // 视觉框右沿外 3px：不命中（放大后邻居已经让开）
+        assert_eq!(hit(&t, &g, g.cx[8] + half + 3.0, t.icon_bottom() - 8.0), None);
     }
 
     /// 临界阻尼：单步不会过冲，约 3τ 到 95%

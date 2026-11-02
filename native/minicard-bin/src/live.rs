@@ -36,9 +36,15 @@ use minicard_shell::gfx::Gfx;
 enum UiEvent {
     Click { hwnd: isize, x: i32, y: i32 },
     DragEnd { hwnd: isize },
+    /// Dock 图标点击（窗内逻辑坐标）
+    DockClick { x: f32, y: f32 },
 }
 
 static EVENTS: Mutex<Vec<UiEvent>> = Mutex::new(Vec::new());
+
+/// 最近一帧画出来的 Dock 几何（含 Tokens）：点击命中必须走这一份（与绘制同源）
+static DOCK_SNAP: Mutex<Option<(minicard_cards::dock::Tokens, minicard_cards::dock::Geo)>> =
+    Mutex::new(None);
 
 struct Drag {
     hwnd: isize,
@@ -108,6 +114,9 @@ struct DockWin {
     next_draw: Instant,
     /// 下一次「静置兜底重绘」的时刻（1s，与醒来节拍分开）
     next_paint: Instant,
+    /// 运行中指示点（每 2s 扫一次可见窗口）
+    running: Vec<bool>,
+    next_running: Instant,
 }
 
 /// Dock 窗的「可点区域」（窗内逻辑矩形 + 是否已放开上方预留）。
@@ -677,6 +686,8 @@ pub fn run(
                         last_sig: 0,
                         next_draw: Instant::now(),
                         next_paint: Instant::now(),
+                        running: vec![false; d.items.len()],
+                        next_running: Instant::now(),
                     };
                     DOCK_HWND.store(dw.hwnd.0 as isize, Ordering::Relaxed);
                     dock_set_hit(&dw.t, false);
@@ -721,6 +732,19 @@ pub fn run(
                 match ev {
                     UiEvent::Click { hwnd, x, y } => {
                         click(&mut wins, &mut cfg, &te, &pal, HWND(hwnd as *mut _), x, y);
+                    }
+                    UiEvent::DockClick { x, y } => {
+                        let snap = DOCK_SNAP.lock().unwrap().clone();
+                        if let Some((tk, geo)) = snap {
+                            if let Some(i) = minicard_cards::dock::hit(&tk, &geo, x, y) {
+                                if let Some(item) = cfg.dock.items.get(i) {
+                                    let r = crate::appwin::click(&item.path, &item.args);
+                                    minicard_shell::mlog!("dock 点击 [{}] {} → {r}", i, item.name);
+                                }
+                            } else {
+                                minicard_shell::mlog!("dock 点击 ({x:.0},{y:.0}) 未命中图标");
+                            }
+                        }
                     }
                     UiEvent::DragEnd { hwnd } => {
                         drag_end(&mut wins, &mut cfg, &wall, blur, HWND(hwnd as *mut _));
@@ -930,6 +954,26 @@ pub fn run(
                         );
                     }
                 }
+                // 运行点：2s 一轮（可见顶层窗口 → exe），变了就强制重绘一次
+                if now >= dw.next_running {
+                    let set = crate::appwin::running_set();
+                    let want: Vec<bool> = cfg
+                        .dock
+                        .items
+                        .iter()
+                        .map(|it| {
+                            let key = it.path.replace('/', "\\").to_lowercase();
+                            crate::appwin::item_running(&key, &set)
+                        })
+                        .collect();
+                    if want != dw.running {
+                        let n_on = want.iter().filter(|b| **b).count();
+                        minicard_shell::mlog!("dock 运行点：{n_on}/{}", want.len());
+                        dw.running = want;
+                        dw.last_sig = 0;
+                    }
+                    dw.next_running = now + Duration::from_secs(2);
+                }
                 let sig = (dw.ease * 4096.0) as u64 * 1_000_003
                     + (dw.px * 8.0) as u64
                     + hit.is_some() as u64;
@@ -940,7 +984,7 @@ pub fn run(
                     let DockWin { gfx, t: tk, icons, glass, .. } = dw;
                     let refs: Vec<Option<&ID2D1Bitmap1>> =
                         icons.iter().map(|o| o.as_ref()).collect();
-                    let running = vec![false; icons.len()];
+                    let running = dw.running.clone();
                     let gg = if std::env::var("MC_DOCK_NOGLASS").is_ok() {
                         None
                     } else {
@@ -948,6 +992,7 @@ pub fn run(
                     };
                     let paint_t0 = Instant::now();
                     let geo = tk.geo(&cfg.dock, Some(dw.px), dw.ease);
+                    *DOCK_SNAP.lock().unwrap() = Some((*tk, geo.clone()));
                     let r = minicard_cards::dock::paint(
                         gfx, &te, &pal, tk, &cfg.dock, &geo, &refs, &running, gg,
                     );
@@ -1622,6 +1667,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
         }
         WM_LBUTTONDOWN => {
+            // Dock 窗不拖整条（D3 再做），按下直接吞掉，抬手时才判断点了哪个图标
+            if hwnd.0 as isize == DOCK_HWND.load(Ordering::Relaxed) {
+                return LRESULT(0);
+            }
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let mut r = RECT::default();
@@ -1696,6 +1745,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            if hwnd.0 as isize == DOCK_HWND.load(Ordering::Relaxed) {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let mut r = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut r);
+                let dpi = GetDpiForWindow(hwnd) as f32;
+                let s = if dpi > 0.0 { dpi / 96.0 } else { 1.0 };
+                let x = (pt.x - r.left) as f32 / s;
+                let y = (pt.y - r.top) as f32 / s;
+                let _ = EVENTS.lock().unwrap().push(UiEvent::DockClick { x, y });
+                return LRESULT(0);
+            }
             let d = DRAG.lock().unwrap().take();
             let _ = ReleaseCapture();
             crate::guide::hide();
