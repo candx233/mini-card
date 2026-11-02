@@ -631,7 +631,13 @@ pub fn dock_sheet(
 
     // 图标：%APPDATA%\mini-card\icons\<fnv1a(小写反斜杠路径)>.png
     let mut bitmaps: Vec<Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>> = Vec::new();
+    // 验收用：MC_DOCK_NOICONS=1 强制所有条目取不到图标 → 看首字母色块兜底
+    let no_icons = std::env::var("MC_DOCK_NOICONS").is_ok();
     for it in &d.items {
+        if no_icons {
+            bitmaps.push(None);
+            continue;
+        }
         let path = icon_cache_path(it);
         match path.and_then(|p| minicard_draw::image::decode_file(&p).ok()) {
             Some(img) => match minicard_draw::image::bitmap(g, &minicard_draw::image::downscale(&img, 96)) {
