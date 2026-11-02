@@ -228,6 +228,83 @@ pub fn launch(path: &str, args: &str) -> Result<(), String> {
     }
 }
 
+
+/// 在资源管理器里选中该文件（右键菜单「打开所在文件夹」）
+pub fn reveal_in_explorer(path: &str) -> Result<(), String> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let p = path.replace('/', "\\");
+    if p.trim().is_empty() || p.starts_with("http") || p.contains("://") {
+        return Err("网址没有所在文件夹".into());
+    }
+    // .lnk 先解析到真实目标：直接 select 一个快捷方式会让资源管理器跳到桌面
+    let target = lnk_target(&p).unwrap_or(p);
+    let args = format!("/select,\"{target}\"");
+    let op = wide("open");
+    let file = wide("explorer.exe");
+    let params = wide(&args);
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::PCWSTR(op.as_ptr()),
+            windows::core::PCWSTR(file.as_ptr()),
+            windows::core::PCWSTR(params.as_ptr()),
+            windows::core::PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = r.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(format!("ShellExecuteW 返回 {code}"))
+    }
+}
+
+/// Dock 右键菜单：返回用户选了哪一项（0 = 取消/关掉）。
+/// `items` = (命令 id, 文案, 是否禁用)，id 由调用方分配。
+pub fn popup_menu(
+    owner: isize,
+    screen: (i32, i32),
+    items: &[(u32, String, bool)],
+) -> u32 {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AppendMenuW, CreatePopupMenu, DestroyMenu, SetForegroundWindow, TrackPopupMenu,
+        MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    };
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return 0;
+        };
+        for (id, label, disabled) in items {
+            let w = wide(label);
+            let flags = if *disabled {
+                MF_STRING | MF_GRAYED
+            } else {
+                MF_STRING
+            };
+            let _ = AppendMenuW(menu, flags, *id as usize, windows::core::PCWSTR(w.as_ptr()));
+        }
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
+        let cancel = wide("取消");
+        let _ = AppendMenuW(menu, MF_STRING, 0usize, windows::core::PCWSTR(cancel.as_ptr()));
+        let hwnd = windows::Win32::Foundation::HWND(owner as *mut _);
+        // 不抢前台的话菜单点外面不会消失（经典 Win32 坑）
+        let _ = SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            screen.0,
+            screen.1,
+            Some(0),
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+        cmd.0 as u32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -272,6 +272,15 @@ impl Gfx {
         unsafe { self.d2d.PopLayer() };
     }
 
+    /// 断开这个窗口的合成（重设尺寸要换一份 Gfx 时先调它）：
+    /// 同一条 HWND 上再 `CreateTargetForHwnd` 会报 DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED。
+    pub fn detach(&self) {
+        unsafe {
+            let _ = self._target.SetRoot(None);
+            let _ = self._comp.Commit();
+        }
+    }
+
     pub fn push_clip(&self) -> Result<()> {
         unsafe {
             let params = D2D1_LAYER_PARAMETERS1 {

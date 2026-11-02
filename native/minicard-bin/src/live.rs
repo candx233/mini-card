@@ -40,6 +40,8 @@ enum UiEvent {
     DockClick { x: f32, y: f32 },
     /// Dock 拖拽松手（窗内逻辑 x）
     DockDrop { x: f32 },
+    /// Dock 右键（窗内坐标 + 屏幕坐标：TrackPopupMenu 要屏幕点）
+    DockMenu { x: f32, y: f32, sx: i32, sy: i32 },
 }
 
 static EVENTS: Mutex<Vec<UiEvent>> = Mutex::new(Vec::new());
@@ -103,7 +105,8 @@ struct CardWin {
 /// Dock 自绘窗口（D0：静态条；D1 接 hover 放大）
 struct DockWin {
     hwnd: HWND,
-    gfx: Gfx,
+    /// 换尺寸时要先断开旧合成再建新的，所以包一层 Option
+    gfx: Option<Gfx>,
     t: minicard_cards::dock::Tokens,
     icons: Vec<Option<ID2D1Bitmap1>>,
     /// 壁纸切片（与卡片同一口径：pad + 高斯模糊）
@@ -696,7 +699,7 @@ pub fn run(
                     let dk_dpi = dpi;
                     let mut dw = DockWin {
                         hwnd,
-                        gfx,
+                        gfx: Some(gfx),
                         t: dk,
                         icons,
                         glass: glass_pair,
@@ -759,6 +762,7 @@ pub fn run(
             }
             // 窗口消息里只记事件；动作在这里做（能正常借用 wins/cfg/te）
             let events: Vec<UiEvent> = { EVENTS.lock().unwrap().drain(..).collect() };
+            let mut dock_need_rebuild = false;
             for ev in events {
                 match ev {
                     UiEvent::Click { hwnd, x, y } => {
@@ -821,8 +825,91 @@ pub fn run(
                             }
                         }
                     }
+                    UiEvent::DockMenu { x, y, sx, sy } => {
+                        let snap = DOCK_SNAP.lock().unwrap().clone();
+                        if let Some((tk, geo)) = snap {
+                            match minicard_cards::dock::hit(&tk, &geo, x, y) {
+                                Some(i) => {
+                                    let Some(item) = cfg.dock.items.get(i).cloned() else { continue };
+                                    let is_url = item.path.starts_with("http");
+                                    let mut rows: Vec<(u32, String, bool)> = vec![
+                                        (1, "打开所在文件夹".into(), is_url),
+                                        (2, "从 Dock 移除".into(), false),
+                                    ];
+                                    if i > 0 {
+                                        rows.push((
+                                            3,
+                                            if item.divider_before {
+                                                "移除前面的分隔线".into()
+                                            } else {
+                                                "在此前加分隔线".into()
+                                            },
+                                            false,
+                                        ));
+                                    }
+                                    let hwnd = dock_win.as_ref().map(|d| d.hwnd.0 as isize).unwrap_or(0);
+                                    minicard_shell::mlog!(
+                                        "dock 右键：条目 [{i}] {} 菜单 {} 项",
+                                        item.name,
+                                        rows.len()
+                                    );
+                                    let pick = crate::appwin::popup_menu(hwnd, (sx, sy), &rows);
+                                    minicard_shell::mlog!("dock 右键选择：{pick}");
+                                    match pick {
+                                        1 => {
+                                            if let Err(e) = crate::appwin::reveal_in_explorer(&item.path) {
+                                                minicard_shell::mlog!("打开文件夹失败：{e}");
+                                            }
+                                        }
+                                        2 => {
+                                            cfg.dock.items.remove(i);
+                                            save_cfg(&cfg);
+                                            dock_need_rebuild = true;
+                                        }
+                                        3 => {
+                                            if let Some(it) = cfg.dock.items.get_mut(i) {
+                                                it.divider_before = !it.divider_before;
+                                            }
+                                            save_cfg(&cfg);
+                                            dock_need_rebuild = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None => {
+                                    minicard_shell::mlog!("dock 右键：条空白区（菜单暂未实现）");
+                                }
+                            }
+                        }
+                    }
                     UiEvent::DragEnd { hwnd } => {
                         drag_end(&mut wins, &mut cfg, &wall, blur, HWND(hwnd as *mut _));
+                    }
+                }
+            }
+
+            if let Some(i) = std::env::var("MC_DOCK_RM")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                use std::sync::OnceLock;
+                static T0: OnceLock<Instant> = OnceLock::new();
+                let t0 = *T0.get_or_init(Instant::now);
+                if t0.elapsed().as_secs_f32() > 2.0 && cfg.dock.items.get(i).is_some() {
+                    let n = cfg.dock.items.remove(i);
+                    save_cfg(&cfg);
+                    minicard_shell::mlog!(
+                        "dock 移除测试：条目 [{i}] {}，剩 {} 项",
+                        n.name,
+                        cfg.dock.items.len()
+                    );
+                    dock_need_rebuild = true;
+                }
+            }
+            if dock_need_rebuild {
+                if let Some(dw) = dock_win.as_mut() {
+                    if let Err(e) = dock_rebuild(dw, &cfg, &wall, blur) {
+                        minicard_shell::mlog!("dock 重建失败：{e:?}");
                     }
                 }
             }
@@ -1193,6 +1280,7 @@ pub fn run(
                     };
                     let paint_t0 = Instant::now();
                     *DOCK_SNAP.lock().unwrap() = Some((*tk, geo.clone()));
+                    let Some(gfx) = gfx.as_ref() else { continue };
                     let r = minicard_cards::dock::paint(
                         gfx, &te, &pal, tk, &cfg.dock, &geo, &refs, &running, gg,
                         bubble.as_ref(), drag_draw.as_ref(),
@@ -1804,6 +1892,99 @@ fn dock_icon_path(it: &minicard_core::config::DockItem) -> Option<std::path::Pat
     if p.exists() { Some(p) } else { None }
 }
 
+/// 条目增减（右键「从 Dock 移除」/改分隔线）后重建 Dock 窗：
+/// 尺寸变了 → SetWindowPos + 换一份 Gfx（swapchain 跟着尺寸）+ 重切玻璃 + 重载图标。
+fn dock_rebuild(
+    dw: &mut DockWin,
+    cfg: &Config,
+    wall: &Option<glass::Wall>,
+    blur: f32,
+) -> Result<()> {
+    use minicard_core::config::Dock;
+    let d = cfg.dock.clone();
+    let dk = minicard_cards::dock::Tokens::dock(&d);
+    let s = dw.dpi / 96.0;
+    let w_px = (dk.w * s).round() as i32;
+    let h_px = (dk.h * s).round() as i32;
+    let x = (d.cx - dk.w / 2.0).round() as i32;
+    let y = (d.y + Dock::MARGIN - dk.top).round() as i32;
+    unsafe {
+        let _ = SetWindowPos(
+            dw.hwnd,
+            None,
+            x,
+            y,
+            w_px,
+            h_px,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    dw.t = dk;
+    if let Some(old) = &dw.gfx {
+        old.detach();
+    }
+    dw.gfx = None; // 先把旧 Gfx 丢干净，否则 CreateTargetForHwnd 会报 WINDOW_ALREADY_COMPOSED
+    dw.gfx = Some(Gfx::new(dw.hwnd, w_px as u32, h_px as u32, dw.dpi, minicard_cards::dock::RADIUS)?);
+    // 玻璃：与建窗时同一口径
+    let pad_px = ((blur * 3.0).max(60.0) * dw.dpi / 96.0).round() as i32;
+    let mon = monitor_of(x, y);
+    dw.glass = match wall {
+        Some(w) => {
+            let cap = glass::from_wallpaper(
+                w,
+                (mon.2, mon.3),
+                (x as f32 - mon.0, y as f32 - mon.1),
+                (w_px as u32, h_px as u32),
+                pad_px as f32,
+                blur * dw.dpi / 96.0,
+            );
+            match dw.gfx.as_ref().unwrap().bitmap_from_bgra(&cap.bgra, cap.w, cap.h) {
+                Ok(b) => {
+                    let pad_dip = pad_px as f32 * 96.0 / dw.dpi;
+                    Some((
+                        b,
+                        D2D_RECT_F {
+                            left: -pad_dip,
+                            top: -pad_dip,
+                            right: dk.w + pad_dip,
+                            bottom: dk.h + pad_dip,
+                        },
+                    ))
+                }
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
+    // 图标重载（下标全变了）
+    dw.icons.clear();
+    for it in &d.items {
+        let bmp = dock_icon_path(it)
+            .and_then(|p| minicard_draw::image::decode_file(&p).ok())
+            .and_then(|img| {
+                let small = minicard_draw::image::downscale(&img, 96);
+                minicard_draw::image::bitmap(dw.gfx.as_ref().unwrap(), &small).ok()
+            });
+        dw.icons.push(bmp);
+    }
+    dw.origin = (x, y);
+    dw.running = vec![false; d.items.len()];
+    dw.drag_from = None;
+    dw.settle_t0 = None;
+    dw.bubble_a = 0.0;
+    dw.last_sig = 0;
+    dw.region_open = false;
+    dock_set_hit(&dw.t, false);
+    *DOCK_SNAP.lock().unwrap() = None;
+    minicard_shell::mlog!(
+        "dock 重建：{} 项，窗口 {}×{}",
+        d.items.len(),
+        w_px,
+        h_px
+    );
+    Ok(())
+}
+
 fn win_dpi(hwnd: HWND) -> f32 {
     unsafe { GetDpiForWindow(hwnd) as f32 }
 }
@@ -1993,6 +2174,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
             }
             LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            if hwnd.0 as isize == DOCK_HWND.load(Ordering::Relaxed) {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let mut r = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut r);
+                let dpi = GetDpiForWindow(hwnd) as f32;
+                let s = if dpi > 0.0 { dpi / 96.0 } else { 1.0 };
+                let _ = EVENTS.lock().unwrap().push(UiEvent::DockMenu {
+                    x: (pt.x - r.left) as f32 / s,
+                    y: (pt.y - r.top) as f32 / s,
+                    sx: pt.x,
+                    sy: pt.y,
+                });
+                return LRESULT(0);
+            }
+            return LRESULT(0);
         }
         WM_CAPTURECHANGED => {
             if let Some(d) = DRAG.lock().unwrap().take() {
