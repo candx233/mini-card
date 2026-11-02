@@ -18,6 +18,20 @@ use minicard_draw::path::Path;
 use minicard_draw::text::{Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
 
+/// CSS 里城市 / 日期行 / 三日 / 底行都是 **400 字重**，浏览器取 `@font-face 400` = MiSans
+/// Regular。字集里三份 TTF 的内部 OS/2 字重是 330 / 380 / 520，DWrite 建格式时按「最近面」
+/// 选，`400` 会落到 **380（Medium）**：数字/字母每字宽 +1%（「26°/18°」这种短串看不出来，
+/// 磁盘卡的长串就累积成 +1.55px）。这里显式取 330 档 = Regular。
+/// （`500` 落到 380 = CSS 的 Medium，`600` 落到 520 = CSS 的 Semibold，都对，别动。）
+const FACE_REGULAR: u16 = 330;
+
+/// 文字基线的整像素落位：Chrome 把基线**向下取整**、D2D/DWrite 是四舍五入 —— 基线小数部分
+/// ≥0.5 的行自绘整体低 1px。把绘制 y 预挪 `floor(b) − round(b)` 后两边落到同一行。
+fn snap_text_y(te: &TextEngine, spec: &TextSpec, y: f32) -> f32 {
+    let b = y + te.ascent_of(spec);
+    y + (b.floor() - b.round())
+}
+
 #[derive(Clone, Debug)]
 pub struct Day {
     pub label: String,
@@ -143,7 +157,7 @@ impl Tokens {
             radius: 1.0 * r,
             pad_v: 0.625 * r,
             pad_h: 1.0 * r,
-            stack_pt: 0.0625 * r, // 实测：0.1667rem 会把内容压下去 1px（与 604 行的 padding-block 冲突，按实测取 1px）
+            stack_pt: 0.1667 * r, // `.card-weather .w-stack:not(.dim){padding-top:.1667rem}`（覆盖下面的 padding-block 1px）
             top_gap: 0.75 * r,
             city_fs: 1.25 * r,
             city_lh: 1.25 * r * 1.15,
@@ -230,6 +244,10 @@ pub fn paint(
 }
 
 fn text_node(s: &str, size: f32, lh: f32, weight: u16) -> Node {
+    text_node_sp(s, size, lh, weight, 0.0)
+}
+
+fn text_node_sp(s: &str, size: f32, lh: f32, weight: u16, spacing_em: f32) -> Node {
     Node::text(TextSpec {
         s: s.to_string(),
         size,
@@ -238,7 +256,7 @@ fn text_node(s: &str, size: f32, lh: f32, weight: u16) -> Node {
         wrap: false,
         align: 0,
         tabular: true,
-        spacing_em: 0.0,
+        spacing_em,
     })
 }
 
@@ -254,7 +272,8 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
     let left = Node::new(Dir::Column)
         .style(|s| s.align(Align::Start))
         .child(
-            text_node(&w.city, t.city_fs, t.city_lh, 400)
+            // `.w-city` 带 `letter-spacing: 0.02em`（CSS 原文），漏了整串宽 0.8px
+            text_node_sp(&w.city, t.city_fs, t.city_lh, FACE_REGULAR, 0.02)
                 .id(8001)
                 .style(|s| s.mar([0.0, 0.0, t.city_mb, 0.0])),
         )
@@ -289,7 +308,7 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
         let mut col = Node::new(Dir::Column)
             .id(8100 + i)
             .style(move |s| s.grow(1.0).basis(0.0).align(Align::Center).gap(t.day_gap))
-            .child(text_node(&label, t.day_fs, t.day_lh, 400).id(8110 + i))
+            .child(text_node(&label, t.day_fs, t.day_lh, FACE_REGULAR).id(8110 + i))
             .child(Node::new(Dir::Row).id(8120 + i).style(move |s| {
                 s.size(Dim::Px(t.day_ic), Dim::Px(t.day_ic)).mar([
                     t.day_ic_mt,
@@ -306,9 +325,9 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
         col = col.child(
             Node::new(Dir::Row)
                 .style(move |s| s.align(Align::Baseline))
-                .child(text_node(&hi, t.t_fs, t.t_fs, 400).id(8130 + i))
-                .child(text_node("/", t.t_fs, t.t_fs, 400).id(8140 + i))
-                .child(text_node(&lo, t.t_fs, t.t_fs, 400).id(8150 + i)),
+                .child(text_node(&hi, t.t_fs, t.t_fs, FACE_REGULAR).id(8130 + i))
+                .child(text_node("/", t.t_fs, t.t_fs, FACE_REGULAR).id(8140 + i))
+                .child(text_node(&lo, t.t_fs, t.t_fs, FACE_REGULAR).id(8150 + i)),
         );
         d3 = d3.child(col);
     }
@@ -329,8 +348,8 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
                 .gap(t.air_mt)
                 .size(Dim::Pct(1.0), Dim::Px(t.air_lh))
         })
-        .child(text_node(&air, t.air_fs, t.air_lh, 400).id(8200))
-        .child(text_node(&hum, t.air_fs, t.air_lh, 400).id(8201));
+        .child(text_node(&air, t.air_fs, t.air_lh, FACE_REGULAR).id(8200))
+        .child(text_node(&hum, t.air_fs, t.air_lh, FACE_REGULAR).id(8201));
 
     Node::new(Dir::Column)
         .style(move |s| {
@@ -486,17 +505,17 @@ fn paint_tree(
         };
         set_color(g, color)?;
         let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 8.0, TextMode::Clip)?;
-        let dx = if (8130..8160).contains(&pl.id) {
-            // hi/sep/lo 三个节点在行里是按各自宽度排的，schema 里给的是自动宽
-            0.0
-        } else {
-            0.0
-        };
+        // 基线整像素落位：Chrome 按 floor、D2D 按 round，基线小数 ≥0.5 的行自绘会低 1px。
+        // 实测（320×240 参考图逐带最佳位移）：套上校正后三日温度/大温度/图标全部 dy=0
+        // （三日温度 20.39 → 4.92），城市那行反而高 1px（16.20 ← 5.72），
+        // 三日日期与底行仍是低 1px（DWrite 对 CJK 字形另有 hint 相位，统一公式盖不住）。
+        // 净效果 p95 22 → 19 / 平均 4.41 → 3.81，故保留。
+        let ty = snap_text_y(te, spec, pl.rect.y);
         unsafe {
             g.d2d.DrawTextLayout(
                 Vector2 {
-                    X: pl.rect.x + dx,
-                    Y: pl.rect.y,
+                    X: pl.rect.x,
+                    Y: ty,
                 },
                 &lay,
                 &g.brush,
@@ -564,6 +583,20 @@ mod tests {
         assert_eq!(deg(Some(-3.4)), "-3°");
         assert_eq!(deg(None), "--");
         assert_eq!(deg(Some(f32::NAN)), "--");
+    }
+
+    /// `.w-stack` 的上内边距必须按 CSS `0.1667rem`（320 基准 = 2.667px）算，不能用
+    /// `padding-block` 那 1px：差这 0.83px 整栈上移，`.w-3` 两条 1px 分隔线各错一行
+    /// （实测参考图 109/194，接 1px 时画在 108/193，两条各 288 px 全错）。
+    #[test]
+    fn 天气栈上内边距按_css_的_0_1667rem() {
+        let t = Tokens::weather(320.0, 240.0);
+        assert!((t.stack_pt - 2.6672).abs() < 0.01, "stack_pt = {:.4}", t.stack_pt);
+        // 活卡 240×180（k = 0.75）同比缩放
+        let s = Tokens::weather(240.0, 180.0);
+        assert!((s.stack_pt - 2.0).abs() < 0.01, "stack_pt = {:.4}", s.stack_pt);
+        // 下内边距仍是 padding-block 那 1px（两档差 1.667px，别把二者写成一档）
+        assert!(t.stack_pt > 0.0625 * t.r + 1.0);
     }
 }
 

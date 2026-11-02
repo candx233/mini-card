@@ -16,8 +16,15 @@ use windows_numerics::Vector2;
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, Rect, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_round};
-use minicard_draw::text::TextEngine;
+use minicard_draw::text::{Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
+
+/// CSS 里 `.used` / `.pct` / 徽标字母都是 **400 字重**，浏览器取 `@font-face 400` = MiSans
+/// Regular。字集里三份 TTF 的内部 OS/2 字重是 330 / 380 / 520，而 DWrite 建格式时按
+/// 「离得最近的面」选：`400` 落到 **380（Medium）**。Medium 的 tnum 数字每字宽 604/1000 em，
+/// Regular 是 595 —— 长串「279 GB / 466 GB」因此宽 +1.55px（浏览器 111.23 / 自绘 112.78），
+/// 数字越往右错得越多（末位 2px），整行字形边缘全错位。按「CSS 400 ↔ 330 档」显式取面。
+const FACE_REGULAR: u16 = 330;
 
 pub struct Disk {
     pub name: String,
@@ -206,7 +213,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             s: letter,
             size: 1.0625 * t.r,
             line_h: 1.0625 * t.r, // line-height:1
-            weight: 400,
+            weight: FACE_REGULAR, // CSS 400（见 FACE_REGULAR 注释）
             wrap: false,
             align: 2, // 居中
             tabular: false,
@@ -232,7 +239,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             s: format!("{} / {}", fmt_size(d.used), fmt_size(d.total)),
             size: t.fs,
             line_h: t.line_h,
-            weight: 400,
+            weight: FACE_REGULAR, // CSS 400
             wrap: false,
             align: 0,
             // 实测 tabular 更接近浏览器（比例数字反而差 13.5 vs 11.6）：
@@ -244,7 +251,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             s: format!("{}%", pct),
             size: t.pct_fs,
             line_h: t.line_h,
-            weight: if warn { 600 } else { 400 },
+            weight: if warn { 600 } else { FACE_REGULAR },
             wrap: false,
             align: 1,
             tabular: true,
@@ -354,18 +361,19 @@ fn paint_tree(
         } else {
             (p.rect.x, box_w)
         };
-        let fmt = te.format_cached(spec.size, spec.line_h, spec.align)?;
-        let lay = te.layout_cached(
-            spec.align,
-            &fmt,
-            &spec.s,
-            w,
-            parent.h.max(spec.line_h) + 8.0,
-            spec.tabular,
-        )?;
+        // 用 spec 建布局：缓存键含字重（`layout_cached`/`format_cached` 的口径是固定 400，
+        // 而 `.pct` 在告警态是 600 —— 走那条路会把两种字面的布局混用）
+        let lay = te.layout_spec(spec, w, parent.h.max(spec.line_h) + 8.0, TextMode::Clip)?;
         // 徽标字母没有阴影（CSS 只在 .card 上给 text-shadow，理论上所有字都有；
         // 但徽标是 mono 小字，实测与浏览器一致的做法是照画）
         // 硬边副本 → 换成 CSS 的模糊阴影（0 0.833px 1.667px black 45%）
+        let ty = if (2000..2500).contains(&p.id) {
+            // 徽标字母是 grid `place-items:center` 居中的（基线相位与普通行盒不同，实测
+            // 不校正就已经对齐），别套一般文字那条 floor-vs-round 校正。
+            p.rect.y
+        } else {
+            snap_text_y(te, spec, p.rect.y)
+        };
         {
             let mut total = 0.0f32;
             let mut taps = [(0.0f32, 0.0f32, 0.0f32); 9];
@@ -395,7 +403,7 @@ fn paint_tree(
                     g.d2d.DrawTextLayout(
                         Vector2 {
                             X: x + ox,
-                            Y: p.rect.y + 0.833 + oy,
+                            Y: ty + 0.833 + oy,
                         },
                         &lay,
                         &g.brush,
@@ -425,7 +433,7 @@ fn paint_tree(
         )?;
         unsafe {
             g.d2d.DrawTextLayout(
-                Vector2 { X: x, Y: p.rect.y },
+                Vector2 { X: x, Y: ty },
                 &lay,
                 &g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -439,13 +447,20 @@ fn paint_tree(
         };
         let pct = pct_of(d);
         let warn = warn90 && pct > 90.0;
-        let r = p.rect.h / 2.0;
+        // 进度条上下边缘按设备行吸附：浏览器里 `.bar{overflow:hidden}` 的裁剪框是**整像素**的
+        // （参考图 y27/36 全底色、y28..35 整行满亮），跟着分数坐标画会在 28/35 各摊半行
+        // （实测 175/180 vs 参考 222，每根条两行 × 5 根 = 差 >30 的一千多像素）。
+        // 吸附方向是 **round**，不是 floor/ceil：五根条实测 28..35 / 62..68 / 95..101 /
+        // 128..135 / 161..168，逐根 = round(top)..round(bottom)（floor/ceil 会让 61.55 那根
+        // 多出一行，反而多差 190 px）。
+        let bar = snap_bar_rect(p.rect);
+        let r = bar.h / 2.0;
         set_color(g, pal.track12)?;
-        fill_round(g, to_d2d(p.rect), r)?;
+        fill_round(g, to_d2d(bar), r)?;
         if pct > 0.0 {
-            let w = p.rect.w * (pct / 100.0);
+            let w = bar.w * (pct / 100.0);
             set_color(g, if warn { pal.warn } else { pal.fill })?;
-            fill_round(g, to_d2d(Rect { w, ..p.rect }), r)?;
+            fill_round(g, to_d2d(Rect { w, ..bar }), r)?;
         }
     }
     for c in &p.children {
@@ -462,3 +477,127 @@ fn to_d2d(r: Rect) -> D2D_RECT_F {
         bottom: r.bottom(),
     }
 }
+
+/// 进度条的设备行吸附（浏览器 `.bar` 的 overflow 裁剪框是整像素的）：上下边各四舍五入到
+/// 整行。五根条实测 = 28..35 / 62..68 / 95..101 / 128..135 / 161..168。
+fn snap_bar_rect(r: Rect) -> Rect {
+    let top = r.y.round();
+    let bottom = r.bottom().round();
+    Rect {
+        x: r.x,
+        y: top,
+        w: r.w,
+        h: bottom - top,
+    }
+}
+
+/// 文字基线的整像素落位：Chrome 把基线**向下取整**（floor），D2D/DWrite 是四舍五入。
+/// 于是基线小数部分 ≥0.5 的那些行，自绘整体低 1px（实测 d5 档五行：y 分数 .109/.391 的
+/// 三行低 1px、.672/.953 的两行正好，「最佳位移」-1/0 与 floor-vs-round 逐行吻合）。
+/// 这里把绘制 y 预挪 `floor(b) − round(b)`，两边就落在同一行。
+fn snap_text_y(te: &TextEngine, spec: &TextSpec, y: f32) -> f32 {
+    let b = y + te.ascent_of(spec);
+    y + (b.floor() - b.round())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn engine() -> TextEngine {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts");
+        let files: Vec<PathBuf> = ["MiSans-Regular.ttf", "MiSans-Medium.ttf", "MiSans-Semibold.ttf"]
+            .iter()
+            .map(|n| dir.join(n))
+            .filter(|p| p.exists())
+            .collect();
+        let refs: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
+        TextEngine::new_weights(&refs, "MiSans").expect("字体")
+    }
+
+    fn run(s: &str, size: f32, weight: u16) -> f32 {
+        let spec = TextSpec {
+            s: s.to_string(),
+            size,
+            line_h: size * 1.3,
+            weight,
+            wrap: false,
+            align: 0,
+            tabular: true,
+            spacing_em: 0.0,
+        };
+        engine().measure(&spec, 4096.0).0
+    }
+
+    /// `.used` 的数字串宽度必须等于浏览器 `Range` 量出来的 111.234 ——
+    /// CSS 400 字重若落到 Medium（内部 OS/2 380）会宽到 112.78（+1.55px），
+    /// 整行数字越往右漂得越多，字形边缘全错位（d5 档 p95 89 → 22 的主因）。
+    #[test]
+    fn 磁盘数字串宽度与浏览器一致() {
+        let w = run("279 GB / 466 GB", 14.0625, FACE_REGULAR);
+        assert!(
+            (w - 111.234).abs() < 0.15,
+            "「279 GB / 466 GB」宽 {w:.3}，浏览器 111.234"
+        );
+        let w400 = run("279 GB / 466 GB", 14.0625, 400);
+        assert!(
+            w400 > w + 1.0,
+            "FACE_REGULAR 没起作用：400 字重仍量出 {w400:.3}（应落到 Medium 112.78）"
+        );
+        let p = run("60%", 14.0625, FACE_REGULAR);
+        assert!((p - 28.226).abs() < 0.15, "「60%」宽 {p:.3}，浏览器 28.226");
+    }
+
+    /// 进度条吸附：五根条实测的整行区间（与参考图逐行对过）。
+    #[test]
+    fn 进度条吸附到设备行() {
+        let cases = [
+            (28.27f32, 35.77f32, 28.0f32, 36.0f32),
+            (61.55, 69.05, 62.0, 69.0),
+            (94.83, 102.33, 95.0, 102.0),
+            (128.11, 135.61, 128.0, 136.0),
+            (161.39, 168.89, 161.0, 169.0),
+        ];
+        for (top, bottom, want_top, want_bottom) in cases {
+            let r = Rect {
+                x: 44.34375,
+                y: top,
+                w: 184.40625,
+                h: bottom - top,
+            };
+            let s = snap_bar_rect(r);
+            assert_eq!(s.y, want_top, "{top} 的顶边应吸到 {want_top}");
+            assert_eq!(s.bottom(), want_bottom, "{bottom} 的底边应吸到 {want_bottom}");
+            assert_eq!(s.x, r.x, "横向不吸附（浏览器只有 overflow 裁剪框吸整行）");
+        }
+    }
+
+    /// 基线落位：只有小数部分 ≥0.5 的那些行会被挪 1px（实测五行的 y 分数与最佳位移吻合）。
+    #[test]
+    fn 基线落位只挪半像素以上的相位() {
+        let te = engine();
+        let spec = TextSpec {
+            s: "279 GB / 466 GB".into(),
+            size: 14.0625,
+            line_h: 18.28125,
+            weight: FACE_REGULAR,
+            wrap: false,
+            align: 0,
+            tabular: true,
+            spacing_em: 0.0,
+        };
+        for (y, want) in [
+            (8.109f32, 7.109f32),
+            (41.391, 40.391),
+            (74.672, 74.672),
+            (107.953, 107.953),
+            (141.234, 140.234),
+        ] {
+            let got = snap_text_y(&te, &spec, y);
+            assert!((got - want).abs() < 1e-3, "y={y} → {got:.3}，应为 {want:.3}");
+        }
+    }
+}
+
