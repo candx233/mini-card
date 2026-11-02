@@ -125,6 +125,9 @@ struct DockWin {
     next_draw: Instant,
     /// 下一次「静置兜底重绘」的时刻（1s，与醒来节拍分开）
     next_paint: Instant,
+    /// 上一帧的时刻：动画的 dt 必须用它算（用 `next_draw` 会得到 0 → 退回 1/60，
+    /// 在 120Hz 下会让 260ms 的进场变成 520ms）
+    last_t: Instant,
     /// 运行中指示点（每 2s 扫一次可见窗口）
     running: Vec<bool>,
     next_running: Instant,
@@ -706,6 +709,7 @@ pub fn run(
                         last_sig: 0,
                         next_draw: Instant::now(),
                         next_paint: Instant::now(),
+                        last_t: Instant::now(),
                         running: vec![false; d.items.len()],
                         next_running: Instant::now(),
                         drag_from: None,
@@ -992,9 +996,10 @@ pub fn run(
                     dw.px = x;
                 }
                 let moving = (dw.ease - target).abs() > 0.0015 || dw.ease_v.abs() > 0.01;
+                let frame_dt = (now - dw.last_t).as_secs_f32().clamp(1.0 / 240.0, 0.05);
+                dw.last_t = now;
                 if moving {
-                    let dt = (now - dw.next_draw.min(now)).as_secs_f32().min(0.05);
-                    let dt = if dt <= 0.0 { 1.0 / 60.0 } else { dt };
+                    let dt = frame_dt;
                     let (e, v) =
                         minicard_cards::dock::step_ease(dw.ease, dw.ease_v, target, dt, 0.05);
                     dw.ease = e;
@@ -1131,8 +1136,7 @@ pub fn run(
                 }
                 let bubble_target =
                     if dragging { 0.0 } else if flash_left > 0.0 || hover_i.is_some() { 1.0 } else { 0.0 };
-                let dt_b = (now - dw.next_draw.min(now)).as_secs_f32().clamp(0.0, 0.05);
-                let dt_b = if dt_b <= 0.0 { 1.0 / 60.0 } else { dt_b };
+                let dt_b = frame_dt;
                 let bubble_moving = (dw.bubble_a - bubble_target).abs() > 0.001;
                 if bubble_moving {
                     let dv = dt_b / 0.12;
