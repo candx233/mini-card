@@ -58,6 +58,11 @@ pub struct Palette {
     pub fg30: D2D1_COLOR_F,
     /// hover 时的控件描边（fg 44%）
     pub fg44: D2D1_COLOR_F,
+    /// Dock 名字气泡：底色/字色（深色主题 = 深底浅字，浅色主题反过来）。
+    /// CSS 口径是 `--bubble-bg: bg 84%` —— 不能用 `veil`（veil 是 fg 的低透明度版，
+    /// 94% 会变成一块白板，白字压上去等于没字）。
+    pub bubble_bg: D2D1_COLOR_F,
+    pub bubble_fg: D2D1_COLOR_F,
     /// `--on-accent`：压在强调色上的字色
     pub on_accent: D2D1_COLOR_F,
 }
@@ -86,6 +91,8 @@ impl Palette {
             fg_soft: D2D1_COLOR_F { a: 0.06, ..fg },
             fg30: D2D1_COLOR_F { a: 0.30, ..fg },
             fg44: D2D1_COLOR_F { a: 0.44, ..fg },
+            bubble_bg: D2D1_COLOR_F { r: 0.09, g: 0.09, b: 0.11, a: 0.88 },
+            bubble_fg: fg,
         }
     }
 

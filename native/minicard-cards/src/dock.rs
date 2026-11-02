@@ -109,6 +109,29 @@ impl Tokens {
     }
 }
 
+/// 名字气泡：条上方 44px、居中于图标、`2px 8px` 内边距、圆角 8、1px 描边
+pub struct Bubble<'a> {
+    pub text: &'a str,
+    /// 图标视觉中心（窗内 x）
+    pub cx: f32,
+    /// 进场进度 0..1（`translateY(2px)` → 0，透明度同步）
+    pub alpha: f32,
+}
+
+/// 气泡的目标矩形（`alpha` 只影响那 2px 位移）
+pub fn bubble_rect(t: &Tokens, text_w: f32, cx: f32, alpha: f32) -> D2D_RECT_F {
+    let w = (text_w + 18.0).min(t.w * 0.9);
+    let x = (cx - w / 2.0).clamp(6.0, (t.w - w - 6.0).max(6.0));
+    // 玻璃条下沿就是窗口下沿：`bottom: bar-h + 44` 换算成窗内坐标
+    let bottom = t.h - (t.bar_h + 44.0) + 2.0 * (1.0 - alpha.clamp(0.0, 1.0));
+    D2D_RECT_F {
+        left: x,
+        top: bottom - 24.0,
+        right: x + w,
+        bottom,
+    }
+}
+
 /// 第 i 个图标的分组线是否在它左边
 fn div_before(d: &Dock, i: usize) -> bool {
     i > 0 && d.items.get(i).map(|it| it.divider_before).unwrap_or(false)
@@ -137,6 +160,7 @@ pub fn paint(
     icons: &[Option<&ID2D1Bitmap1>],
     running: &[bool],
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
+    bubble: Option<&Bubble>,
 ) -> Result<()> {
     let n = d.items.len().min(geo.cx.len());
     let bar = geo.bar;
@@ -272,6 +296,63 @@ pub fn paint(
                 windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a: 0.85, ..pal.fg },
             )?;
             fill_path(g, &dot)?;
+        }
+
+        // 名字气泡（在条上方，先垫底再写字）
+        if let Some(b) = bubble {
+            if b.alpha > 0.01 {
+                let spec = TextSpec {
+                    s: b.text.to_string(),
+                    size: 12.0,
+                    line_h: 18.0,
+                    weight: 400,
+                    wrap: false,
+                    // 0 = 左对齐：先按 max_w 排版量宽度，再按量出来的宽度贴气泡左内边距画。
+                    // 写 2（居中）会在这条 max_w 的布局盒里居中 → 文字被推到气泡外面去。
+                    align: 0,
+                    tabular: false,
+                    spacing_em: 0.0,
+                };
+                let max_w = (t.w * 0.9 - 20.0).max(20.0);
+                let lay = te.layout_spec(&spec, max_w, 20.0, Mode::Clip)?;
+                let mut m = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
+                let _ = lay.GetMetrics(&mut m);
+                let tw = m.widthIncludingTrailingWhitespace;
+                let r = bubble_rect(t, tw, b.cx, b.alpha);
+                set_color(
+                    g,
+                    windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+                        a: pal.bubble_bg.a * b.alpha,
+                        ..pal.bubble_bg
+                    },
+                )?;
+                fill_round(g, r, 8.0)?;
+                set_color(
+                    g,
+                    windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+                        a: b.alpha,
+                        ..pal.border
+                    },
+                )?;
+                stroke_round(g, r, 8.0, 1.0)?;
+                set_color(
+                    g,
+                    windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+                        a: b.alpha,
+                        ..pal.bubble_fg
+                    },
+                )?;
+                // 文本在气泡内居中（左右各 9 = padding 8 + 描边 1）
+                g.d2d.DrawTextLayout(
+                    windows_numerics::Vector2 {
+                        X: r.left + 9.0,
+                        Y: r.top + (24.0 - 18.0) / 2.0,
+                    },
+                    &lay,
+                    &g.brush,
+                    windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
         }
 
         // 描边：1px 落整像素，跟着条一起宽
@@ -527,6 +608,25 @@ mod tests {
         assert_eq!(hit(&t, &g, g.cx[8] + half - 1.0, t.icon_bottom() - 8.0), Some(8));
         // 视觉框右沿外 3px：不命中（放大后邻居已经让开）
         assert_eq!(hit(&t, &g, g.cx[8] + half + 3.0, t.icon_bottom() - 8.0), None);
+    }
+
+    /// 气泡几何：高 24、条上方 44、左右夹紧在窗内、进场时下移 2px
+    #[test]
+    fn 气泡位置与夹紧() {
+        let d = dock_real();
+        let t = Tokens::dock(&d);
+        let r = bubble_rect(&t, 60.0, t.w / 2.0, 1.0);
+        assert!((r.bottom - (t.h - t.bar_h - 44.0)).abs() < 1e-4, "{}", r.bottom);
+        assert!((r.bottom - r.top - 24.0).abs() < 1e-4);
+        assert!((r.right - r.left - 78.0).abs() < 1e-4); // 60 + 18
+        // 进场中：底部低 2px
+        let r0 = bubble_rect(&t, 60.0, t.w / 2.0, 0.0);
+        assert!((r0.bottom - r.bottom - 2.0).abs() < 1e-4);
+        // 靠左/靠右都不越出窗口
+        let l = bubble_rect(&t, 60.0, 0.0, 1.0);
+        assert!(l.left >= 5.99);
+        let rr = bubble_rect(&t, 60.0, t.w, 1.0);
+        assert!(rr.right <= t.w - 5.99);
     }
 
     /// 临界阻尼：单步不会过冲，约 3τ 到 95%

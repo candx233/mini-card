@@ -117,6 +117,10 @@ struct DockWin {
     /// 运行中指示点（每 2s 扫一次可见窗口）
     running: Vec<bool>,
     next_running: Instant,
+    /// 名字气泡：进场进度 / 点击反馈文案（+ 显示时长）
+    bubble_a: f32,
+    flash: Option<(String, Instant)>,
+    flash_ms: f32,
 }
 
 /// Dock 窗的「可点区域」（窗内逻辑矩形 + 是否已放开上方预留）。
@@ -141,7 +145,7 @@ fn dock_set_hit(t: &minicard_cards::dock::Tokens, open: bool) {
 
 impl DockWin {
     /// 指针（屏幕 px）→ 窗内逻辑坐标；返回是否落在「激活区」内
-    fn pointer(&self, dpi: f32) -> Option<f32> {
+    fn pointer(&self, dpi: f32) -> Option<(f32, f32)> {
         let mut pt = windows::Win32::Foundation::POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut pt);
@@ -157,7 +161,7 @@ impl DockWin {
         };
         let in_bar = x >= 0.0 && x <= self.t.w && y >= self.t.top - grow && y <= self.t.h;
         if in_bar {
-            Some(x.clamp(0.0, self.t.w))
+            Some((x.clamp(0.0, self.t.w), y))
         } else {
             None
         }
@@ -688,6 +692,9 @@ pub fn run(
                         next_paint: Instant::now(),
                         running: vec![false; d.items.len()],
                         next_running: Instant::now(),
+                        bubble_a: 0.0,
+                        flash: None,
+                        flash_ms: 1.2,
                     };
                     DOCK_HWND.store(dw.hwnd.0 as isize, Ordering::Relaxed);
                     dock_set_hit(&dw.t, false);
@@ -740,6 +747,19 @@ pub fn run(
                                 if let Some(item) = cfg.dock.items.get(i) {
                                     let r = crate::appwin::click(&item.path, &item.args);
                                     minicard_shell::mlog!("dock 点击 [{}] {} → {r}", i, item.name);
+                                    // 点击反馈：气泡立刻改成结果文案（与 dock.html 的
+                                    // 「启动中…/已最小化/已切到前台/失败：…」同口径）
+                                    if let Some(dw) = dock_win.as_mut() {
+                                        let (txt, ms) = match r.as_str() {
+                                            "launched" => ("启动中…".to_string(), 1.5),
+                                            "minimized" => ("已最小化".to_string(), 1.2),
+                                            "activated" => ("已切到前台".to_string(), 1.2),
+                                            other => (format!("打开失败：{other}"), 2.2),
+                                        };
+                                        dw.flash = Some((txt, Instant::now()));
+                                        dw.flash_ms = ms;
+                                        dw.last_sig = 0;
+                                    }
                                 }
                             } else {
                                 minicard_shell::mlog!("dock 点击 ({x:.0},{y:.0}) 未命中图标");
@@ -891,7 +911,7 @@ pub fn run(
                 *CARD_RECTS.lock().unwrap() = rects;
             }
 
-            // Dock：悬停放大（每帧算，指针不动就不重绘）
+            // Dock：悬停放大 + 名字气泡（每帧算，指针不动就不重绘）
             let mut dock_busy = false;
             let mut dock_paint_ms = 0.0f32;
             if let Some(dw) = dock_win.as_mut() {
@@ -899,8 +919,7 @@ pub fn run(
                 // 验收用：`MC_DOCK_DEMO=<窗内 x>` 把指针钉死，不依赖真鼠标（截图取证）
                 let demo_x = std::env::var("MC_DOCK_DEMO").ok().and_then(|s| s.parse::<f32>().ok());
                 // 性能台架：`MC_DOCK_SWEEP=1` 让指针在条上来回扫（真鼠标会被抢走，量不了帧率）
-                let sweep = std::env::var("MC_DOCK_SWEEP").is_ok();
-                let sweep_x = if sweep {
+                let sweep_x = if std::env::var("MC_DOCK_SWEEP").is_ok() {
                     use std::sync::OnceLock;
                     static T0: OnceLock<Instant> = OnceLock::new();
                     let t0 = T0.get_or_init(Instant::now);
@@ -909,21 +928,24 @@ pub fn run(
                 } else {
                     None
                 };
-                let hit = match (demo_x, sweep_x) {
+                let ptr = dw.pointer(dpi);
+                let px_in = match (demo_x, sweep_x) {
                     (Some(x), _) => Some(x),
                     (None, Some(x)) => Some(x),
-                    _ => dw.pointer(dpi),
+                    _ => ptr.map(|p| p.0),
                 };
+                let hit = px_in;
                 // 进出场：临界阻尼（τ=50ms），与 dock.html 同一个时钟感
                 let target = if hit.is_some() { 1.0 } else { 0.0 };
-                if let Some(x) = hit {
+                if let Some(x) = px_in {
                     dw.px = x;
                 }
                 let moving = (dw.ease - target).abs() > 0.0015 || dw.ease_v.abs() > 0.01;
                 if moving {
                     let dt = (now - dw.next_draw.min(now)).as_secs_f32().min(0.05);
                     let dt = if dt <= 0.0 { 1.0 / 60.0 } else { dt };
-                    let (e, v) = minicard_cards::dock::step_ease(dw.ease, dw.ease_v, target, dt, 0.05);
+                    let (e, v) =
+                        minicard_cards::dock::step_ease(dw.ease, dw.ease_v, target, dt, 0.05);
                     dw.ease = e;
                     dw.ease_v = v;
                 } else if target == 0.0 {
@@ -940,20 +962,6 @@ pub fn run(
                     dock_set_hit(&dw.t, want_open);
                     dw.region_open = want_open;
                 }
-                if std::env::var("MC_DOCK_LOG").is_ok() {
-                    use std::sync::atomic::{AtomicU64, Ordering};
-                    static LAST: AtomicU64 = AtomicU64::new(0);
-                    let ms = t_start.elapsed().as_millis() as u64;
-                    if ms - LAST.load(Ordering::Relaxed) >= 900 {
-                        LAST.store(ms, Ordering::Relaxed);
-                        let mut pt = windows::Win32::Foundation::POINT::default();
-                        let _ = GetCursorPos(&mut pt);
-                        minicard_shell::mlog!(
-                            "dock 诊断：光标 ({},{}) 原点 {:?} hit={:?} ease={:.3}",
-                            pt.x, pt.y, dw.origin, hit, dw.ease
-                        );
-                    }
-                }
                 // 运行点：2s 一轮（可见顶层窗口 → exe），变了就强制重绘一次
                 if now >= dw.next_running {
                     let set = crate::appwin::running_set();
@@ -961,10 +969,7 @@ pub fn run(
                         .dock
                         .items
                         .iter()
-                        .map(|it| {
-                            let key = it.path.replace('/', "\\").to_lowercase();
-                            crate::appwin::item_running(&key, &set)
-                        })
+                        .map(|it| crate::appwin::item_running(&crate::appwin::match_key(&it.path), &set))
                         .collect();
                     if want != dw.running {
                         let n_on = want.iter().filter(|b| **b).count();
@@ -974,12 +979,76 @@ pub fn run(
                     }
                     dw.next_running = now + Duration::from_secs(2);
                 }
+                // 几何每帧算一份：命中与绘制必须同源
+                let tk = dw.t;
+                let geo = tk.geo(&cfg.dock, Some(dw.px), dw.ease);
+                // demo/sweep 时用钉住的 x（否则真鼠标在哪气泡就去哪，截图不可复现）
+                let hover_pt = if demo_x.is_some() || sweep_x.is_some() {
+                    px_in.map(|x| (x, tk.icon_bottom() - tk.size / 2.0))
+                } else {
+                    ptr
+                };
+                let hover_i = hover_pt.and_then(|(x, y)| minicard_cards::dock::hit(&tk, &geo, x, y));
+                if std::env::var("MC_DOCK_LOG").is_ok() {
+                    use std::sync::atomic::{AtomicU64, Ordering as O};
+                    static LAST: AtomicU64 = AtomicU64::new(0);
+                    let ms = t_start.elapsed().as_millis() as u64;
+                    if ms - LAST.load(O::Relaxed) >= 900 {
+                        LAST.store(ms, O::Relaxed);
+                        minicard_shell::mlog!(
+                            "dock 状态：px_in={:?} hover={:?} a={:.2} ease={:.2} cx8={:?} k8={:?} bottom={:.1} pt={:?}",
+                            px_in, hover_i, dw.bubble_a, dw.ease,
+                            geo.cx.get(8).copied(), geo.ks.get(8).copied(),
+                            tk.icon_bottom(), hover_pt
+                        );
+                    }
+                }
+
+                // 气泡：点击反馈（"启动中…"）优先，其次悬停的名字；120ms 淡入淡出
+                let flash_left = dw
+                    .flash
+                    .as_ref()
+                    .map(|(_, t0)| dw.flash_ms - now.duration_since(*t0).as_secs_f32())
+                    .unwrap_or(-1.0);
+                if flash_left <= 0.0 {
+                    dw.flash = None;
+                }
+                let bubble_target = if flash_left > 0.0 || hover_i.is_some() { 1.0 } else { 0.0 };
+                let dt_b = (now - dw.next_draw.min(now)).as_secs_f32().clamp(0.0, 0.05);
+                let dt_b = if dt_b <= 0.0 { 1.0 / 60.0 } else { dt_b };
+                let bubble_moving = (dw.bubble_a - bubble_target).abs() > 0.001;
+                if bubble_moving {
+                    let dv = dt_b / 0.12;
+                    dw.bubble_a = if bubble_target > dw.bubble_a {
+                        (dw.bubble_a + dv).min(1.0)
+                    } else {
+                        (dw.bubble_a - dv).max(0.0)
+                    };
+                }
+                let bubble_txt: Option<String> = if flash_left > 0.0 {
+                    dw.flash.as_ref().map(|(s, _)| s.clone())
+                } else if dw.bubble_a > 0.01 {
+                    hover_i.and_then(|i| cfg.dock.items.get(i).map(|it| it.name.clone()))
+                } else {
+                    None
+                };
+                let bubble = bubble_txt.as_ref().map(|s| minicard_cards::dock::Bubble {
+                    text: s.as_str(),
+                    cx: hover_i
+                        .and_then(|i| geo.cx.get(i).copied())
+                        .unwrap_or(dw.px),
+                    alpha: dw.bubble_a,
+                });
+
                 let sig = (dw.ease * 4096.0) as u64 * 1_000_003
                     + (dw.px * 8.0) as u64
-                    + hit.is_some() as u64;
+                    + hit.is_some() as u64
+                    + (dw.bubble_a * 1024.0) as u64 * 7919
+                    + hover_i.unwrap_or(999) as u64 * 31
+                    + flash_left.max(0.0) as u64 * 104_729;
                 // 静置兜底 1s 一回；悬停但指针不动**不重绘**（否则白烧 60fps）
                 let idle_due = now >= dw.next_paint;
-                if moving || sig != dw.last_sig || idle_due {
+                if moving || bubble_moving || sig != dw.last_sig || idle_due {
                     dw.next_paint = now + Duration::from_millis(1000);
                     let DockWin { gfx, t: tk, icons, glass, .. } = dw;
                     let refs: Vec<Option<&ID2D1Bitmap1>> =
@@ -995,14 +1064,14 @@ pub fn run(
                     *DOCK_SNAP.lock().unwrap() = Some((*tk, geo.clone()));
                     let r = minicard_cards::dock::paint(
                         gfx, &te, &pal, tk, &cfg.dock, &geo, &refs, &running, gg,
+                        bubble.as_ref(),
                     );
                     let _ = r;
                     dock_paint_ms = paint_t0.elapsed().as_secs_f32() * 1000.0;
                     dw.last_sig = sig;
                     if std::env::var("MC_DOCK_LOG").is_ok() {
-                        use std::sync::Mutex as M;
-                        static LAST_PAINT: M<Option<Instant>> = M::new(None);
-                        static DTS: M<Vec<f32>> = M::new(Vec::new());
+                        static LAST_PAINT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+                        static DTS: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
                         let prev = *LAST_PAINT.lock().unwrap();
                         *LAST_PAINT.lock().unwrap() = Some(now);
                         if let Some(pv) = prev {
@@ -1019,28 +1088,21 @@ pub fn run(
                             let p95 = v[n * 95 / 100];
                             let mx = v[n - 1];
                             minicard_shell::mlog!(
-                                "dock 帧间隔 p50 {p50:.1} / p95 {p95:.1} / max {mx:.1} ms（{n} 帧）绘制 {:.2} ms",
-                                dock_paint_ms
+                                "dock 帧间隔 p50 {p50:.1} / p95 {p95:.1} / max {mx:.1} ms（{n} 帧）绘制 {dock_paint_ms:.2} ms"
                             );
                             v.clear();
                         }
                     }
                 }
                 // 悬停/动画中 60fps：**绝对节拍**（`next += 16.667ms`）而不是 `now += 16.667ms`
-                // —— 后者会把每帧的睡眠误差累进节拍，跑成 59.x fps，合成器偶尔取到重复帧 = 慢速抖动
-                if moving || hit.is_some() {
-                    // 桌面上层 DComp 窗的 Present(1) 不等 vblank（实测），所以帧率由这个 deadline 定。
-                    // 用 120Hz 让合成器每次取样都拿到新帧（60Hz 呈现 + 抖动 → 偶发重复帧 = 顿一下）
+                if moving || hit.is_some() || bubble_moving {
                     let hz: u64 = std::env::var("MC_DOCK_HZ").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
                     let step = Duration::from_micros(1_000_000 / hz.max(30));
-                    // 从静置切回悬停时，next_draw 可能还是「1 秒后」——必须重新起拍，
-                    // 否则第一帧要等满 1 秒（实测 max 106ms 的元凶）
                     if dw.next_draw > now + step * 3 {
                         dw.next_draw = now;
                     }
                     let mut next = dw.next_draw + step;
                     if next < now {
-                        // 落后一帧以上：对齐到「下一个 16.667 网格」，不补帧
                         let us = 1_000_000 / hz.max(30);
                         let behind = ((now - next).as_micros() / us as u128) as u64 + 1;
                         next += Duration::from_micros(us * behind);
