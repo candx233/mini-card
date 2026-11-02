@@ -560,3 +560,101 @@ mod cover_tests {
         let _ = &mut img;
     }
 }
+
+
+/// 面积平均降采样（预乘 BGRA）。用于「每帧都要缩放」的小图：
+/// 先在 CPU 上降到目标尺寸，之后逐帧用 `draw_linear` 就足够干净，也便宜很多
+/// （D2D 的 HIGH_QUALITY_CUBIC 每帧对 256px 源做 3~5× 降采样是可见的帧预算）。
+pub fn downscale(img: &Image, target_max: u32) -> Image {
+    let m = img.w.max(img.h);
+    if target_max == 0 || m <= target_max {
+        return Image { w: img.w, h: img.h, bgra: img.bgra.clone() };
+    }
+    let k = target_max as f32 / m as f32;
+    let nw = ((img.w as f32 * k).round() as u32).max(1);
+    let nh = ((img.h as f32 * k).round() as u32).max(1);
+    let mut out = vec![0u8; (nw * nh * 4) as usize];
+    for oy in 0..nh {
+        let y0 = oy as f32 * img.h as f32 / nh as f32;
+        let y1 = (oy + 1) as f32 * img.h as f32 / nh as f32;
+        for ox in 0..nw {
+            let x0 = ox as f32 * img.w as f32 / nw as f32;
+            let x1 = (ox + 1) as f32 * img.w as f32 / nw as f32;
+            let mut acc = [0f32; 4];
+            let mut wsum = 0f32;
+            let iy0 = y0.floor() as u32;
+            let iy1 = (y1.ceil() as u32).min(img.h);
+            let ix0 = x0.floor() as u32;
+            let ix1 = (x1.ceil() as u32).min(img.w);
+            for sy in iy0..iy1 {
+                let wy = (y1.min(sy as f32 + 1.0) - y0.max(sy as f32)).max(0.0);
+                for sx in ix0..ix1 {
+                    let wx = (x1.min(sx as f32 + 1.0) - x0.max(sx as f32)).max(0.0);
+                    let w = wy * wx;
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let i = ((sy * img.w + sx) * 4) as usize;
+                    for c in 0..4 {
+                        acc[c] += img.bgra[i + c] as f32 * w;
+                    }
+                    wsum += w;
+                }
+            }
+            let o = ((oy * nw + ox) * 4) as usize;
+            for c in 0..4 {
+                out[o + c] = (acc[c] / wsum.max(1e-6)).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    Image { w: nw, h: nh, bgra: out }
+}
+
+#[cfg(test)]
+mod downscale_tests {
+    use super::*;
+
+    fn solid(w: u32, h: u32, px: [u8; 4]) -> Image {
+        Image { w, h, bgra: px.iter().copied().cycle().take((w * h * 4) as usize).collect() }
+    }
+
+    /// 纯色降采样后还是同一个颜色、尺寸按比例缩到目标上限
+    #[test]
+    fn 纯色不变_尺寸按上限() {
+        let img = solid(256, 256, [10, 20, 30, 255]);
+        let d = downscale(&img, 96);
+        assert_eq!((d.w, d.h), (96, 96));
+        assert_eq!(&d.bgra[0..4], &[10, 20, 30, 255]);
+    }
+
+    /// 4×4 棋盘（黑白交替）降到 2×2 → 四块都应该是灰（面积平均）
+    #[test]
+    fn 棋盘降采样变灰() {
+        let mut bgra = vec![0u8; 4 * 4 * 4];
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let v = if (x + y) % 2 == 0 { 255u8 } else { 0 };
+                let i = ((y * 4 + x) * 4) as usize;
+                bgra[i] = v;
+                bgra[i + 1] = v;
+                bgra[i + 2] = v;
+                bgra[i + 3] = 255;
+            }
+        }
+        let d = downscale(&Image { w: 4, h: 4, bgra }, 2);
+        assert_eq!((d.w, d.h), (2, 2));
+        for i in 0..4 {
+            let v = d.bgra[i * 4];
+            assert!((v as i32 - 127).abs() <= 1, "第 {i} 块 = {v}");
+        }
+    }
+
+    /// 已经比上限小的图原样返回
+    #[test]
+    fn 小图不动() {
+        let img = solid(48, 48, [1, 2, 3, 4]);
+        let d = downscale(&img, 96);
+        assert_eq!((d.w, d.h), (48, 48));
+        assert_eq!(d.bgra, img.bgra);
+    }
+}

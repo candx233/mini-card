@@ -43,7 +43,10 @@ pub struct Gfx {
     _comp: IDCompositionDevice,
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
-    layer: ID2D1Layer,
+    /// 层池：D2D 的 layer 资源**同一时刻只能用一个**，嵌套 push（圆角裁剪 + 不透明度）会报
+    /// 0x88990013（LAYER_ALREADY_IN_USE）→ 按嵌套深度各取一层
+    layers: std::cell::RefCell<Vec<ID2D1Layer>>,
+    depth: std::cell::Cell<usize>,
     clip: ID2D1Geometry,
     pub w: f32, // DIPs
     pub h: f32,
@@ -136,7 +139,7 @@ impl Gfx {
             comp.Commit()?;
 
             let brush = d2d.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, None)?;
-            let layer = d2d.CreateLayer(None)?;
+            let first_layer = d2d.CreateLayer(None)?;
             let w = w_px as f32 * 96.0 / dpi;
             let h = h_px as f32 * 96.0 / dpi;
             let clip_geo = factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
@@ -158,7 +161,8 @@ impl Gfx {
                 _comp: comp,
                 _target: comp_target,
                 _visual: visual,
-                layer,
+                layers: std::cell::RefCell::new(vec![first_layer]),
+                depth: std::cell::Cell::new(0),
                 clip,
                 w,
                 h,
@@ -248,6 +252,26 @@ impl Gfx {
         }
     }
 
+    /// 取第 `depth` 层（不够就建），并推进深度
+    fn next_layer(&self) -> Result<ID2D1Layer> {
+        let d = self.depth.get();
+        let mut v = self.layers.borrow_mut();
+        while v.len() <= d {
+            let l = unsafe { self.d2d.CreateLayer(None) }?;
+            v.push(l);
+        }
+        self.depth.set(d + 1);
+        Ok(v[d].clone())
+    }
+
+    fn pop_layer(&self) {
+        let d = self.depth.get();
+        if d > 0 {
+            self.depth.set(d - 1);
+        }
+        unsafe { self.d2d.PopLayer() };
+    }
+
     pub fn push_clip(&self) -> Result<()> {
         unsafe {
             let params = D2D1_LAYER_PARAMETERS1 {
@@ -259,13 +283,64 @@ impl Gfx {
                 opacityBrush: core::mem::ManuallyDrop::new(None),
                 layerOptions: D2D1_LAYER_OPTIONS1_NONE,
             };
-            self.d2d.PushLayer(&params, &self.layer);
+            let layer = self.next_layer()?;
+            self.d2d.PushLayer(&params, &layer);
             Ok(())
         }
     }
 
     pub fn pop_clip(&self) {
-        unsafe { self.d2d.PopLayer() };
+        self.pop_layer();
+    }
+
+    /// 按**任意圆角矩形**裁一层（`push_clip` 的通用版）。
+    /// 玻璃必须裁成条的圆角形状：整窗裁剪的圆角只在窗口边界上，条自己那圈角是方的。
+    pub fn push_clip_round(&self, rect: D2D_RECT_F, radius: f32) -> Result<()> {
+        unsafe {
+            let geo = self.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: radius,
+                radiusY: radius,
+            })?;
+            let params = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: rect,
+                geometricMask: core::mem::ManuallyDrop::new(Some(geo.cast()?)),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: 1.0,
+                opacityBrush: core::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+            };
+            let layer = self.next_layer()?;
+            self.d2d.PushLayer(&params, &layer);
+            Ok(())
+        }
+    }
+
+    pub fn pop_clip_round(&self) {
+        self.pop_layer();
+    }
+
+    /// 整层不透明度（翻月/翻页那种「淡入 + 位移」用：`opacity` 0.2 → 1）
+    pub fn push_opacity(&self, opacity: f32) -> Result<()> {
+        unsafe {
+            let params = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: D2D_RECT_F { left: 0.0, top: 0.0, right: self.w, bottom: self.h },
+                geometricMask: core::mem::ManuallyDrop::new(None),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: opacity.clamp(0.0, 1.0),
+                opacityBrush: core::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+            };
+            let layer = self.next_layer()?;
+            self.d2d.PushLayer(&params, &layer);
+            Ok(())
+        }
+    }
+
+    pub fn pop_opacity(&self) {
+        self.pop_layer();
     }
 
     /// 屏幕截图 → D2D 位图（dpi 与窗口一致，1 物理像素 = 1 DIP 的 96/dpi 倍）

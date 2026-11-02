@@ -144,10 +144,9 @@ pub fn paint(
 
         // 玻璃只铺在条上：条以外的窗口区域必须透（上面 172 是气泡/菜单预留）
         if let Some((bmp, rect)) = glass {
-            g.d2d.PushAxisAlignedClip(
-                &bar,
-                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            );
+            // 裁成**条的圆角形状**：整窗圆角只在窗口边界上，条自己那圈角是方的
+            // （用户「圆角那边没裁好」就是这里：轴对齐裁剪 = 直角露玻璃）
+            g.push_clip_round(bar, t.radius)?;
             g.d2d.DrawBitmap(
                 bmp,
                 Some(&rect),
@@ -156,7 +155,7 @@ pub fn paint(
                 None,
                 None,
             );
-            g.d2d.PopAxisAlignedClip();
+            g.pop_clip_round();
         }
         set_color(g, pal.veil)?;
         fill_round(g, bar, t.radius)?;
@@ -189,7 +188,8 @@ pub fn paint(
                         right: cx + dw / 2.0,
                         bottom: cy + dh / 2.0,
                     };
-                    minicard_draw::image::draw(g, bmp, src, dst)?;
+                    // 源图在加载时已降到 96（最大视觉尺寸 84）：线性采样足够，别再每帧三次插值
+                    minicard_draw::image::draw_linear(g, bmp, src, dst)?;
                 }
                 None => {
                     let r = Rect {

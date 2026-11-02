@@ -2086,12 +2086,33 @@ fn stop_native_cards() {
 }
 
 /// config ↔ 卡片窗口双向同步：enabled 的保证存在，禁用/删掉的关掉
+/// 上一次交给绘制进程的「启用卡 id 列表」：变了就重启进程，
+/// 否则主界面里的开关只改了 config，原生窗口不会增减（= 用户说的「按钮失效」）
+static NATIVE_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 fn sync_cards(app: &AppHandle, cfg: &Config) {
     if cfg.settings.native_cards {
         // 原生自绘：关掉所有 card.html 窗口，起（或复用）绘制进程
         for card in &cfg.cards {
             if let Some(w) = app.get_webview_window(&card_label(&card.id)) {
                 let _ = w.close();
+            }
+        }
+        let want: Vec<String> = cfg
+            .cards
+            .iter()
+            .filter(|c| c.enabled)
+            .map(|c| c.id.clone())
+            .collect();
+        {
+            let mut last = NATIVE_IDS.lock().unwrap();
+            if *last != want {
+                // 已经跑着的进程不会给自己加/删窗口 → 直接重启（新集合 = 新窗口布局）
+                let had = !last.is_empty();
+                *last = want.clone();
+                if had || NATIVE_CHILD.lock().unwrap().is_some() {
+                    stop_native_cards();
+                }
             }
         }
         ensure_native_cards(app, cfg);
@@ -3573,8 +3594,13 @@ fn main() {
     app.run(|_app, event| {
         // 退出前补写节流窗口里的最后一次位置（拖完 250ms 内退出也不丢）
         if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
-            stop_native_cards();
+            // ⚠️ 这里**不能**杀绘制进程：主窗关闭（关闭到托盘）也会走 ExitRequested，
+            //    虽然下面 prevent_exit 了，但子进程已经被杀 → 「桌面的卡跟着主界面一起消失」。
+            //    只在真正要退出（RunEvent::Exit）时收。
             flush_pos_now();
+        }
+        if let tauri::RunEvent::Exit = event {
+            stop_native_cards();
         }
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
             // 主窗改成「销毁式休眠」后，「所有窗口都没了」成为可达状态

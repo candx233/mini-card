@@ -634,7 +634,7 @@ pub fn dock_sheet(
     for it in &d.items {
         let path = icon_cache_path(it);
         match path.and_then(|p| minicard_draw::image::decode_file(&p).ok()) {
-            Some(img) => match minicard_draw::image::bitmap(g, &img) {
+            Some(img) => match minicard_draw::image::bitmap(g, &minicard_draw::image::downscale(&img, 96)) {
                 Ok(b) => bitmaps.push(Some(b)),
                 Err(_) => bitmaps.push(None),
             },
@@ -678,4 +678,24 @@ fn icon_cache_path(it: &minicard_core::config::DockItem) -> Option<std::path::Pa
     } else {
         None
     }
+}
+
+
+/// 日历翻月动效探针：把 `flip_t0` 往前挪 `ms`，画一帧（0 = 刚点下、200 = 收尾）。
+/// 验收判据：网格整体相对静止态横向位移 = 16·(1−easeOutQuart(u))，透明度 = 0.2+0.8e。
+pub fn cal_flip(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    ms: u64,
+) -> Result<()> {
+    use minicard_cards::calendar::{self, Calendar};
+
+    // 固定内容：2026-11，1 号周日（周一起始 offset=6），30 天
+    let mut c = Calendar::build(2026, 11, 0, 30, 1);
+    c.flip(1);
+    c.flip_t0 = Some(std::time::Instant::now() - std::time::Duration::from_millis(ms));
+
+    let t = calendar::Tokens::cal(240.0, 180.0);
+    calendar::paint(g, te, pal, &t, &c, None)
 }

@@ -613,9 +613,14 @@ pub fn run(
                     // 图标：与外壳同一套缓存命名
                     let mut icons: Vec<Option<ID2D1Bitmap1>> = Vec::new();
                     for it in &d.items {
+                        // 图标每帧都要缩放：先在 CPU 降到 96（> 最大视觉尺寸 84），
+                        // 之后逐帧走线性采样就够干净，也省掉每帧的高质量三次插值
                         let bmp = dock_icon_path(it)
                             .and_then(|p| minicard_draw::image::decode_file(&p).ok())
-                            .and_then(|img| minicard_draw::image::bitmap(&gfx, &img).ok());
+                            .and_then(|img| {
+                                let small = minicard_draw::image::downscale(&img, 96);
+                                minicard_draw::image::bitmap(&gfx, &small).ok()
+                            });
                         icons.push(bmp);
                     }
                     // 玻璃：与卡片同口径（按所在屏切壁纸 + pad + 高斯模糊）
@@ -863,13 +868,27 @@ pub fn run(
             }
 
             // Dock：悬停放大（每帧算，指针不动就不重绘）
+            let mut dock_busy = false;
+            let mut dock_paint_ms = 0.0f32;
             if let Some(dw) = dock_win.as_mut() {
                 let dpi = dw.dpi;
                 // 验收用：`MC_DOCK_DEMO=<窗内 x>` 把指针钉死，不依赖真鼠标（截图取证）
                 let demo_x = std::env::var("MC_DOCK_DEMO").ok().and_then(|s| s.parse::<f32>().ok());
-                let hit = match demo_x {
-                    Some(x) => Some(x),
-                    None => dw.pointer(dpi),
+                // 性能台架：`MC_DOCK_SWEEP=1` 让指针在条上来回扫（真鼠标会被抢走，量不了帧率）
+                let sweep = std::env::var("MC_DOCK_SWEEP").is_ok();
+                let sweep_x = if sweep {
+                    use std::sync::OnceLock;
+                    static T0: OnceLock<Instant> = OnceLock::new();
+                    let t0 = T0.get_or_init(Instant::now);
+                    let s = t0.elapsed().as_secs_f32();
+                    Some((dw.t.w / 2.0 + 380.0 * (s * 1.4).sin()).clamp(0.0, dw.t.w))
+                } else {
+                    None
+                };
+                let hit = match (demo_x, sweep_x) {
+                    (Some(x), _) => Some(x),
+                    (None, Some(x)) => Some(x),
+                    _ => dw.pointer(dpi),
                 };
                 // 进出场：临界阻尼（τ=50ms），与 dock.html 同一个时钟感
                 let target = if hit.is_some() { 1.0 } else { 0.0 };
@@ -890,6 +909,7 @@ pub fn run(
                     dw.ease = 1.0;
                     dw.ease_v = 0.0;
                 }
+                dock_busy = moving || hit.is_some();
                 // 可点区域跟着放/收（放：放大图标 + 名字气泡要能点；收：预留区还给下面）
                 let want_open = dw.ease > 0.002;
                 if want_open != dw.region_open {
@@ -921,27 +941,82 @@ pub fn run(
                     let refs: Vec<Option<&ID2D1Bitmap1>> =
                         icons.iter().map(|o| o.as_ref()).collect();
                     let running = vec![false; icons.len()];
-                    let gg = glass.as_ref().map(|(b, r)| (b, *r));
+                    let gg = if std::env::var("MC_DOCK_NOGLASS").is_ok() {
+                        None
+                    } else {
+                        glass.as_ref().map(|(b, r)| (b, *r))
+                    };
+                    let paint_t0 = Instant::now();
                     let geo = tk.geo(&cfg.dock, Some(dw.px), dw.ease);
                     let r = minicard_cards::dock::paint(
                         gfx, &te, &pal, tk, &cfg.dock, &geo, &refs, &running, gg,
                     );
                     let _ = r;
+                    dock_paint_ms = paint_t0.elapsed().as_secs_f32() * 1000.0;
                     dw.last_sig = sig;
+                    if std::env::var("MC_DOCK_LOG").is_ok() {
+                        use std::sync::Mutex as M;
+                        static LAST_PAINT: M<Option<Instant>> = M::new(None);
+                        static DTS: M<Vec<f32>> = M::new(Vec::new());
+                        let prev = *LAST_PAINT.lock().unwrap();
+                        *LAST_PAINT.lock().unwrap() = Some(now);
+                        if let Some(pv) = prev {
+                            let d = (now - pv).as_secs_f32() * 1000.0;
+                            if d > 0.0 && d < 500.0 {
+                                DTS.lock().unwrap().push(d);
+                            }
+                        }
+                        let mut v = DTS.lock().unwrap();
+                        if v.len() >= 120 {
+                            let n = v.len();
+                            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                            let p50 = v[n / 2];
+                            let p95 = v[n * 95 / 100];
+                            let mx = v[n - 1];
+                            minicard_shell::mlog!(
+                                "dock 帧间隔 p50 {p50:.1} / p95 {p95:.1} / max {mx:.1} ms（{n} 帧）绘制 {:.2} ms",
+                                dock_paint_ms
+                            );
+                            v.clear();
+                        }
+                    }
                 }
-                // 悬停/动画中 60fps 醒着（只读光标，几乎不费 CPU）；静置 1s 一回
-                dw.next_draw = now
-                    + if moving || hit.is_some() {
-                        Duration::from_micros(16_667)
-                    } else {
-                        Duration::from_millis(1000)
-                    };
+                // 悬停/动画中 60fps：**绝对节拍**（`next += 16.667ms`）而不是 `now += 16.667ms`
+                // —— 后者会把每帧的睡眠误差累进节拍，跑成 59.x fps，合成器偶尔取到重复帧 = 慢速抖动
+                if moving || hit.is_some() {
+                    // 桌面上层 DComp 窗的 Present(1) 不等 vblank（实测），所以帧率由这个 deadline 定。
+                    // 用 120Hz 让合成器每次取样都拿到新帧（60Hz 呈现 + 抖动 → 偶发重复帧 = 顿一下）
+                    let hz: u64 = std::env::var("MC_DOCK_HZ").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+                    let step = Duration::from_micros(1_000_000 / hz.max(30));
+                    // 从静置切回悬停时，next_draw 可能还是「1 秒后」——必须重新起拍，
+                    // 否则第一帧要等满 1 秒（实测 max 106ms 的元凶）
+                    if dw.next_draw > now + step * 3 {
+                        dw.next_draw = now;
+                    }
+                    let mut next = dw.next_draw + step;
+                    if next < now {
+                        // 落后一帧以上：对齐到「下一个 16.667 网格」，不补帧
+                        let us = 1_000_000 / hz.max(30);
+                        let behind = ((now - next).as_micros() / us as u128) as u64 + 1;
+                        next += Duration::from_micros(us * behind);
+                    }
+                    dw.next_draw = next;
+                } else {
+                    dw.next_draw = now + Duration::from_millis(1000);
+                }
             }
 
             let mut earliest = now + Duration::from_millis(250);
             let mut drawn = 0usize;
             for win in wins.iter_mut() {
                 if now < win.next_draw {
+                    if win.next_draw < earliest {
+                        earliest = win.next_draw;
+                    }
+                    continue;
+                }
+                // Dock 正在 60fps 且上一帧已经吃掉大半预算：这一轮不画卡（下一轮再画，卡只是晚 16ms）
+                if dock_busy && dock_paint_ms > 7.0 {
                     if win.next_draw < earliest {
                         earliest = win.next_draw;
                     }
@@ -990,6 +1065,9 @@ pub fn run(
                     CNT.store(0, Ordering::Relaxed);
                 }
             }
+            // 注意：DComp 桌面层窗的 Present(1) **不等 vblank**（实测不睡会跑成 200fps），
+            // 所以节拍必须自己用 deadline 控；`dock_painted` 只用来决定卡片要不要让路。
+
             let now2 = Instant::now();
             if earliest > now2 {
                 let wait = (earliest - now2).min(Duration::from_millis(100));
@@ -1210,7 +1288,8 @@ fn draw_one(
             }
             let ck = calendar::Tokens::cal(win.w, win.h);
             calendar::paint(&win.gfx, te, pal, &ck, c, glass_pair)?;
-            false
+            // 翻月/按压缩放还在跑：保持 60fps，别等 1s 节拍
+            c.animating(now)
         }
     };
     Ok(animating)
@@ -1305,14 +1384,19 @@ fn click(
                 }
             }
         }
-        State::Calendar(c, off, _) => {
+        State::Calendar(c, off, built_day) => {
             let tk = calendar::Tokens::cal(win.w, win.h);
             if let Some(h) = calendar::hit(te, &tk, c, x, y) {
-                *off += match h {
+                let dir = match h {
                     calendar::Hit::Prev => -1,
                     calendar::Hit::Next => 1,
                 };
+                *off += dir;
                 *c = calendar_for(yy, mo, *off, dd);
+                *built_day = if *off == 0 { dd } else { 0 };
+                // 只有用户点 ‹ › 才带动画（跨天刷新走 0，不重放）
+                c.flip(dir);
+                c.tap(dir);
             }
         }
         State::Music { cover, prev, flip_t0, flip_dir, demo_t0 } => {

@@ -24,12 +24,84 @@ pub struct Cell {
     pub today: bool,
 }
 
+/// 翻月/点按动效的时长（与 `card.html` 的 `CAL_FLIP_MS` 一致）
+pub const FLIP_MS: f32 = 200.0;
+/// 翻月位移（CSS 的 `CAL_FLIP_DX`）
+pub const FLIP_DX: f32 = 16.0;
+
 #[derive(Clone, Debug)]
 pub struct Calendar {
     pub year: i32,
     pub month: u32,
     pub holiday: String,
     pub cells: Vec<Cell>,
+    /// 翻月动画方向（+1 下月 / −1 上月）与起点；`None` = 不动画（跨天刷新走这条）
+    pub flip_dir: i32,
+    pub flip_t0: Option<std::time::Instant>,
+    /// 导航按钮按压动画（−1 ‹ / +1 ›）
+    pub tap_side: i32,
+    pub tap_t0: Option<std::time::Instant>,
+}
+
+impl Calendar {
+    /// 翻月进场：新的一页从 `dir*(+16px)` 滑到位，同时 0.2 → 1 淡入
+    pub fn flip(&mut self, dir: i32) {
+        if dir == 0 {
+            return;
+        }
+        self.flip_dir = dir;
+        self.flip_t0 = Some(std::time::Instant::now());
+    }
+
+    /// 按钮按压：0.86 → 1.06 → 1（200ms）
+    pub fn tap(&mut self, side: i32) {
+        self.tap_side = side;
+        self.tap_t0 = Some(std::time::Instant::now());
+    }
+
+    /// 这一刻的翻月进度：(位移 dx, 不透明度, 是否还在跑)
+    pub fn flip_state(&self, now: std::time::Instant) -> (f32, f32, bool) {
+        let Some(t0) = self.flip_t0 else {
+            return (0.0, 1.0, false);
+        };
+        let ms = now.duration_since(t0).as_secs_f32() * 1000.0;
+        let u = (ms / FLIP_MS).clamp(0.0, 1.0);
+        let e = 1.0 - (1.0 - u).powi(4); // easeOutQuart，与 JS 同一曲线
+        let from = if self.flip_dir > 0 { FLIP_DX } else { -FLIP_DX };
+        (from * (1.0 - e), 0.2 + 0.8 * e, u < 1.0)
+    }
+
+    /// 按钮按压缩放系数（不在动画里返回 1.0）
+    pub fn tap_scale(&self, side: i32, now: std::time::Instant) -> f32 {
+        let Some(t0) = self.tap_t0 else {
+            return 1.0;
+        };
+        if self.tap_side != side {
+            return 1.0;
+        }
+        let u = (now.duration_since(t0).as_secs_f32() * 1000.0 / 200.0).clamp(0.0, 1.0);
+        // calTap：0% 0.86 → 55% 1.06 → 100% 1
+        if u < 0.55 {
+            0.86 + (1.06 - 0.86) * (u / 0.55)
+        } else {
+            1.06 - 0.06 * ((u - 0.55) / 0.45)
+        }
+    }
+
+    /// 还有动效在跑？主循环据此保持 60fps
+    pub fn animating(&self, now: std::time::Instant) -> bool {
+        if let Some(t0) = self.flip_t0 {
+            if now.duration_since(t0).as_secs_f32() * 1000.0 < FLIP_MS {
+                return true;
+            }
+        }
+        if let Some(t0) = self.tap_t0 {
+            if now.duration_since(t0).as_secs_f32() * 1000.0 < 200.0 {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Calendar {
@@ -80,6 +152,10 @@ impl Calendar {
             month,
             holiday: String::new(),
             cells,
+            flip_dir: 0,
+            flip_t0: None,
+            tap_side: 0,
+            tap_t0: None,
         }
     }
 }
@@ -284,7 +360,29 @@ pub fn paint(
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
-        paint_tree(g, te, pal, t, c, &placed)?;
+        // 翻月：页（星期行 + 网格）从 dir·16px 滑到位、0.2 → 1 淡入；头（标题/节日/‹›）不动
+        let now = std::time::Instant::now();
+        let (dx, alpha, _) = c.flip_state(now);
+        if dx.abs() > 0.01 || alpha < 0.999 {
+            paint_tree(g, te, pal, t, c, &placed, Some(false), now)?;
+            let mut old = windows_numerics::Matrix3x2::default();
+            g.d2d.GetTransform(&mut old);
+            let m = windows_numerics::Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.0,
+                M31: dx,
+                M32: 0.0,
+            } * old;
+            g.d2d.SetTransform(&m);
+            g.push_opacity(alpha)?;
+            paint_tree(g, te, pal, t, c, &placed, Some(true), now)?;
+            g.pop_opacity();
+            g.d2d.SetTransform(&old);
+        } else {
+            paint_tree(g, te, pal, t, c, &placed, None, now)?;
+        }
         g.pop_clip();
         g.end()?;
         Ok(())
@@ -441,6 +539,11 @@ fn hovering(g: &Gfx, r: &minicard_draw::layout::Rect) -> bool {
     }
 }
 
+/// 翻月动画只动「星期行 + 日期网格」（`card.html` 里是 `.cal-page`）
+fn is_page_id(id: u32) -> bool {
+    (9520..9530).contains(&id) || (9600..9800).contains(&id)
+}
+
 fn paint_tree(
     g: &Gfx,
     te: &TextEngine,
@@ -448,14 +551,24 @@ fn paint_tree(
     t: &Tokens,
     c: &Calendar,
     pl: &Placed,
+    only: Option<bool>,
+    now: std::time::Instant,
 ) -> Result<()> {
+    // only = Some(true) 只画页、Some(false) 只画头、None 全画
+    let skip_self = match only {
+        Some(true) => !is_page_id(pl.id),
+        Some(false) => is_page_id(pl.id),
+        None => false,
+    };
     // 导航按钮：1px 描边吸附 + 居中箭头
-    if pl.id == 9510 || pl.id == 9511 {
+    if !skip_self && (pl.id == 9510 || pl.id == 9511) {
         let px = pl.rect.x.round();
         let py = pl.rect.y.round();
         let pw = pl.rect.w.round();
         let ph = pl.rect.h.round();
-        let sz = t.chev;
+        // 按压动画：整枚箭头以按钮中心为原点缩放（calTap 0.86 → 1.06 → 1）
+        let tap_k = c.tap_scale(if pl.id == 9510 { -1 } else { 1 }, now);
+        let sz = t.chev * tap_k;
         let s = sz / 24.0;
         let cx = px + (pw - sz) / 2.0;
         let cy = py + (ph - sz) / 2.0;
@@ -491,7 +604,7 @@ fn paint_tree(
     }
 
     // 日期格：today 先垫强调色圆角块，再画数字（数字走下面的通用文字分支）
-    if (9600..9700).contains(&pl.id) {
+    if !skip_self && (9600..9700).contains(&pl.id) {
         let idx = (pl.id - 9600) as usize;
         if let Some(cell) = c.cells.get(idx) {
             if cell.today && !cell.other {
@@ -514,7 +627,7 @@ fn paint_tree(
         }
     }
 
-    if let Some(spec) = pl.text() {
+    if let (false, Some(spec)) = (skip_self, pl.text()) {
         let is_today = {
             let idx = pl.id.saturating_sub(9600) as usize;
             (9600..9700).contains(&pl.id) && c.cells.get(idx).map(|x| x.today).unwrap_or(false)
@@ -579,7 +692,7 @@ fn paint_tree(
         }
     }
     for ch in &pl.children {
-        paint_tree(g, te, pal, t, c, ch)?;
+        paint_tree(g, te, pal, t, c, ch, only, now)?;
     }
     Ok(())
 }
