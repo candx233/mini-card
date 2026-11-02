@@ -711,7 +711,6 @@ pub fn menu_sheet(
         crate::menu::Item { label: "打开所在文件夹".into(), danger: false, disabled: false },
         crate::menu::Item { label: "从 Dock 移除".into(), danger: true, disabled: false },
         crate::menu::Item { label: "在此前加分隔线".into(), danger: false, disabled: false },
-        crate::menu::Item { label: "取消".into(), danger: false, disabled: false },
     ];
     // 先铺一层假壁纸（渐变），好看清圆角与描边
     unsafe {
@@ -734,6 +733,6 @@ pub fn menu_sheet(
         g.d2d.FillRectangle(&full, &g.brush);
         g.end()?;
     }
-    crate::menu::paint(g, te, pal, &items, hover, 208.0, 140.0, None, 0.0)
+    crate::menu::paint(g, te, pal, &items, hover, 208.0, 108.0, None, 0.0)
 }
 

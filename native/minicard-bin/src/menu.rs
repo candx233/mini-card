@@ -334,9 +334,9 @@ pub fn paint(
             let c = if items[i].danger {
                 windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
                     r: 0.95,
-                    g: 0.36,
-                    b: 0.36,
-                    a: 0.18,
+                    g: 0.30,
+                    b: 0.30,
+                    a: 0.22,
                 }
             } else {
                 windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a: 0.16, ..pal.accent }
@@ -369,11 +369,11 @@ pub fn paint(
             let color = if it.disabled {
                 windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a: 0.38, ..pal.fg }
             } else if it.danger && hovered {
-                // 红底上再压红字看不清，hover 时提亮到近白
+                // 红底红字看不清，但 hover 变白又丢了危险语义 → 提亮到浅红
                 windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
                     r: 1.0,
-                    g: 0.94,
-                    b: 0.94,
+                    g: 0.58,
+                    b: 0.58,
                     a: 1.0,
                 }
             } else if it.danger {
