@@ -132,6 +132,31 @@ pub fn bubble_rect(t: &Tokens, text_w: f32, cx: f32, alpha: f32) -> D2D_RECT_F {
     }
 }
 
+/// 拖拽排序时额外要画的东西：被拖的那个图标跟着指针，落点位置画一条强调色竖线
+pub struct DragDraw {
+    /// 被拖起来的条目下标（它的槽位留空）
+    pub from: usize,
+    /// 指针在窗内的 x
+    pub x: f32,
+    /// 插入位次（0..=n，画在 insert-1 与 insert 之间）
+    pub insert: usize,
+}
+
+/// 插入位次 → 落点竖线的 x（两槽之间的空隙中点）
+pub fn insert_mark_x(t: &Tokens, cx: &[f32], insert: usize) -> f32 {
+    let n = cx.len();
+    if n == 0 {
+        return t.w / 2.0;
+    }
+    if insert == 0 {
+        cx[0] - t.size / 2.0 - 6.0
+    } else if insert >= n {
+        cx[n - 1] + t.size / 2.0 + 6.0
+    } else {
+        (cx[insert - 1] + cx[insert]) / 2.0
+    }
+}
+
 /// 第 i 个图标的分组线是否在它左边
 fn div_before(d: &Dock, i: usize) -> bool {
     i > 0 && d.items.get(i).map(|it| it.divider_before).unwrap_or(false)
@@ -161,6 +186,7 @@ pub fn paint(
     running: &[bool],
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
     bubble: Option<&Bubble>,
+    drag: Option<&DragDraw>,
 ) -> Result<()> {
     let n = d.items.len().min(geo.cx.len());
     let bar = geo.bar;
@@ -187,6 +213,9 @@ pub fn paint(
 
         // 图标（含首字母兜底）
         for i in 0..n {
+            if drag.map(|dg| dg.from == i).unwrap_or(false) {
+                continue; // 被拖的那个单独画（跟着指针）
+            }
             let k = geo.ks.get(i).copied().unwrap_or(1.0);
             let s = t.size * k;
             let half = s / 2.0;
@@ -261,6 +290,57 @@ pub fn paint(
                     }
                 }
             }
+        }
+
+        // 落点竖线（强调色 2px）+ 浮起的被拖图标
+        if let Some(dg) = drag {
+            let k = if dg.from < geo.ks.len() { 1.06 } else { 1.0 };
+            let s = t.size * k;
+            let bottom = t.icon_bottom();
+            // 阴影：被拖图标下面垫一层柔和的暗块
+            set_color(
+                g,
+                windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a: 0.35, ..pal.shadow },
+            )?;
+            fill_round(
+                g,
+                D2D_RECT_F {
+                    left: dg.x - s / 2.0 - 2.0,
+                    top: bottom - s + 3.0,
+                    right: dg.x + s / 2.0 + 2.0,
+                    bottom: bottom + 5.0,
+                },
+                10.0,
+            )?;
+            if let Some(bmp) = icons.get(dg.from).and_then(|o| *o) {
+                let (iw, ih) = {
+                    let p = bmp.GetPixelSize();
+                    (p.width as f32, p.height as f32)
+                };
+                let kk = (s / iw).min(s / ih);
+                let (dw, dh) = (iw * kk, ih * kk);
+                let src = D2D_RECT_F { left: 0.0, top: 0.0, right: iw, bottom: ih };
+                let dst = D2D_RECT_F {
+                    left: dg.x - dw / 2.0,
+                    top: bottom - s + (s - dh) / 2.0,
+                    right: dg.x + dw / 2.0,
+                    bottom: bottom - s + (s - dh) / 2.0 + dh,
+                };
+                minicard_draw::image::draw_linear(g, bmp, src, dst)?;
+            }
+            // 落点竖线：2px 强调色，竖直占满图标高度
+            let mx = insert_mark_x(t, &geo.cx, dg.insert);
+            set_color(g, pal.accent)?;
+            fill_round(
+                g,
+                D2D_RECT_F {
+                    left: mx - 1.0,
+                    top: bottom - t.size,
+                    right: mx + 1.0,
+                    bottom,
+                },
+                1.0,
+            )?;
         }
 
         // 分组线：两张图标的**视觉**边沿中点（放大让位时线跟着两边居中）
@@ -608,6 +688,18 @@ mod tests {
         assert_eq!(hit(&t, &g, g.cx[8] + half - 1.0, t.icon_bottom() - 8.0), Some(8));
         // 视觉框右沿外 3px：不命中（放大后邻居已经让开）
         assert_eq!(hit(&t, &g, g.cx[8] + half + 3.0, t.icon_bottom() - 8.0), None);
+    }
+
+    /// 落点竖线：首位在一格外侧、末位在末格外侧、中间卡在两槽中点
+    #[test]
+    fn 落点线位置() {
+        let d = dock_real();
+        let t = Tokens::dock(&d);
+        let g = t.geo(&d, None, 0.0);
+        assert!((insert_mark_x(&t, &g.cx, 0) - (g.cx[0] - 24.0 - 6.0)).abs() < 1e-4);
+        let n = g.cx.len();
+        assert!((insert_mark_x(&t, &g.cx, n) - (g.cx[n - 1] + 24.0 + 6.0)).abs() < 1e-4);
+        assert!((insert_mark_x(&t, &g.cx, 4) - (g.cx[3] + g.cx[4]) / 2.0).abs() < 1e-4);
     }
 
     /// 气泡几何：高 24、条上方 44、左右夹紧在窗内、进场时下移 2px

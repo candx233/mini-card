@@ -38,6 +38,8 @@ enum UiEvent {
     DragEnd { hwnd: isize },
     /// Dock 图标点击（窗内逻辑坐标）
     DockClick { x: f32, y: f32 },
+    /// Dock 拖拽松手（窗内逻辑 x）
+    DockDrop { x: f32 },
 }
 
 static EVENTS: Mutex<Vec<UiEvent>> = Mutex::new(Vec::new());
@@ -45,6 +47,15 @@ static EVENTS: Mutex<Vec<UiEvent>> = Mutex::new(Vec::new());
 /// 最近一帧画出来的 Dock 几何（含 Tokens）：点击命中必须走这一份（与绘制同源）
 static DOCK_SNAP: Mutex<Option<(minicard_cards::dock::Tokens, minicard_cards::dock::Geo)>> =
     Mutex::new(None);
+
+/// 按下但还没抬手：`(图标下标, 按下时的窗内坐标)`。超过 4px 才算拖拽（与卡片同阈值）
+static DOCK_PRESS: Mutex<Option<(usize, f32, f32)>> = Mutex::new(None);
+
+/// 窗内坐标 → 命中图标（走最近一次绘制的几何，与画面同源）
+fn dock_hit_at(x: f32, y: f32) -> Option<usize> {
+    let snap = DOCK_SNAP.lock().unwrap().clone();
+    snap.and_then(|(tk, geo)| minicard_cards::dock::hit(&tk, &geo, x, y))
+}
 
 struct Drag {
     hwnd: isize,
@@ -117,6 +128,11 @@ struct DockWin {
     /// 运行中指示点（每 2s 扫一次可见窗口）
     running: Vec<bool>,
     next_running: Instant,
+    /// 拖拽排序：被拖条目 + 指针 x；松手后 140ms 回弹（各图标从旧槽滑到新槽）
+    drag_from: Option<usize>,
+    drag_x: f32,
+    settle_from: Vec<f32>,
+    settle_t0: Option<Instant>,
     /// 名字气泡：进场进度 / 点击反馈文案（+ 显示时长）
     bubble_a: f32,
     flash: Option<(String, Instant)>,
@@ -692,6 +708,10 @@ pub fn run(
                         next_paint: Instant::now(),
                         running: vec![false; d.items.len()],
                         next_running: Instant::now(),
+                        drag_from: None,
+                        drag_x: 0.0,
+                        settle_from: Vec::new(),
+                        settle_t0: None,
                         bubble_a: 0.0,
                         flash: None,
                         flash_ms: 1.2,
@@ -763,6 +783,37 @@ pub fn run(
                                 }
                             } else {
                                 minicard_shell::mlog!("dock 点击 ({x:.0},{y:.0}) 未命中图标");
+                            }
+                        }
+                    }
+                    UiEvent::DockDrop { x } => {
+                        let snap = DOCK_SNAP.lock().unwrap().clone();
+                        if let Some((tk, geo)) = snap {
+                            let from = dock_win.as_ref().and_then(|dw| dw.drag_from);
+                            if let Some(from) = from {
+                                // 插入位次：落在第 i 个槽中心右边 → 插到 i+1（去掉自己那一位）
+                                let mut insert = geo.cx.iter().filter(|&&c| c < x).count();
+                                if insert > from {
+                                    insert -= 1;
+                                }
+                                let n = cfg.dock.items.len();
+                                let insert = insert.min(n.saturating_sub(1));
+                                if insert != from && from < n {
+                                    let item = cfg.dock.items.remove(from);
+                                    cfg.dock.items.insert(insert, item);
+                                    save_cfg(&cfg);
+                                    minicard_shell::mlog!("dock 拖拽：[{from}] → [{insert}]");
+                                    if let Some(dw) = dock_win.as_mut() {
+                                        dw.settle_from = geo.cx.clone();
+                                        dw.settle_t0 = Some(Instant::now());
+                                        dw.drag_from = None;
+                                        dw.last_sig = 0;
+                                    }
+                                } else if let Some(dw) = dock_win.as_mut() {
+                                    dw.drag_from = None;
+                                    dw.last_sig = 0;
+                                }
+                                let _ = tk;
                             }
                         }
                     }
@@ -979,9 +1030,74 @@ pub fn run(
                     }
                     dw.next_running = now + Duration::from_secs(2);
                 }
+                // 验收钩子 `MC_DOCK_DRAG=<from>:<窗内 x>`：一次跑完「按下 → 拖 → 松手」，
+                // 不依赖真鼠标（用户鼠标一动，注入的拖拽就被抢走，量不了）
+                if let Ok(spec) = std::env::var("MC_DOCK_DRAG") {
+                    use std::sync::OnceLock;
+                    use std::sync::atomic::{AtomicBool, Ordering as AO};
+                    static FIRED: AtomicBool = AtomicBool::new(false);
+                    static T0: OnceLock<Instant> = OnceLock::new();
+                    if !FIRED.load(AO::Relaxed) {
+                        let t0 = *T0.get_or_init(Instant::now);
+                        let el = t0.elapsed().as_secs_f32();
+                        if let Some((from_s, to_s)) = spec.split_once(':') {
+                            let from: usize = from_s.parse().unwrap_or(0);
+                            let to: f32 = to_s.parse().unwrap_or(0.0);
+                            if el > 0.4 && el < 0.8 {
+                                let cx = dw.t.side + cfg.dock.item_center_x(from);
+                                *DOCK_PRESS.lock().unwrap() = Some((from, cx, 204.0));
+                            } else if el >= 0.8 && el < 1.6 {
+                                if dw.drag_from.is_none() {
+                                    dw.drag_from = Some(from);
+                                    minicard_shell::mlog!("dock 拖拽开始：from={from} → x={to}");
+                                }
+                                dw.drag_x = to;
+                                dw.last_sig = 0;
+                            } else if el >= 1.6 && dw.drag_from.is_some() {
+                                let _ = EVENTS.lock().unwrap().push(UiEvent::DockDrop { x: to });
+                                *DOCK_PRESS.lock().unwrap() = None;
+                                FIRED.store(true, AO::Relaxed);
+                            }
+                        }
+                    }
+                }
+                // 拖着走：按下时命中的图标 + 挪动超过 4px → 进入拖拽排序
+                if dw.drag_from.is_none() {
+                    if let (Some((i, px0, py0)), Some((x, y))) =
+                        (*DOCK_PRESS.lock().unwrap(), ptr)
+                    {
+                        if (x - px0).abs() + (y - py0).abs() > 4.0 {
+                            dw.drag_from = Some(i);
+                            dw.drag_x = x;
+                            dw.bubble_a = 0.0;
+                            dw.flash = None;
+                            dw.last_sig = 0;
+                        }
+                    }
+                }
+                if dw.drag_from.is_some() {
+                    if let Some((x, _)) = ptr {
+                        dw.drag_x = x.clamp(0.0, dw.t.w);
+                    }
+                }
                 // 几何每帧算一份：命中与绘制必须同源
                 let tk = dw.t;
-                let geo = tk.geo(&cfg.dock, Some(dw.px), dw.ease);
+                let dragging = dw.drag_from.is_some();
+                let mut geo = tk.geo(&cfg.dock, if dragging { None } else { Some(dw.px) }, dw.ease);
+                // 松手回弹：各槽从「旧位置」滑到「新位置」（140ms easeOutCubic）
+                if let Some(t0) = dw.settle_t0 {
+                    let u = now.duration_since(t0).as_secs_f32() / 0.14;
+                    if u < 1.0 {
+                        let e = 1.0 - (1.0 - u).powi(3);
+                        for (i, c) in geo.cx.iter_mut().enumerate() {
+                            if let Some(old) = dw.settle_from.get(i) {
+                                *c += (old - *c) * (1.0 - e);
+                            }
+                        }
+                    } else {
+                        dw.settle_t0 = None;
+                    }
+                }
                 // demo/sweep 时用钉住的 x（否则真鼠标在哪气泡就去哪，截图不可复现）
                 let hover_pt = if demo_x.is_some() || sweep_x.is_some() {
                     px_in.map(|x| (x, tk.icon_bottom() - tk.size / 2.0))
@@ -1013,7 +1129,8 @@ pub fn run(
                 if flash_left <= 0.0 {
                     dw.flash = None;
                 }
-                let bubble_target = if flash_left > 0.0 || hover_i.is_some() { 1.0 } else { 0.0 };
+                let bubble_target =
+                    if dragging { 0.0 } else if flash_left > 0.0 || hover_i.is_some() { 1.0 } else { 0.0 };
                 let dt_b = (now - dw.next_draw.min(now)).as_secs_f32().clamp(0.0, 0.05);
                 let dt_b = if dt_b <= 0.0 { 1.0 / 60.0 } else { dt_b };
                 let bubble_moving = (dw.bubble_a - bubble_target).abs() > 0.001;
@@ -1040,15 +1157,26 @@ pub fn run(
                     alpha: dw.bubble_a,
                 });
 
+                let drag_draw = dw.drag_from.map(|from| {
+                    // 插入位次：落在第 i 个槽中心右侧 → 插到 i+1；走到自己左边那半算原位
+                    let mut insert = geo.cx.iter().filter(|&&c| c < dw.drag_x).count();
+                    if insert > from {
+                        insert -= 1;
+                    }
+                    minicard_cards::dock::DragDraw { from, x: dw.drag_x, insert }
+                });
                 let sig = (dw.ease * 4096.0) as u64 * 1_000_003
                     + (dw.px * 8.0) as u64
                     + hit.is_some() as u64
                     + (dw.bubble_a * 1024.0) as u64 * 7919
                     + hover_i.unwrap_or(999) as u64 * 31
-                    + flash_left.max(0.0) as u64 * 104_729;
+                    + flash_left.max(0.0) as u64 * 104_729
+                    + dw.drag_from.unwrap_or(999) as u64 * 31_337
+                    + (dw.drag_x * 8.0) as u64
+                    + dw.settle_t0.is_some() as u64 * 7;
                 // 静置兜底 1s 一回；悬停但指针不动**不重绘**（否则白烧 60fps）
                 let idle_due = now >= dw.next_paint;
-                if moving || bubble_moving || sig != dw.last_sig || idle_due {
+                if moving || bubble_moving || sig != dw.last_sig || idle_due || dw.settle_t0.is_some() {
                     dw.next_paint = now + Duration::from_millis(1000);
                     let DockWin { gfx, t: tk, icons, glass, .. } = dw;
                     let refs: Vec<Option<&ID2D1Bitmap1>> =
@@ -1060,11 +1188,10 @@ pub fn run(
                         glass.as_ref().map(|(b, r)| (b, *r))
                     };
                     let paint_t0 = Instant::now();
-                    let geo = tk.geo(&cfg.dock, Some(dw.px), dw.ease);
                     *DOCK_SNAP.lock().unwrap() = Some((*tk, geo.clone()));
                     let r = minicard_cards::dock::paint(
                         gfx, &te, &pal, tk, &cfg.dock, &geo, &refs, &running, gg,
-                        bubble.as_ref(),
+                        bubble.as_ref(), drag_draw.as_ref(),
                     );
                     let _ = r;
                     dock_paint_ms = paint_t0.elapsed().as_secs_f32() * 1000.0;
@@ -1095,7 +1222,7 @@ pub fn run(
                     }
                 }
                 // 悬停/动画中 60fps：**绝对节拍**（`next += 16.667ms`）而不是 `now += 16.667ms`
-                if moving || hit.is_some() || bubble_moving {
+                if moving || hit.is_some() || bubble_moving || dragging || dw.settle_t0.is_some() {
                     let hz: u64 = std::env::var("MC_DOCK_HZ").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
                     let step = Duration::from_micros(1_000_000 / hz.max(30));
                     if dw.next_draw > now + step * 3 {
@@ -1122,8 +1249,9 @@ pub fn run(
                     }
                     continue;
                 }
-                // Dock 正在 60fps 且上一帧已经吃掉大半预算：这一轮不画卡（下一轮再画，卡只是晚 16ms）
-                if dock_busy && dock_paint_ms > 7.0 {
+                // Dock 正在跑高帧率、且上一帧已经吃掉一半预算（120Hz 下一帧只有 8.3ms）：
+                // 这一轮不画卡，下一轮再画（卡只晚 8ms，肉眼看不出来）
+                if dock_busy && dock_paint_ms > 4.0 {
                     if win.next_draw < earliest {
                         earliest = win.next_draw;
                     }
@@ -1731,6 +1859,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_LBUTTONDOWN => {
             // Dock 窗不拖整条（D3 再做），按下直接吞掉，抬手时才判断点了哪个图标
             if hwnd.0 as isize == DOCK_HWND.load(Ordering::Relaxed) {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let mut r = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut r);
+                let dpi = GetDpiForWindow(hwnd) as f32;
+                let s = if dpi > 0.0 { dpi / 96.0 } else { 1.0 };
+                let x = (pt.x - r.left) as f32 / s;
+                let y = (pt.y - r.top) as f32 / s;
+                let _ = SetCapture(hwnd);
+                *DOCK_PRESS.lock().unwrap() = dock_hit_at(x, y).map(|i| (i, x, y));
                 return LRESULT(0);
             }
             let mut pt = POINT::default();
@@ -1808,6 +1946,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_LBUTTONUP => {
             if hwnd.0 as isize == DOCK_HWND.load(Ordering::Relaxed) {
+                let _ = ReleaseCapture();
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
                 let mut r = RECT::default();
@@ -1816,7 +1955,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let s = if dpi > 0.0 { dpi / 96.0 } else { 1.0 };
                 let x = (pt.x - r.left) as f32 / s;
                 let y = (pt.y - r.top) as f32 / s;
-                let _ = EVENTS.lock().unwrap().push(UiEvent::DockClick { x, y });
+                // 按下时命中的是某个图标、且横向挪动超过 4px → 拖拽排序；否则算点击
+                let moved = DOCK_PRESS
+                    .lock()
+                    .unwrap()
+                    .map(|(_, px, py)| ((x - px).abs() + (y - py).abs()) > 4.0)
+                    .unwrap_or(false);
+                if moved {
+                    let _ = EVENTS.lock().unwrap().push(UiEvent::DockDrop { x });
+                } else {
+                    let _ = EVENTS.lock().unwrap().push(UiEvent::DockClick { x, y });
+                }
+                *DOCK_PRESS.lock().unwrap() = None;
                 return LRESULT(0);
             }
             let d = DRAG.lock().unwrap().take();
