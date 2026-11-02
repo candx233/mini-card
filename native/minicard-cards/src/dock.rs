@@ -10,21 +10,29 @@
 //!
 //! 圆角由窗口区域负责（`Gfx::new(.., radius)`），绘图侧不做路径裁剪。
 
-use minicard_core::config::Dock;
-use minicard_draw::color::Palette;
+use minicard_core::config::{Dock, DockItem};
+use minicard_draw::color::{oklch, Palette};
 use minicard_draw::layout::{Rect, TextSpec};
 use minicard_draw::paint::{fill_path, fill_round, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
 use minicard_draw::text::{Mode, TextEngine};
 use minicard_shell::gfx::Gfx;
 use windows::core::Result;
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 
 /// 圆角（比卡片 16 更圆）
 pub const RADIUS: f32 = 20.0;
 /// 图标底边距条底
 pub const BOTTOM_PAD: f32 = 8.0;
+/// 图标圆角（真图标贴图自己那圈角 = 10px @ 84；兜底色块、拖拽阴影都用它，放大时按 k 等比）
+pub const ICON_RADIUS: f32 = 10.0;
+/// 兜底色块的字号比例：`size × 0.42`（方块里留足四周边距，中文单字也不挤）
+pub const FALLBACK_TEXT_K: f32 = 0.42;
+/// 空态（0 条目）条的最小宽度：`Dock::bar_width()` 此时只剩 24（PAD 兜底），放不下提示文案
+pub const EMPTY_MIN_W: f32 = 240.0;
+/// 空态提示文案（0 条目时画在条心，见 `paint`）
+pub const EMPTY_HINT: &str = "把程序拖到这里";
 
 #[derive(Clone, Copy)]
 pub struct Tokens {
@@ -48,14 +56,21 @@ pub struct Tokens {
 impl Tokens {
     pub fn dock(d: &Dock) -> Self {
         let side = d.side_reserve();
-        let bar_w0 = d.bar_width();
+        // 空态：`Dock::bar_width()` 在 0 条目时只有 24（PAD 兜底）→ 撑到能放下提示文案的宽度。
+        // 窗口尺寸也走这里（`live.rs` 用 `t.w/t.h` 建窗），所以条宽与窗口一起变宽。
+        let bar_w0 = if d.items.is_empty() {
+            d.bar_width().max(EMPTY_MIN_W)
+        } else {
+            d.bar_width()
+        };
         let bar_h = d.bar_height();
         let w = bar_w0 + 2.0 * side;
         Self {
             w,
             h: bar_h + Dock::TOP_RESERVE,
             bar_w0,
-            bar_w_max: d.bar_width_max(w),
+            // 0 条目时 `bar_width_max()` 返回 24 → 取 max 免得进场时条反而缩窄
+            bar_w_max: d.bar_width_max(w).max(bar_w0),
             bar_h,
             size: d.size as f32,
             radius: RADIUS,
@@ -162,6 +177,19 @@ fn div_before(d: &Dock, i: usize) -> bool {
     i > 0 && d.items.get(i).map(|it| it.divider_before).unwrap_or(false)
 }
 
+/// 第 i 个图标左侧那条分组线的 x（窗内）；**不该画时返回 `None`**：
+/// 第 0 项即使 `divider_before = true` 也不画（它左边没有图标，线会悬在条内边距上），
+/// 没标的、越界的同理。`paint` 与单测都走这一个判据。
+fn divider_x(t: &Tokens, d: &Dock, geo: &Geo, i: usize) -> Option<f32> {
+    if !div_before(d, i) || i >= geo.cx.len() {
+        return None;
+    }
+    let a = i - 1;
+    let ax = geo.cx[a] + t.size * geo.ks.get(a).copied().unwrap_or(1.0) / 2.0;
+    let bx = geo.cx[i] - t.size * geo.ks.get(i).copied().unwrap_or(1.0) / 2.0;
+    Some((ax + bx) / 2.0 - 0.5)
+}
+
 /// 在 `on(ease)` 进度的基础上跑临界阻尼阶跃（`dock.html` 同一套：τ=50ms、无过冲）。
 /// 返回新的 `(ease, 速度)`；调用方按帧 `dt` 推进。
 pub fn step_ease(ease: f32, vel: f32, target: f32, dt: f32, tau: f32) -> (f32, f32) {
@@ -171,6 +199,131 @@ pub fn step_ease(ease: f32, vel: f32, target: f32, dt: f32, tau: f32) -> (f32, f
     let v = vel + acc * dt;
     let x = ease + v * dt;
     (x.clamp(-0.05, 1.05), v)
+}
+
+/// 名称哈希：FNV-1a 32 + murmur3 的 `fmix32` 收尾（雪崩）。
+/// 不用 std 的 `DefaultHasher`：它不保证跨 Rust 版本稳定，图标颜色会在升级后集体变脸。
+fn name_hash(name: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    // 只差最后几个字节的名字（「应用1」/「应用2」）也必须散开 → 走一遍雪崩混合
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
+/// 色相槽（16 格、22.5° 一格）。槽位 = `hash % 16`，**撞槽的按哈希序顺延到下一个空槽** ——
+/// 纯取模 16 个名字撞色概率 ~67%（生日问题），顺延才敢说「16 个图标 16 种色相」。
+/// >16 项时盘面不够分，退回直接取模（靠明度/彩度档再拉开）。
+fn fallback_slots(hashes: &[u32]) -> Vec<usize> {
+    let n = hashes.len();
+    if n > 16 {
+        return hashes.iter().map(|h| (*h % 16) as usize).collect();
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (hashes[i], i));
+    let mut taken = [false; 16];
+    let mut slots = vec![0usize; n];
+    for &i in &order {
+        let mut s = (hashes[i] % 16) as usize;
+        // n ≤ 16 时最多 n-1 格被占 → 一定有空格，循环必停
+        while taken[s] {
+            s = (s + 1) % 16;
+        }
+        taken[s] = true;
+        slots[i] = s;
+    }
+    slots
+}
+
+/// 图标取不到时画的**首字母色块**底色（一条 Dock 一批，供 `paint` 直接用）。
+/// 色相 = 槽位 × 22.5° + 11.25°（+11.25 避开纯红 0°，一排红方块最难看），
+/// 明度三档（0.54/0.58/0.62）与彩度两档（0.14/0.17）取哈希高位 → 同色相也分得开。
+/// 颜色只由名字决定（撞槽顺延除外），拖动排序不会换色。
+pub fn fallback_colors(items: &[DockItem]) -> Vec<D2D1_COLOR_F> {
+    let hashes: Vec<u32> = items.iter().map(|it| name_hash(&it.name)).collect();
+    let slots = fallback_slots(&hashes);
+    (0..items.len())
+        .map(|i| {
+            let h = hashes[i];
+            let l = [0.54f32, 0.58, 0.62][((h >> 11) % 3) as usize];
+            let c = if (h >> 15) & 1 == 0 { 0.14f32 } else { 0.17 };
+            oklch(l, c, slots[i] as f32 * 22.5 + 11.25, 0.94)
+        })
+        .collect()
+}
+
+/// 色块上那个字：中文取首字、英文取首字母（跳过空白），空名字给 `?`
+fn first_char(name: &str) -> char {
+    name.chars().find(|c| !c.is_whitespace()).unwrap_or('?')
+}
+
+/// 画一块兜底色块（图标位与拖拽浮起位共用）：`(cx, cy)` = 方块中心，`s` = 边长。
+/// 尺寸/位置/圆角都由调用方按「真图标那一格」算好传进来，所以视觉效果与真图标完全重合。
+///
+/// # Safety
+/// 只能在 `paint` 的 `unsafe` 块里调用（内部直接用 `g.d2d`）。
+#[allow(clippy::too_many_arguments)]
+unsafe fn fallback_tile(
+    g: &Gfx,
+    te: &TextEngine,
+    fill: D2D1_COLOR_F,
+    cx: f32,
+    cy: f32,
+    s: f32,
+    radius: f32,
+    name: &str,
+) -> Result<()> {
+    let r = Rect {
+        x: cx - s / 2.0,
+        y: cy - s / 2.0,
+        w: s,
+        h: s,
+    };
+    set_color(g, fill)?;
+    fill_round(
+        g,
+        D2D_RECT_F {
+            left: r.x,
+            top: r.y,
+            right: r.x + r.w,
+            bottom: r.y + r.h,
+        },
+        radius,
+    )?;
+    let fs = s * FALLBACK_TEXT_K;
+    let lh = fs * 1.25;
+    let spec = TextSpec {
+        s: first_char(name).to_string(),
+        size: fs,
+        line_h: lh,
+        weight: 600,
+        wrap: false,
+        // 0 = 左对齐（单字会贴着色块左缘）；2 = 居中，字才在方块正中
+        align: 2,
+        tabular: false,
+        spacing_em: 0.0,
+    };
+    // 布局盒宽 = 方块边长：居中后单字正好落在方块中轴；高 = 一行行高，按中心对齐
+    let lay = te.layout_spec(&spec, s, lh, Mode::Clip)?;
+    // 色块是中深饱和色（oklch L ≤ 0.62），压白字在两套主题下都够对比
+    set_color(g, oklch(0.985, 0.0, 0.0, 0.95))?;
+    g.d2d.DrawTextLayout(
+        windows_numerics::Vector2 {
+            X: r.x,
+            Y: cy - lh / 2.0,
+        },
+        &lay,
+        &g.brush,
+        windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
+    );
+    Ok(())
 }
 
 /// 画整条 Dock。`icons[i]` 为空 = 该条目没图标（画首字母色块兜底）。
@@ -190,6 +343,8 @@ pub fn paint(
 ) -> Result<()> {
     let n = d.items.len().min(geo.cx.len());
     let bar = geo.bar;
+    // 兜底色块的颜色一次算好（纯函数、16 个哈希，可以每帧算）
+    let fills = fallback_colors(&d.items);
     unsafe {
         g.begin()?;
 
@@ -210,6 +365,34 @@ pub fn paint(
         }
         set_color(g, pal.veil)?;
         fill_round(g, bar, t.radius)?;
+
+        // 空态：条心一行提示（条宽已由 `Tokens::dock` 兜到 `EMPTY_MIN_W`）
+        if d.items.is_empty() {
+            let spec = TextSpec {
+                s: EMPTY_HINT.to_string(),
+                size: 13.0,
+                line_h: 20.0,
+                weight: 400,
+                wrap: false,
+                align: 2, // 居中（0 = 左、1 = 右、2 = 中）
+                tabular: false,
+                spacing_em: 0.0,
+            };
+            let inner = (bar.right - bar.left - 24.0).max(20.0);
+            let lay = te.layout_spec(&spec, inner, 20.0, Mode::Clip)?;
+            // 提示字比正文淡：`fg 55%`，压在玻璃上不抢眼
+            set_color(g, D2D1_COLOR_F { a: 0.55, ..pal.fg })?;
+            g.d2d.DrawTextLayout(
+                windows_numerics::Vector2 {
+                    X: bar.left + 12.0,
+                    // 条高 = size + 16，文案按 20 行高在条内垂直居中
+                    Y: bar.top + (t.bar_h - 20.0) / 2.0,
+                },
+                &lay,
+                &g.brush,
+                windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+        }
 
         // 图标（含首字母兜底）
         for i in 0..n {
@@ -246,48 +429,11 @@ pub fn paint(
                     minicard_draw::image::draw_linear(g, bmp, src, dst)?;
                 }
                 None => {
-                    let r = Rect {
-                        x: cx - half,
-                        y: cy - half,
-                        w: s,
-                        h: s,
-                    };
-                    set_color(g, pal.badge_bg)?;
-                    fill_round(
-                        g,
-                        D2D_RECT_F {
-                            left: r.x,
-                            top: r.y,
-                            right: r.x + r.w,
-                            bottom: r.y + r.h,
-                        },
-                        10.0 * k,
-                    )?;
-                    if let Some(it) = d.items.get(i) {
-                        let ch = it.name.chars().next().unwrap_or('?').to_string();
-                        let fs = s * 0.5;
-                        let spec = TextSpec {
-                            s: ch,
-                            size: fs,
-                            line_h: fs,
-                            weight: 600,
-                            wrap: false,
-                            align: 1,
-                            tabular: false,
-                            spacing_em: 0.0,
-                        };
-                        let lay = te.layout_spec(&spec, s, fs + 8.0, Mode::Clip)?;
-                        set_color(g, pal.fg)?;
-                        g.d2d.DrawTextLayout(
-                            windows_numerics::Vector2 {
-                                X: r.x,
-                                Y: cy - fs / 2.0,
-                            },
-                            &lay,
-                            &g.brush,
-                            windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        );
-                    }
+                    // 兜底：跟真图标同尺寸同位置的一块首字母色块
+                    // （尺寸/位置/放大动效仍然全部由 `Geo` 决定，这里只接管「画什么」）
+                    let fill = fills.get(i).copied().unwrap_or(pal.badge_bg);
+                    let name = d.items.get(i).map(|it| it.name.as_str()).unwrap_or("");
+                    fallback_tile(g, te, fill, cx, cy, s, ICON_RADIUS * k, name)?;
                 }
             }
         }
@@ -310,23 +456,35 @@ pub fn paint(
                     right: dg.x + s / 2.0 + 2.0,
                     bottom: bottom + 5.0,
                 },
-                10.0,
+                ICON_RADIUS,
             )?;
-            if let Some(bmp) = icons.get(dg.from).and_then(|o| *o) {
-                let (iw, ih) = {
-                    let p = bmp.GetPixelSize();
-                    (p.width as f32, p.height as f32)
-                };
-                let kk = (s / iw).min(s / ih);
-                let (dw, dh) = (iw * kk, ih * kk);
-                let src = D2D_RECT_F { left: 0.0, top: 0.0, right: iw, bottom: ih };
-                let dst = D2D_RECT_F {
-                    left: dg.x - dw / 2.0,
-                    top: bottom - s + (s - dh) / 2.0,
-                    right: dg.x + dw / 2.0,
-                    bottom: bottom - s + (s - dh) / 2.0 + dh,
-                };
-                minicard_draw::image::draw_linear(g, bmp, src, dst)?;
+            match icons.get(dg.from).and_then(|o| *o) {
+                Some(bmp) => {
+                    let (iw, ih) = {
+                        let p = bmp.GetPixelSize();
+                        (p.width as f32, p.height as f32)
+                    };
+                    let kk = (s / iw).min(s / ih);
+                    let (dw, dh) = (iw * kk, ih * kk);
+                    let src = D2D_RECT_F { left: 0.0, top: 0.0, right: iw, bottom: ih };
+                    let dst = D2D_RECT_F {
+                        left: dg.x - dw / 2.0,
+                        top: bottom - s + (s - dh) / 2.0,
+                        right: dg.x + dw / 2.0,
+                        bottom: bottom - s + (s - dh) / 2.0 + dh,
+                    };
+                    minicard_draw::image::draw_linear(g, bmp, src, dst)?;
+                }
+                None => {
+                    // 被拖的条目本来就没图标：色块跟着指针走，不然只剩一团阴影
+                    let fill = fills.get(dg.from).copied().unwrap_or(pal.badge_bg);
+                    let name = d
+                        .items
+                        .get(dg.from)
+                        .map(|it| it.name.as_str())
+                        .unwrap_or("");
+                    fallback_tile(g, te, fill, dg.x, bottom - s / 2.0, s, ICON_RADIUS, name)?;
+                }
             }
             // 落点竖线：2px 强调色，竖直占满图标高度
             let mx = insert_mark_x(t, &geo.cx, dg.insert);
@@ -350,13 +508,10 @@ pub fn paint(
         let sep_y2 = t.h - sep_bottom;
         let sep_y1 = sep_y2 - sep_h;
         for i in 1..n {
-            if !div_before(d, i) {
+            // 「前面有没有图标」的判据收在 `divider_x` 里：第 0 项即使标了 `divider_before` 也不画
+            let Some(x) = divider_x(t, d, geo, i) else {
                 continue;
-            }
-            let a = i - 1;
-            let ax = geo.cx[a] + t.size * geo.ks.get(a).copied().unwrap_or(1.0) / 2.0;
-            let bx = geo.cx[i] - t.size * geo.ks.get(i).copied().unwrap_or(1.0) / 2.0;
-            let x = (ax + bx) / 2.0 - 0.5;
+            };
             set_color(
                 g,
                 windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a: 0.26, ..pal.fg },
@@ -766,5 +921,125 @@ mod tests {
         let top = t.icon_bottom() - t.size * g.ks[0];
         assert!(top < t.top, "放大后图标顶 {top} 没长过条顶 {}", t.top);
         assert!(top > 0.0, "放大后图标顶 {top} 跑出窗口");
+    }
+
+    // ── 兜底色块 / 空态 / 分组线（都只测 dock.rs 里的纯函数，不建 Gfx）──
+
+    /// 名称哈希：同名字稳定；只差一个字的两个名字（「微信」/「微博」）也得散开
+    #[test]
+    fn 名称哈希稳定且散得开() {
+        assert_eq!(name_hash("微信"), name_hash("微信"));
+        assert_ne!(name_hash("微信"), name_hash("微博"));
+        assert_ne!(name_hash(""), name_hash(" "));
+        // 「应用0..15」这种只差末尾 1~2 字节的名字：原始槽位也得覆盖大半盘面
+        let slots: Vec<usize> = (0..16)
+            .map(|i| (name_hash(&format!("应用{i}")) % 16) as usize)
+            .collect();
+        let uniq: std::collections::HashSet<_> = slots.iter().collect();
+        assert!(
+            uniq.len() >= 8,
+            "16 个名字只散到 {} 个色相槽：{slots:?}",
+            uniq.len()
+        );
+    }
+
+    /// 色相槽撞了要顺延：三个哈希都落在槽 0 → 必须分到 0/1/2（谁哈希小谁占原槽）
+    #[test]
+    fn 兜底色撞槽时顺延() {
+        assert_eq!(fallback_slots(&[0, 16, 32]), vec![0, 1, 2]);
+        assert_eq!(fallback_slots(&[32, 0, 16]), vec![2, 0, 1]);
+        // >16 项时盘面不够分：不 panic、长度对得上
+        assert_eq!(fallback_slots(&[0u32; 17]).len(), 17);
+    }
+
+    /// 16 个条目 → 16 个色相槽两两不同、颜色两两不同；同一批名字取两次颜色一致
+    #[test]
+    fn 兜底色块16项不撞色() {
+        let d = dock_of(16, &[0, 5, 10]);
+        let a = fallback_colors(&d.items);
+        let b = fallback_colors(&d.items);
+        assert_eq!(a.len(), 16);
+        for i in 0..16 {
+            assert_eq!(
+                (a[i].r, a[i].g, a[i].b),
+                (b[i].r, b[i].g, b[i].b),
+                "第 {i} 项两次取色不一致（颜色必须只由名字决定）"
+            );
+        }
+        let hashes: Vec<u32> = d.items.iter().map(|it| name_hash(&it.name)).collect();
+        let mut slots = fallback_slots(&hashes);
+        slots.sort_unstable();
+        slots.dedup();
+        assert_eq!(slots.len(), 16, "16 个条目应占满 16 个色相槽：{slots:?}");
+        for i in 0..16 {
+            for j in (i + 1)..16 {
+                let dd = (a[i].r - a[j].r).abs() + (a[i].g - a[j].g).abs() + (a[i].b - a[j].b).abs();
+                assert!(dd > 0.02, "第 {i}/{j} 项颜色几乎一样（{dd}）");
+            }
+        }
+    }
+
+    /// 色块上的字：中英都取首个非空白字符，空名字给 `?`
+    #[test]
+    fn 兜底色块取首字符() {
+        assert_eq!(first_char("微信"), '微');
+        assert_eq!(first_char("WeChat"), 'W');
+        assert_eq!(first_char("  记事本"), '记');
+        assert_eq!(first_char(""), '?');
+        assert_eq!(first_char("  "), '?');
+    }
+
+    /// 空态：条宽兜到 `EMPTY_MIN_W`、进场不许变窄、`geo/hit` 不 panic 也不命中
+    #[test]
+    fn 空态条宽与命中() {
+        let mut d = Dock::default();
+        assert!(d.items.is_empty());
+        d.size = 48;
+        let t = Tokens::dock(&d);
+        assert!(t.bar_w0 >= EMPTY_MIN_W, "空态条宽 {} < {EMPTY_MIN_W}", t.bar_w0);
+        assert!((t.w - (t.bar_w0 + 2.0 * t.side)).abs() < 1e-6);
+        assert!(t.bar_w_max >= t.bar_w0, "进场不许把空态的条缩窄");
+        let g = t.geo(&d, Some(t.w / 2.0), 1.0);
+        assert!(g.cx.is_empty() && g.ks.is_empty());
+        assert!((g.bar.right - g.bar.left - t.bar_w0).abs() < 0.01);
+        assert!(g.bar.left >= -0.01 && g.bar.right <= t.w + 0.01);
+        assert!((g.bar.bottom - t.h).abs() < 1e-6);
+        // 空态点哪儿都不命中（否则右键菜单会拿到不存在的下标）
+        for (x, y) in [
+            (0.0, 0.0),
+            (t.w / 2.0, t.icon_bottom() - 20.0),
+            (t.w, t.h),
+        ] {
+            assert_eq!(hit(&t, &g, x, y), None, "({x},{y})");
+        }
+        // 落点线退化成窗口中心（不是 NaN）
+        assert!((insert_mark_x(&t, &g.cx, 0) - t.w / 2.0).abs() < 1e-4);
+    }
+
+    /// 分组线只在「前面有图标」时画：第 0 项标了 `divider_before` 也不画，单条目一条线都没有
+    #[test]
+    fn 分组线只在前面有图标时画() {
+        let d = dock_of(4, &[0, 2]); // 第 0 项故意也标 true
+        let t = Tokens::dock(&d);
+        let g = t.geo(&d, None, 0.0);
+        assert!(!div_before(&d, 0));
+        assert!(div_before(&d, 2));
+        assert_eq!(divider_x(&t, &d, &g, 0), None, "第 0 项左边没图标，不许画线");
+        assert_eq!(divider_x(&t, &d, &g, 1), None, "第 1 项没标 divider_before");
+        let x2 = divider_x(&t, &d, &g, 2).expect("第 2 项标了且前面有图标 → 要画");
+        let want = (g.cx[1] + t.size / 2.0 + g.cx[2] - t.size / 2.0) / 2.0 - 0.5;
+        assert!((x2 - want).abs() < 1e-4, "{x2} 应为 {want}");
+        assert_eq!(divider_x(&t, &d, &g, 3), None, "第 3 项没标");
+        assert_eq!(divider_x(&t, &d, &g, 99), None, "越界不许 panic");
+        // 整条只画 1 条线 = `Dock::divider_count()` 的口径（首个不算）
+        let drawn = (1..4).filter(|&i| divider_x(&t, &d, &g, i).is_some()).count();
+        assert_eq!(drawn, 1);
+        assert_eq!(drawn, d.divider_count());
+        // 单条目 + divider_before：前面反正没图标，一条线都不画
+        let one = dock_of(1, &[0]);
+        let t1 = Tokens::dock(&one);
+        let g1 = t1.geo(&one, None, 0.0);
+        assert_eq!(divider_x(&t1, &one, &g1, 0), None);
+        assert_eq!(divider_x(&t1, &one, &g1, 1), None);
     }
 }
