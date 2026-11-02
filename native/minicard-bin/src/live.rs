@@ -1037,7 +1037,36 @@ pub fn run(
                         }
                         win.next_draw = now;
                     }
+                    // Dock 的尺寸/条目数/位置/圆角相关项变了 → 重建 Dock 窗
+                    // （settings 页里改 48↔64 档、隐藏桌面图标、Dock 换边都在这里生效）
+                    let dock_geom_changed = {
+                        let a = &cfg.dock;
+                        let b = &nc.dock;
+                        a.size != b.size
+                            || a.items.len() != b.items.len()
+                            || a.cx != b.cx
+                            || a.y != b.y
+                            || a.enabled != b.enabled
+                            || a.z != b.z
+                    };
                     cfg = nc;
+                    if dock_geom_changed {
+                        if cfg.dock.enabled {
+                            if let Some(dw) = dock_win.as_mut() {
+                                match dock_rebuild(dw, &cfg, &wall, blur) {
+                                    Ok(()) => minicard_shell::mlog!("config 热载：Dock 重建"),
+                                    Err(e) => minicard_shell::mlog!("config 热载：Dock 重建失败 {e:?}"),
+                                }
+                            }
+                        }
+                    } else if blur_changed {
+                        // 模糊变了但几何没变：Dock 的玻璃也得重切
+                        if let Some(dw) = dock_win.as_mut() {
+                            if let Err(e) = dock_rebuild(dw, &cfg, &wall, blur) {
+                                minicard_shell::mlog!("Dock 玻璃重切失败：{e:?}");
+                            }
+                        }
+                    }
                 }
             }
 
