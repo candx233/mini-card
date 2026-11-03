@@ -249,14 +249,13 @@
   /* 位置（2026-10-24）：X/Y 各一行「轴标 + 数值 + 滑条」，取代原来的缩略图。
      量程由 desk_geometry 的虚拟桌面并集给（见 paintPos），副屏/负坐标的卡也有行程。 */
   .posctl { padding: 10px 16px 12px; }
-  .axis-row { display: grid; grid-template-columns: 15px 82px 1fr; align-items: center; gap: 11px; padding-top: 8px; }
+  .axis-row { display: grid; grid-template-columns: 26px 82px 1fr; align-items: center; gap: 11px; padding-top: 8px; }
   .axis-row:first-child { padding-top: 1px; }
   .axis-k { font-family: var(--font-mono); font-size: 12px; color: var(--muted); text-align: center; letter-spacing: .04em; }
   .axis-num { width: 100%; height: 30px; padding: 0 9px; font-family: var(--font-mono); font-size: 12.5px; }
   .axis-num::-webkit-inner-spin-button, .axis-num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   .axis-range { margin: 0; }   /* 全局 range 有 11px 上边距，这里靠 grid 的 gap 排 */
-  .pos-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; }
-  .pos-foot .hint { font-size: 14px; color: var(--muted); }
+  .pos-foot { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding-top: 10px; }
   .pos-foot .linkbtn { flex: 0 0 auto; font-size: 13px; padding: 2px 0; }
   .linkbtn {
     border: 0; background: transparent; font-size: 14px; font-weight: 500; color: var(--accent-strong); padding: 6px 2px;
@@ -516,7 +515,6 @@
                   <input class="axis-range" id="rng-cx-gap" type="range" step="1" min="0" max="120" value="0" aria-label="卡片之间的固定间距滑条">
                 </div>
                 <div class="pos-foot">
-                  <span class="hint">间距 0 = 只对齐边缘/中线；填数字 = 卡片之间固定留这么多</span>
                   <button class="linkbtn" id="cx-locate" style="display:inline-flex;align-items:center;gap:6px;padding-left:0">
                     <svg viewBox="0 0 24 24" style="width:13px;height:13px;stroke:currentColor;stroke-width:1.9;fill:none;stroke-linecap:round"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
                     在桌面上高亮
@@ -1268,7 +1266,7 @@
     function paintGap() {
       var g = Math.max(0, Math.min(200, Math.round(Number(CFG.settings.card_gap) || 0)));
       if (ge) ge.value = g;
-      if (rg) rg.value = Math.min(120, g);
+      if (rg) { rg.value = Math.min(120, g); paint(rg); }
     }
     function setGap(v) {
       var g = Math.max(0, Math.min(200, Math.round(Number(v) || 0)));
