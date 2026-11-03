@@ -95,12 +95,31 @@ fn spawn_running_watcher() {
     if RUNNING_WATCHER.swap(true, Ordering::Relaxed) {
         return;
     }
-    std::thread::spawn(|| loop {
-        let set = crate::appwin::running_set();
-        if let Ok(mut g) = RUNNING_SET.lock() {
-            *g = Some(set);
+    std::thread::spawn(|| {
+        // 钩子必须装在「有消息循环的线程」上：这里就是
+        let hooked = crate::winevent::install();
+        let mut last = Instant::now() - Duration::from_secs(10);
+        loop {
+            // 抽 100ms 消息（钩子回调在这里跑），有事件或者超过 3s 就补扫一次
+            let ev = crate::winevent::pump(100);
+            let due = last.elapsed() > Duration::from_secs(3);
+            if ev || due || !hooked {
+                let t0 = Instant::now();
+                let set = crate::appwin::running_set();
+                if let Ok(mut g) = RUNNING_SET.lock() {
+                    *g = Some(set);
+                }
+                last = Instant::now();
+                if std::env::var("MC_DOCK_LOG").is_ok() {
+                    minicard_shell::mlog!(
+                        "运行点扫描：{} → {} ms（{}）",
+                        if ev { "事件" } else { "兜底" },
+                        t0.elapsed().as_millis(),
+                        if hooked { "钩子" } else { "轮询" }
+                    );
+                }
+            }
         }
-        std::thread::sleep(Duration::from_secs(2));
     });
 }
 
@@ -1385,7 +1404,7 @@ pub fn run(
                         dw.running = want;
                         dw.last_sig = 0;
                     }
-                    dw.next_running = now + Duration::from_secs(2);
+                    dw.next_running = now + Duration::from_millis(120);
                 }
                 // 验收钩子 `MC_DOCK_DRAG=<from>:<窗内 x>`：一次跑完「按下 → 拖 → 松手」，
                 // 不依赖真鼠标（用户鼠标一动，注入的拖拽就被抢走，量不了）

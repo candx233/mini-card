@@ -12,6 +12,7 @@ mod appwin;
 mod drop;
 mod icon;
 mod menu;
+mod winevent;
 mod live;
 mod probe;
 
