@@ -166,6 +166,13 @@ pub fn is_running(item_path: &str) -> bool {
 /// 点图标：**已在跑就切到前台**（没有前台窗口时先 restore），否则 ShellExecute 启动。
 /// 返回给日志用的一句话。
 pub fn click(item_path: &str, args: &str) -> String {
+    // 验收钩子：模拟「打开要很久」的条目（不真启动应用），用来量点击期间帧是否还在走
+    if let Ok(ms) = std::env::var("MC_DOCK_SLOW") {
+        if let Ok(ms) = ms.parse::<u64>() {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            return "launched".into();
+        }
+    }
     let key = match_key(item_path);
     let wins = visible_windows();
     let mine: Vec<isize> = wins

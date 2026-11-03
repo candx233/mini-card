@@ -50,6 +50,60 @@ static EVENTS: Mutex<Vec<UiEvent>> = Mutex::new(Vec::new());
 static DOCK_SNAP: Mutex<Option<(minicard_cards::dock::Tokens, minicard_cards::dock::Geo)>> =
     Mutex::new(None);
 
+/// 点击动作在**工作线程**跑（`ShellExecuteW` 会阻塞到目标进程真正起来，Steam/WeGame 那种
+/// 能卡 1~3 秒），结果通过这里回主循环，再由主循环改气泡文案。
+static CLICK_RESULT: Mutex<Option<(usize, String)>> = Mutex::new(None);
+/// 已经在启动/切换中：期间不再重复派活，避免连点起多份
+static CLICK_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 主循环上一拍的时刻 + 点击期间的最大停顿（判据：点了之后 UI 不该停）
+static ITER_LAST: Mutex<Option<Instant>> = Mutex::new(None);
+static CLICK_MAXGAP_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 结果回填后置位，下一拍把「停顿」打出来（同一拍里刚点完还没量到）
+static CLICK_REPORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 「哪些应用在跑」的快照：由后台线程每 2s 刷一次。
+/// 枚举所有顶层窗口 + 逐个取 exe 路径在主线程要 30~150ms，2s 一次就是固定停顿。
+static RUNNING_SET: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+static RUNNING_WATCHER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 常驻的「点击执行」线程：`ShellExecuteW` 会阻塞到目标进程起来，但**不能占主循环**；
+/// 每次 `thread::spawn` 又要 ~80ms（加载器锁 + 栈分配），所以线程只起一次、用信道派活。
+static CLICK_TX: Mutex<Option<std::sync::mpsc::Sender<(usize, String, String, String)>>> =
+    Mutex::new(None);
+static CLICK_WORKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn spawn_click_worker() {
+    if CLICK_WORKER.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, String, String, String)>();
+    *CLICK_TX.lock().unwrap() = Some(tx);
+    std::thread::spawn(move || {
+        for (i, name, path, args) in rx {
+            let t0 = Instant::now();
+            let r = crate::appwin::click(&path, &args);
+            let ms = t0.elapsed().as_secs_f32() * 1000.0;
+            minicard_shell::mlog!("dock 点击 [{i}] {name} → {r}（{ms:.0} ms）");
+            if let Ok(mut g) = CLICK_RESULT.lock() {
+                *g = Some((i, r));
+            }
+        }
+    });
+}
+
+fn spawn_running_watcher() {
+    if RUNNING_WATCHER.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    std::thread::spawn(|| loop {
+        let set = crate::appwin::running_set();
+        if let Ok(mut g) = RUNNING_SET.lock() {
+            *g = Some(set);
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    });
+}
+
 /// Dock 窗在屏幕上的原点 + dpi（菜单要按屏幕像素定位，窗口线程拿不到 `dw`）
 static DOCK_ORIGIN: Mutex<Option<(i32, i32, f32)>> = Mutex::new(None);
 
@@ -701,6 +755,8 @@ pub fn run(
                     minicard_shell::mlog!("Dock 自绘：{} 项，窗口 {}×{}", d.items.len(), w_px, h_px);
                     *DOCK_ORIGIN.lock().unwrap() = Some((x, y, dpi));
                     crate::drop::install(hwnd, d.clone(), (x, y), dpi);
+                    spawn_running_watcher();
+                    spawn_click_worker();
                     let dk_dpi = dpi;
                     let mut dw = DockWin {
                         hwnd,
@@ -778,20 +834,46 @@ pub fn run(
                         if let Some((tk, geo)) = snap {
                             if let Some(i) = minicard_cards::dock::hit(&tk, &geo, x, y) {
                                 if let Some(item) = cfg.dock.items.get(i) {
-                                    let r = crate::appwin::click(&item.path, &item.args);
-                                    minicard_shell::mlog!("dock 点击 [{}] {} → {r}", i, item.name);
-                                    // 点击反馈：气泡立刻改成结果文案（与 dock.html 的
-                                    // 「启动中…/已最小化/已切到前台/失败：…」同口径）
+                                    // 气泡先说「启动中…」，真正的结果由工作线程回填
                                     if let Some(dw) = dock_win.as_mut() {
-                                        let (txt, ms) = match r.as_str() {
-                                            "launched" => ("启动中…".to_string(), 1.5),
-                                            "minimized" => ("已最小化".to_string(), 1.2),
-                                            "activated" => ("已切到前台".to_string(), 1.2),
-                                            other => (format!("打开失败：{other}"), 2.2),
-                                        };
-                                        dw.flash = Some((txt, Instant::now()));
-                                        dw.flash_ms = ms;
+                                        dw.flash = Some(("启动中…".to_string(), Instant::now()));
+                                        dw.flash_ms = 1.5;
                                         dw.last_sig = 0;
+                                    }
+                                    // 变异检验口：MC_DOCK_INLINE=1 走旧的「主线程直接执行」，
+                                    // 用来证明停顿测量是灵敏的（不带这个变量才是线上路径）
+                                    if std::env::var("MC_DOCK_INLINE").is_ok() {
+                                        CLICK_BUSY.store(true, Ordering::Relaxed);
+                                        let t_inline = Instant::now();
+                                        let r = crate::appwin::click(&item.path, &item.args);
+                                        // 主线程被这次调用整段占住，停顿就是它本身的耗时
+                                        CLICK_MAXGAP_US.store(
+                                            t_inline.elapsed().as_micros() as u64,
+                                            Ordering::Relaxed,
+                                        );
+                                        let _ = CLICK_RESULT.lock().map(|mut g| *g = Some((i, r)));
+                                        continue;
+                                    }
+                                    let busy = CLICK_BUSY.swap(true, Ordering::Relaxed);
+                                    if busy {
+                                        minicard_shell::mlog!("dock 点击 [{i}] {}：上一次还没结束，忽略", item.name);
+                                    } else {
+                                        let job = (
+                                            i,
+                                            item.name.clone(),
+                                            item.path.clone(),
+                                            item.args.clone(),
+                                        );
+                                        let sent = CLICK_TX
+                                            .lock()
+                                            .ok()
+                                            .and_then(|g| g.as_ref().cloned())
+                                            .map(|tx| tx.send(job).is_ok())
+                                            .unwrap_or(false);
+                                        if !sent {
+                                            CLICK_BUSY.store(false, Ordering::Relaxed);
+                                            minicard_shell::mlog!("dock 点击：[{i}] 派活失败（线程没起）");
+                                        }
                                     }
                                 }
                             } else {
@@ -994,6 +1076,47 @@ pub fn run(
                     }
                 }
             }
+            // 验收钩子：MC_DOCK_CLICK=<i> 在 3s 后按图标中心模拟一次点击（不依赖真鼠标）
+            if let Some(i) = std::env::var("MC_DOCK_CLICK")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                use std::sync::OnceLock;
+                static T0: OnceLock<Instant> = OnceLock::new();
+                let t0 = *T0.get_or_init(Instant::now);
+                static DONE: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if t0.elapsed().as_secs_f32() > 3.0
+                    && !DONE.swap(true, Ordering::Relaxed)
+                    && i < cfg.dock.items.len()
+                {
+                    if let Some((tk, geo)) = DOCK_SNAP.lock().unwrap().clone() {
+                        let x = geo.cx.get(i).copied().unwrap_or(tk.w / 2.0);
+                        let y = tk.icon_bottom() - tk.size / 2.0;
+                        let _ = EVENTS.lock().unwrap().push(UiEvent::DockClick { x, y });
+                        minicard_shell::mlog!("MC_DOCK_CLICK：派发点击 [{i}]");
+                    }
+                }
+            }
+            // 工作线程跑完的点击结果 → 改气泡文案（与 dock.html 的
+            // 「已最小化 / 已切到前台 / 失败：…」同口径）
+            let click_done = CLICK_RESULT.lock().ok().and_then(|mut g| g.take());
+            if let Some((i, r)) = click_done {
+                CLICK_BUSY.store(false, Ordering::Relaxed);
+                CLICK_REPORT.store(true, Ordering::Relaxed);
+                if let Some(dw) = dock_win.as_mut() {
+                    let (txt, ms) = match r.as_str() {
+                        "launched" => ("已启动".to_string(), 1.5),
+                        "minimized" => ("已最小化".to_string(), 1.2),
+                        "activated" => ("已切到前台".to_string(), 1.2),
+                        other => (format!("打开失败：{other}"), 2.2),
+                    };
+                    let _ = i;
+                    dw.flash = Some((txt, Instant::now()));
+                    dw.flash_ms = ms;
+                    dw.last_sig = 0;
+                }
+            }
             if crate::drop::take_dropped() {
                 dock_need_rebuild = true;
             }
@@ -1006,6 +1129,24 @@ pub fn run(
             }
 
             let now = Instant::now();
+            // 点击期间主循环的最大停顿（判据：点了之后 UI 不该停）——真机验收用
+            if let Ok(mut g) = ITER_LAST.lock() {
+                if let Some(prev) = *g {
+                    let us = now.duration_since(prev).as_micros() as u64;
+                    if CLICK_BUSY.load(Ordering::Relaxed)
+                        && us > CLICK_MAXGAP_US.load(Ordering::Relaxed)
+                    {
+                        CLICK_MAXGAP_US.store(us, Ordering::Relaxed);
+                    }
+                }
+                *g = Some(now);
+            }
+            if CLICK_REPORT.swap(false, Ordering::Relaxed) {
+                minicard_shell::mlog!(
+                    "点击期间主循环最大停顿 {:.1} ms",
+                    CLICK_MAXGAP_US.swap(0, Ordering::Relaxed) as f32 / 1000.0
+                );
+            }
             let (y, mo, d, hh, mm, _) = now_parts();
             let date = date_text(y, mo, d, now_parts().5);
             let lunar_txt = lunar::lunar_text(y, mo, d).unwrap_or_default();
@@ -1227,7 +1368,11 @@ pub fn run(
                 }
                 // 运行点：2s 一轮（可见顶层窗口 → exe），变了就强制重绘一次
                 if now >= dw.next_running {
-                    let set = crate::appwin::running_set();
+                    let set = RUNNING_SET
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone())
+                        .unwrap_or_default();
                     let want: Vec<bool> = cfg
                         .dock
                         .items
