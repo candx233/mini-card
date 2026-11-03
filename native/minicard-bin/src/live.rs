@@ -2001,24 +2001,8 @@ fn dock_icon_path(it: &minicard_core::config::DockItem) -> Option<std::path::Pat
             return Some(p);
         }
     }
-    if it.path.trim().is_empty() || it.path.starts_with("http") {
-        return None;
-    }
-    let norm = it
-        .path
-        .replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_lowercase();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in norm.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    let base = std::env::var_os("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let p = base.join("mini-card").join("icons").join(format!("{h:016x}.png"));
-    if p.exists() { Some(p) } else { None }
+    // 统一走 icon::ensure：缓存里是很小的旧 PNG（32 档）时会自动重提一次
+    crate::icon::ensure(&it.path)
 }
 
 /// 条目增减（右键「从 Dock 移除」/改分隔线）后重建 Dock 窗：
