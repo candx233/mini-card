@@ -700,6 +700,7 @@ pub fn run(
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     minicard_shell::mlog!("Dock 自绘：{} 项，窗口 {}×{}", d.items.len(), w_px, h_px);
                     *DOCK_ORIGIN.lock().unwrap() = Some((x, y, dpi));
+                    crate::drop::install(hwnd, d.clone(), (x, y), dpi);
                     let dk_dpi = dpi;
                     let mut dw = DockWin {
                         hwnd,
@@ -979,6 +980,22 @@ pub fn run(
                     );
                     dock_need_rebuild = true;
                 }
+            }
+            // 验收钩子：MC_DOCK_DROP=<路径> 在 3s 后走一遍「拖入」的落库链路（不依赖真鼠标拖放）
+            if let Ok(p) = std::env::var("MC_DOCK_DROP") {
+                use std::sync::OnceLock;
+                static T0: OnceLock<Instant> = OnceLock::new();
+                let t0 = *T0.get_or_init(Instant::now);
+                if t0.elapsed().as_secs_f32() > 3.0 {
+                    let n = crate::drop::add_paths(&[p.clone()], cfg.dock.items.len());
+                    if n > 0 {
+                        minicard_shell::mlog!("MC_DOCK_DROP 生效：{p}");
+                        dock_need_rebuild = true;
+                    }
+                }
+            }
+            if crate::drop::take_dropped() {
+                dock_need_rebuild = true;
             }
             if dock_need_rebuild {
                 if let Some(dw) = dock_win.as_mut() {
@@ -1351,14 +1368,22 @@ pub fn run(
                     alpha: dw.bubble_a,
                 });
 
-                let drag_draw = dw.drag_from.map(|from| {
+                // 外部拖进来的落点线优先（拖放时条不放大，用静止态几何）
+                let ext_drop = crate::drop::ui();
+                let drag_draw = ext_drop
+                    .map(|u| minicard_cards::dock::DragDraw {
+                        from: usize::MAX,
+                        x: u.x,
+                        insert: u.insert,
+                    })
+                    .or_else(|| dw.drag_from.map(|from| {
                     // 插入位次：落在第 i 个槽中心右侧 → 插到 i+1；走到自己左边那半算原位
                     let mut insert = geo.cx.iter().filter(|&&c| c < dw.drag_x).count();
                     if insert > from {
                         insert -= 1;
                     }
                     minicard_cards::dock::DragDraw { from, x: dw.drag_x, insert }
-                });
+                    }));
                 let sig = (dw.ease * 4096.0) as u64 * 1_000_003
                     + (dw.px * 8.0) as u64
                     + hit.is_some() as u64
@@ -1367,7 +1392,8 @@ pub fn run(
                     + flash_left.max(0.0) as u64 * 104_729
                     + dw.drag_from.unwrap_or(999) as u64 * 31_337
                     + (dw.drag_x * 8.0) as u64
-                    + dw.settle_t0.is_some() as u64 * 7;
+                    + dw.settle_t0.is_some() as u64 * 7
+                    + ext_drop.map(|u| u.insert as u64 + 1).unwrap_or(0) * 1_009;
                 // 静置兜底 1s 一回；悬停但指针不动**不重绘**（否则白烧 60fps）
                 let idle_due = now >= dw.next_paint;
                 if moving || bubble_moving || sig != dw.last_sig || idle_due || dw.settle_t0.is_some() {
@@ -2023,6 +2049,7 @@ fn dock_rebuild(
         );
     }
     dw.t = dk;
+    crate::drop::uninstall(dw.hwnd);
     if let Some(old) = &dw.gfx {
         old.detach();
     }
@@ -2072,6 +2099,7 @@ fn dock_rebuild(
     }
     dw.origin = (x, y);
     *DOCK_ORIGIN.lock().unwrap() = Some((x, y, dw.dpi));
+    crate::drop::install(dw.hwnd, d.clone(), (x, y), dw.dpi);
     dw.running = vec![false; d.items.len()];
     dw.drag_from = None;
     dw.settle_t0 = None;

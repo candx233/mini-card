@@ -24,14 +24,25 @@ windows = { version = "0.62.2", default-features = false, features = [
   "Win32_Graphics_Dxgi_Common",
   "Win32_Media",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
   "Win32_System_LibraryLoader",
   "Win32_System_Threading",
+  "Win32_System_Ole",
+  "Win32_System_SystemServices",
+  "Win32_UI_Shell",
+  "Win32_UI_Controls",
+  "Win32_Storage_FileSystem",
+  "Win32_Graphics_Gdi",
   "Win32_UI_Controls_Dialogs",
   "Win32_UI_HiDpi",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
 windows-numerics = "0.3.1"
+# #[implement] 展开时按字面量引用 windows_core，必须真有这个 crate 名
+windows-core = "0.62.2"
+# 图标 PNG 编码（解码走 WIC，编码只有 png 这一档要用）
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
 opt-level = 3

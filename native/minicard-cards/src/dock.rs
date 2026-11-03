@@ -440,50 +440,55 @@ pub fn paint(
 
         // 落点竖线（强调色 2px）+ 浮起的被拖图标
         if let Some(dg) = drag {
-            let k = if dg.from < geo.ks.len() { 1.06 } else { 1.0 };
+            // `from` 越界 = 外部拖进来（Dock 里没有「被拖的条目」）：
+            // 只画落点线，不画浮起图标/阴影（否则会凭空冒出一块 "?" 色块跟着指针）
+            let ext = dg.from >= n;
+            let k = if ext { 1.0 } else { 1.06 };
             let s = t.size * k;
             let bottom = t.icon_bottom();
-            // 阴影：被拖图标下面垫一层柔和的暗块
-            set_color(
-                g,
-                windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a: 0.35, ..pal.shadow },
-            )?;
-            fill_round(
-                g,
-                D2D_RECT_F {
-                    left: dg.x - s / 2.0 - 2.0,
-                    top: bottom - s + 3.0,
-                    right: dg.x + s / 2.0 + 2.0,
-                    bottom: bottom + 5.0,
-                },
-                ICON_RADIUS,
-            )?;
-            match icons.get(dg.from).and_then(|o| *o) {
-                Some(bmp) => {
-                    let (iw, ih) = {
-                        let p = bmp.GetPixelSize();
-                        (p.width as f32, p.height as f32)
-                    };
-                    let kk = (s / iw).min(s / ih);
-                    let (dw, dh) = (iw * kk, ih * kk);
-                    let src = D2D_RECT_F { left: 0.0, top: 0.0, right: iw, bottom: ih };
-                    let dst = D2D_RECT_F {
-                        left: dg.x - dw / 2.0,
-                        top: bottom - s + (s - dh) / 2.0,
-                        right: dg.x + dw / 2.0,
-                        bottom: bottom - s + (s - dh) / 2.0 + dh,
-                    };
-                    minicard_draw::image::draw_linear(g, bmp, src, dst)?;
-                }
-                None => {
-                    // 被拖的条目本来就没图标：色块跟着指针走，不然只剩一团阴影
-                    let fill = fills.get(dg.from).copied().unwrap_or(pal.badge_bg);
-                    let name = d
-                        .items
-                        .get(dg.from)
-                        .map(|it| it.name.as_str())
-                        .unwrap_or("");
-                    fallback_tile(g, te, fill, dg.x, bottom - s / 2.0, s, ICON_RADIUS, name)?;
+            // 阴影 + 浮起图标：只有「Dock 内部拖拽」才有；外部拖进来只画落点线
+            if !ext {
+                set_color(
+                    g,
+                    windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a: 0.35, ..pal.shadow },
+                )?;
+                fill_round(
+                    g,
+                    D2D_RECT_F {
+                        left: dg.x - s / 2.0 - 2.0,
+                        top: bottom - s + 3.0,
+                        right: dg.x + s / 2.0 + 2.0,
+                        bottom: bottom + 5.0,
+                    },
+                    ICON_RADIUS,
+                )?;
+                match icons.get(dg.from).and_then(|o| *o) {
+                    Some(bmp) => {
+                        let (iw, ih) = {
+                            let p = bmp.GetPixelSize();
+                            (p.width as f32, p.height as f32)
+                        };
+                        let kk = (s / iw).min(s / ih);
+                        let (dw, dh) = (iw * kk, ih * kk);
+                        let src = D2D_RECT_F { left: 0.0, top: 0.0, right: iw, bottom: ih };
+                        let dst = D2D_RECT_F {
+                            left: dg.x - dw / 2.0,
+                            top: bottom - s + (s - dh) / 2.0,
+                            right: dg.x + dw / 2.0,
+                            bottom: bottom - s + (s - dh) / 2.0 + dh,
+                        };
+                        minicard_draw::image::draw_linear(g, bmp, src, dst)?;
+                    }
+                    None => {
+                        // 被拖的条目本来就没图标：色块跟着指针走，不然只剩一团阴影
+                        let fill = fills.get(dg.from).copied().unwrap_or(pal.badge_bg);
+                        let name = d
+                            .items
+                            .get(dg.from)
+                            .map(|it| it.name.as_str())
+                            .unwrap_or("");
+                        fallback_tile(g, te, fill, dg.x, bottom - s / 2.0, s, ICON_RADIUS, name)?;
+                    }
                 }
             }
             // 落点竖线：2px 强调色，竖直占满图标高度

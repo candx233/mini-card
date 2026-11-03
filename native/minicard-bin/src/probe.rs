@@ -651,7 +651,28 @@ pub fn dock_sheet(
     let refs: Vec<Option<&windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>> =
         bitmaps.iter().map(|o| o.as_ref()).collect();
     let geo = t.geo(&d, None, 0.0);
-    dock::paint(g, te, pal, &t, &d, &geo, &refs, &running, None, None, None)
+    // MC_DOCK_INSERT=<i>：画一条外部拖放的落点线（验 OLE 拖入的落点效果，不用真鼠标）
+    let drag = std::env::var("MC_DOCK_INSERT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|i| dock::DragDraw {
+            from: usize::MAX,
+            x: 0.0,
+            insert: i,
+        });
+    dock::paint(
+        g,
+        te,
+        pal,
+        &t,
+        &d,
+        &geo,
+        &refs,
+        &running,
+        None,
+        None,
+        drag.as_ref(),
+    )
 }
 
 /// 与 `src-tauri/src/dock.rs::ensure_icon` 同一套缓存命名（FNV-1a over 规范化路径）
