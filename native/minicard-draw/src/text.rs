@@ -102,6 +102,9 @@ impl TextEngine {
         collection: IDWriteFontCollection,
         family: &str,
     ) -> Result<Self> {
+        // 文字栅格化参数：每建一个 TextEngine 就把安装函数挂给外壳层，之后所有
+        // `Gfx::new`（九张卡 / Dock / 菜单）都会自动套上，调用方不用管。
+        minicard_shell::gfx::set_text_raster_hook(install_default_text_raster);
         unsafe {
             let fam = HSTRING::from(family);
             let mut idx = 0u32;
@@ -556,40 +559,15 @@ impl TextEngine {
 
     /// 自定义文字栅格化参数：`gamma` 与 `enhanced_contrast` 决定抗锯齿的中间调曲线。
     ///
-    /// 默认参数下 D2D 的灰阶抗锯齿在字形边缘掉得比 Chrome 快（同一处斜坡：
-    /// 参考 242→164→40，自绘 242→222→44），整卡像素差里最大的一块就是这一项。
-    /// 用 `--gamma/--contrast` 可以量化扫一遍。
+    /// 出图默认走 [`DEFAULT_TEXT_GAMMA`]（见 `install_default_text_raster`），这里留给
+    /// `--gamma/--contrast/--rmode` 做量化扫档用。
     pub fn rendering_params(
         &self,
         gamma: f32,
         enhanced_contrast: f32,
         rmode: u8,
     ) -> windows::core::Result<windows::Win32::Graphics::DirectWrite::IDWriteRenderingParams> {
-        use windows::Win32::Graphics::DirectWrite::{
-            DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_ALIASED,
-            DWRITE_RENDERING_MODE_GDI_NATURAL, DWRITE_RENDERING_MODE_NATURAL,
-            DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-        };
-        let mode = match rmode {
-            1 => DWRITE_RENDERING_MODE_NATURAL,
-            2 => DWRITE_RENDERING_MODE_GDI_NATURAL,
-            3 => DWRITE_RENDERING_MODE_ALIASED,
-            _ => DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-        };
-        unsafe {
-            // IDWriteFactory1 的版本多一个「灰阶增强对比度」——灰阶抗锯齿下就是这个系数
-            // 决定字形边缘的粗细（IDWriteRenderingParams1 只暴露 getter，设不进去）。
-            let f1: windows::Win32::Graphics::DirectWrite::IDWriteFactory1 = self.factory.cast()?;
-            let p1 = f1.CreateCustomRenderingParams(
-                gamma,
-                enhanced_contrast,
-                enhanced_contrast,
-                0.0,
-                DWRITE_PIXEL_GEOMETRY_FLAT,
-                mode,
-            )?;
-            p1.cast()
-        }
+        unsafe { custom_rendering_params(&self.factory, gamma, enhanced_contrast, rmode) }
     }
 
     /// 首行**基线到行盒顶**的距离。
@@ -880,4 +858,101 @@ pub fn draw_shadowed(
         );
     }
     Ok(())
+}
+
+// ─────────────────────────── 文字栅格化参数（出图默认值） ───────────────────────────
+
+/// 出图用的 gamma。
+///
+/// 实测（`--probe clock` 240×120、`--glass 0 --no-glass`，对 `_card_ref.py` 的真
+/// WebView2 参考图；判据见 `docs/verify/minicard_center/_aa_edge.py`）：
+///
+/// | gamma | 平均差 | p95 | 墨量 | 边缘 10–90 宽度 p50 |
+/// |-------|--------|-----|------|--------------------|
+/// | 1.0   | 4.30   | 33  | 3614 | 1.419 |
+/// | 1.4   | 3.82   | 27  | 3710 | 1.358 |
+/// | 1.8（系统默认）| 3.56 | 24 | 3787 | 1.368 |
+/// | **2.2** | **3.42** | **22** | **3848** | **1.330** |
+///
+/// DWrite 把 gamma 钳在 `[1.0, 2.2]`：给 2.6 / 3.0 得到与 2.2 **逐字节相同**的帧。
+/// 参考图（Chrome/Skia）墨量 3995，2.2 比系统默认多 1.6% 墨，是这条路上能拿到的最肥一档。
+pub const DEFAULT_TEXT_GAMMA: f32 = 2.2;
+
+/// 出图用的渲染模式档位（0 = `NATURAL_SYMMETRIC`）。
+///
+/// 同一张卡实测：`NATURAL_SYMMETRIC` 3.42/22、`NATURAL` 4.24/28、`GDI_NATURAL` 4.50/33、
+/// `OUTLINE` 4.05/28、`CLEARTYPE_*` 4.24~4.50/28~33 —— 灰阶抗锯齿下后者要么等价于
+/// `NATURAL`，要么把边缘压得更硬（p50 1.33 → 1.12）。
+pub const DEFAULT_TEXT_RMODE: u8 = 0;
+
+/// 按档位建 `IDWriteRenderingParams`（gamma 与对比度都走 `IDWriteFactory1`）。
+///
+/// `enhanced_contrast` 只对 ClearType 有意义：GRAYSCALE 下扫 0 / 0.5 / 1.0 三档，
+/// 墨量差 0.06%、边缘宽度差 0.002px（帧字节不同但肉眼与判据都不可见），所以出图不启用。
+unsafe fn custom_rendering_params(
+    factory: &IDWriteFactory,
+    gamma: f32,
+    enhanced_contrast: f32,
+    rmode: u8,
+) -> Result<windows::Win32::Graphics::DirectWrite::IDWriteRenderingParams> {
+    use windows::Win32::Graphics::DirectWrite::{
+        DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_ALIASED,
+        DWRITE_RENDERING_MODE_CLEARTYPE_GDI_CLASSIC, DWRITE_RENDERING_MODE_CLEARTYPE_NATURAL,
+        DWRITE_RENDERING_MODE_CLEARTYPE_NATURAL_SYMMETRIC, DWRITE_RENDERING_MODE_GDI_NATURAL,
+        DWRITE_RENDERING_MODE_NATURAL, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        DWRITE_RENDERING_MODE_OUTLINE,
+    };
+    let mode = match rmode {
+        1 => DWRITE_RENDERING_MODE_NATURAL,
+        2 => DWRITE_RENDERING_MODE_GDI_NATURAL,
+        3 => DWRITE_RENDERING_MODE_ALIASED,
+        4 => DWRITE_RENDERING_MODE_OUTLINE,
+        5 => DWRITE_RENDERING_MODE_CLEARTYPE_NATURAL,
+        6 => DWRITE_RENDERING_MODE_CLEARTYPE_GDI_CLASSIC,
+        7 => DWRITE_RENDERING_MODE_CLEARTYPE_NATURAL_SYMMETRIC,
+        _ => DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+    };
+    let f1: windows::Win32::Graphics::DirectWrite::IDWriteFactory1 = factory.cast()?;
+    let p1 = f1.CreateCustomRenderingParams(
+        gamma,
+        enhanced_contrast,
+        enhanced_contrast,
+        0.0,
+        DWRITE_PIXEL_GEOMETRY_FLAT,
+        mode,
+    )?;
+    p1.cast()
+}
+
+/// 把出图默认参数套到一个 D2D 设备上下文上（由 `Gfx::new` 通过钩子调用）。
+fn install_default_text_raster(
+    d2d: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext,
+) {
+    // COM 指针不 Send，用 thread_local 缓存：每线程建一次参数对象，之后每窗只是套一遍。
+    thread_local! {
+        static RP: std::cell::RefCell<
+            Option<windows::Win32::Graphics::DirectWrite::IDWriteRenderingParams>,
+        > = const { std::cell::RefCell::new(None) };
+    }
+    RP.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let built = unsafe {
+                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
+                    .and_then(|f| custom_rendering_params(&f, DEFAULT_TEXT_GAMMA, 0.0, DEFAULT_TEXT_RMODE))
+            };
+            match built {
+                Ok(rp) => *slot = Some(rp),
+                Err(e) => {
+                    minicard_shell::mlog!("文字栅格化参数创建失败（用系统默认）: {e:?}");
+                    return;
+                }
+            }
+        }
+        if let Some(rp) = slot.as_ref() {
+            unsafe {
+                let _ = d2d.SetTextRenderingParams(rp);
+            }
+        }
+    });
 }

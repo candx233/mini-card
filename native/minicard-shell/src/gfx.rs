@@ -29,6 +29,55 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
+/// 文字栅格化的钩子类型：把一组 `IDWriteRenderingParams` 套到设备上下文上。
+///
+/// `minicard-shell` 的 windows features 里**没有** DirectWrite（补它要改 Cargo.toml），
+/// 所以本 crate 建不出 `IDWriteRenderingParams`。改成由 `minicard-draw` 的
+/// `TextEngine` 注册一个安装函数，`Gfx::new` 每建一个设备上下文套一次 ——
+/// 九张卡 / Dock / 右键菜单的窗口全部走 `Gfx::new`，一处注册就全生效。
+type TextRasterHook = fn(&ID2D1DeviceContext);
+
+static TEXT_RASTER_HOOK: std::sync::RwLock<Option<TextRasterHook>> =
+    std::sync::RwLock::new(None);
+
+/// 注册（或替换）文字栅格化安装函数。进程内重复调用以最后一次为准。
+///
+/// 注册时会把「钩子还没就位时建好的设备上下文」补套一遍 —— 探针路径是
+/// **先 `Gfx::new` 后 `TextEngine::new`**，不补的话探针出图等于没生效。
+pub fn set_text_raster_hook(f: TextRasterHook) {
+    if let Ok(mut w) = TEXT_RASTER_HOOK.write() {
+        *w = Some(f);
+    }
+    flush_pending_text_raster();
+}
+
+thread_local! {
+    /// 建上下文时钩子还没注册 → 先记下来，等 draw 侧注册时回填。
+    static PENDING_TEXT_RASTER: std::cell::RefCell<Vec<ID2D1DeviceContext>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 把已注册的参数套到上下文；没注册就先排队等补。
+fn apply_text_raster(d2d: &ID2D1DeviceContext) {
+    if let Ok(r) = TEXT_RASTER_HOOK.read() {
+        if let Some(f) = *r {
+            f(d2d);
+            return;
+        }
+    }
+    PENDING_TEXT_RASTER.with(|p| p.borrow_mut().push(d2d.clone()));
+}
+
+fn flush_pending_text_raster() {
+    let hook = TEXT_RASTER_HOOK.read().ok().and_then(|r| *r);
+    let Some(f) = hook else { return };
+    PENDING_TEXT_RASTER.with(|p| {
+        for d2d in p.borrow_mut().drain(..) {
+            f(&d2d);
+        }
+    });
+}
+
 pub struct Gfx {
     /// 鼠标在本卡内的位置（逻辑点）；None = 不在卡上。hover 态由各卡自己按 id/矩形判定。
     pub hover: Option<(f32, f32)>,
@@ -115,7 +164,14 @@ impl Gfx {
             let d2d = d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
             d2d.SetDpi(dpi, dpi);
             d2d.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            // 透明表面（预乘 alpha 交换链）只能走灰阶抗锯齿：子像素覆盖率没地方放。
+            // 实测 D2D1_TEXT_ANTIALIAS_MODE_DEFAULT 在这块表面上与 GRAYSCALE **逐字节相同**，
+            // CLEARTYPE 则会把 alpha 写坏（字几乎消失：墨量只剩 12%、整卡平均差 3.42→29.58），
+            // 所以这里钉死 GRAYSCALE，不受系统 ClearType 开关影响。
             d2d.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            // 灰阶下真正决定「字缘软硬」的是 IDWriteRenderingParams（gamma / 渲染模式），
+            // 由 minicard-draw 侧注册的钩子套上来（见 set_text_raster_hook）。
+            apply_text_raster(&d2d);
 
             let surface: IDXGISurface = swap.GetBuffer(0)?;
             let props = D2D1_BITMAP_PROPERTIES1 {
