@@ -19,13 +19,6 @@ use minicard_draw::paint::{fill_round, set_color, stroke_round};
 use minicard_draw::text::{Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
 
-/// CSS 里 `.used` / `.pct` / 徽标字母都是 **400 字重**，浏览器取 `@font-face 400` = MiSans
-/// Regular。字集里三份 TTF 的内部 OS/2 字重是 330 / 380 / 520，而 DWrite 建格式时按
-/// 「离得最近的面」选：`400` 落到 **380（Medium）**。Medium 的 tnum 数字每字宽 604/1000 em，
-/// Regular 是 595 —— 长串「279 GB / 466 GB」因此宽 +1.55px（浏览器 111.23 / 自绘 112.78），
-/// 数字越往右错得越多（末位 2px），整行字形边缘全错位。按「CSS 400 ↔ 330 档」显式取面。
-const FACE_REGULAR: u16 = 330;
-
 pub struct Disk {
     pub name: String,
     pub used: u64,
@@ -213,7 +206,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             s: letter,
             size: 1.0625 * t.r,
             line_h: 1.0625 * t.r, // line-height:1
-            weight: FACE_REGULAR, // CSS 400（见 FACE_REGULAR 注释）
+            weight: 400, // CSS 400 → 字集里的 Regular 面（选面见 TextEngine::css_weight）
             wrap: false,
             align: 2, // 居中
             tabular: false,
@@ -239,7 +232,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             s: format!("{} / {}", fmt_size(d.used), fmt_size(d.total)),
             size: t.fs,
             line_h: t.line_h,
-            weight: FACE_REGULAR, // CSS 400
+            weight: 400, // CSS 400
             wrap: false,
             align: 0,
             // 实测 tabular 更接近浏览器（比例数字反而差 13.5 vs 11.6）：
@@ -251,7 +244,7 @@ fn tree(t: &Tokens, disks: &[Disk], warn90: bool, dim: bool) -> Node {
             s: format!("{}%", pct),
             size: t.pct_fs,
             line_h: t.line_h,
-            weight: if warn { 600 } else { FACE_REGULAR },
+            weight: if warn { 600 } else { 400 },
             wrap: false,
             align: 1,
             tabular: true,
@@ -532,21 +525,22 @@ mod tests {
     }
 
     /// `.used` 的数字串宽度必须等于浏览器 `Range` 量出来的 111.234 ——
-    /// CSS 400 字重若落到 Medium（内部 OS/2 380）会宽到 112.78（+1.55px），
-    /// 整行数字越往右漂得越多，字形边缘全错位（d5 档 p95 89 → 22 的主因）。
+    /// CSS 400 由 `TextEngine::css_weight` 落到 Regular（内部 OS/2 330）；若又落回
+    /// Medium（380）会宽到 112.78（+1.55px），整行数字越往右漂得越多、字形边缘全错位。
     #[test]
     fn 磁盘数字串宽度与浏览器一致() {
-        let w = run("279 GB / 466 GB", 14.0625, FACE_REGULAR);
+        let w = run("279 GB / 466 GB", 14.0625, 400);
         assert!(
             (w - 111.234).abs() < 0.15,
             "「279 GB / 466 GB」宽 {w:.3}，浏览器 111.234"
         );
-        let w400 = run("279 GB / 466 GB", 14.0625, 400);
+        // 500（Medium）必须明显更宽：证明两档真是两个字面，不是同一条路
+        let w500 = run("279 GB / 466 GB", 14.0625, 500);
         assert!(
-            w400 > w + 1.0,
-            "FACE_REGULAR 没起作用：400 字重仍量出 {w400:.3}（应落到 Medium 112.78）"
+            w500 > w + 1.0,
+            "500(Medium) 应比 400(Regular) 宽约 1.4%：{w500:.3} vs {w:.3}"
         );
-        let p = run("60%", 14.0625, FACE_REGULAR);
+        let p = run("60%", 14.0625, 400);
         assert!((p - 28.226).abs() < 0.15, "「60%」宽 {p:.3}，浏览器 28.226");
     }
 
@@ -582,7 +576,7 @@ mod tests {
             s: "279 GB / 466 GB".into(),
             size: 14.0625,
             line_h: 18.28125,
-            weight: FACE_REGULAR,
+            weight: 400,
             wrap: false,
             align: 0,
             tabular: true,

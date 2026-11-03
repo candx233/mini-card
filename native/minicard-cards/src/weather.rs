@@ -18,13 +18,6 @@ use minicard_draw::path::Path;
 use minicard_draw::text::{Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
 
-/// CSS 里城市 / 日期行 / 三日 / 底行都是 **400 字重**，浏览器取 `@font-face 400` = MiSans
-/// Regular。字集里三份 TTF 的内部 OS/2 字重是 330 / 380 / 520，DWrite 建格式时按「最近面」
-/// 选，`400` 会落到 **380（Medium）**：数字/字母每字宽 +1%（「26°/18°」这种短串看不出来，
-/// 磁盘卡的长串就累积成 +1.55px）。这里显式取 330 档 = Regular。
-/// （`500` 落到 380 = CSS 的 Medium，`600` 落到 520 = CSS 的 Semibold，都对，别动。）
-const FACE_REGULAR: u16 = 330;
-
 /// 文字基线的整像素落位：Chrome 把基线**向下取整**、D2D/DWrite 是四舍五入 —— 基线小数部分
 /// ≥0.5 的行自绘整体低 1px。把绘制 y 预挪 `floor(b) − round(b)` 后两边落到同一行。
 fn snap_text_y(te: &TextEngine, spec: &TextSpec, y: f32) -> f32 {
@@ -273,7 +266,7 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
         .style(|s| s.align(Align::Start))
         .child(
             // `.w-city` 带 `letter-spacing: 0.02em`（CSS 原文），漏了整串宽 0.8px
-            text_node_sp(&w.city, t.city_fs, t.city_lh, FACE_REGULAR, 0.02)
+            text_node_sp(&w.city, t.city_fs, t.city_lh, 400, 0.02)
                 .id(8001)
                 .style(|s| s.mar([0.0, 0.0, t.city_mb, 0.0])),
         )
@@ -308,7 +301,7 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
         let mut col = Node::new(Dir::Column)
             .id(8100 + i)
             .style(move |s| s.grow(1.0).basis(0.0).align(Align::Center).gap(t.day_gap))
-            .child(text_node(&label, t.day_fs, t.day_lh, FACE_REGULAR).id(8110 + i))
+            .child(text_node(&label, t.day_fs, t.day_lh, 400).id(8110 + i))
             .child(Node::new(Dir::Row).id(8120 + i).style(move |s| {
                 s.size(Dim::Px(t.day_ic), Dim::Px(t.day_ic)).mar([
                     t.day_ic_mt,
@@ -325,9 +318,9 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
         col = col.child(
             Node::new(Dir::Row)
                 .style(move |s| s.align(Align::Baseline))
-                .child(text_node(&hi, t.t_fs, t.t_fs, FACE_REGULAR).id(8130 + i))
-                .child(text_node("/", t.t_fs, t.t_fs, FACE_REGULAR).id(8140 + i))
-                .child(text_node(&lo, t.t_fs, t.t_fs, FACE_REGULAR).id(8150 + i)),
+                .child(text_node(&hi, t.t_fs, t.t_fs, 400).id(8130 + i))
+                .child(text_node("/", t.t_fs, t.t_fs, 400).id(8140 + i))
+                .child(text_node(&lo, t.t_fs, t.t_fs, 400).id(8150 + i)),
         );
         d3 = d3.child(col);
     }
@@ -348,8 +341,8 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
                 .gap(t.air_mt)
                 .size(Dim::Pct(1.0), Dim::Px(t.air_lh))
         })
-        .child(text_node(&air, t.air_fs, t.air_lh, FACE_REGULAR).id(8200))
-        .child(text_node(&hum, t.air_fs, t.air_lh, FACE_REGULAR).id(8201));
+        .child(text_node(&air, t.air_fs, t.air_lh, 400).id(8200))
+        .child(text_node(&hum, t.air_fs, t.air_lh, 400).id(8201));
 
     Node::new(Dir::Column)
         .style(move |s| {

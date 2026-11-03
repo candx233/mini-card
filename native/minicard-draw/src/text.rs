@@ -11,7 +11,7 @@ use std::path::Path;
 use windows::core::{Interface, Result, HSTRING, PCWSTR};
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, DWRITE_FONT_WEIGHT, IDWriteTextLayout1, IDWriteFactory, IDWriteFactory3, IDWriteFactory5, IDWriteFontCollection,
-    IDWriteFontCollection1, IDWriteFontSetBuilder, IDWriteFontSetBuilder1, IDWriteFontSetBuilder2,
+    IDWriteFontCollection1, IDWriteFontFamily, IDWriteFontSetBuilder, IDWriteFontSetBuilder1, IDWriteFontSetBuilder2,
     IDWriteTextFormat, IDWriteTextLayout, IDWriteTypography, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_METRICS,
     DWRITE_TEXT_RANGE,
@@ -41,14 +41,59 @@ pub struct TextEngine {
     pub ascent: f32,
     pub descent: f32,
     pub upem: u16,
-    /// 字集里实际有的字重（升序）—— CSS 口径选面要用
-    weights: Vec<u32>,
+    /// 字集里实际有的字面：`(声明的 CSS 字重, 字体内部的 OS/2 字重)`，按 CSS 档升序。
+    ///
+    /// 这两个数**不是一回事**：MiSans 三份 TTF 的内部值是 330 / 380 / 520，而浏览器
+    /// 按 `@font-face` 的声明值 400 / 500 / 600 选面。DWrite 只认内部值，所以选面
+    /// 必须先按 CSS 算法挑「声明档」，再翻译回它认识的那个内部值。
+    faces: Vec<(u16, u16)>,
     /// 等宽数字（.num 的 font-variant-numeric: tabular-nums）
     typo: Option<IDWriteTypography>,
     /// 缓存：文本格式（size/lineBox/align/mode）与文本布局（align/text/宽/高/mode）
     /// —— 每帧重建 format/layout 是主要 CPU 开销
     fmt_cache: RefCell<HashMap<(u32, u32, u8, u8, u16), IDWriteTextFormat>>,
     lay_cache: RefCell<HashMap<(u8, String, u32, u32, u8, u16, u32), IDWriteTextLayout>>,
+}
+
+/// 字体内部的 OS/2 字重 → **声明**的 CSS 字重（浏览器 `@font-face` 里写的那一档）。
+///
+/// MiSans 的三份 TTF 是自定义刻度，不是标准的 400/500/600：
+///
+/// | 文件                  | OS/2 usWeightClass | 浏览器里声明的档 |
+/// |-----------------------|--------------------|------------------|
+/// | `MiSans-Regular.ttf`  | 330                | 400              |
+/// | `MiSans-Medium.ttf`   | 380                | 500              |
+/// | `MiSans-Semibold.ttf` | 520                | 600              |
+///
+/// 浏览器只看 `@font-face` 的声明值来选面，DWrite 只看内部值 —— 之前直接拿内部值套
+/// CSS 算法，`400` 就落到了 Medium（380）。这里把两个口径接上。
+fn declared_css_weight(os2: u16) -> u16 {
+    match os2 {
+        // 标准刻度（系统字体、其它字族）：声明值就是内部值，原样返回
+        100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900 => os2,
+        // MiSans 的三个自定义档（340/390/530 这类微调值也落在同一档）
+        301..=359 => 400,
+        360..=469 => 500,
+        470..=579 => 600,
+        // 其余未知刻度：按最近的百位归档，落在 100–900 之间
+        _ => ((os2 as f32 / 100.0).round() as u16 * 100).clamp(100, 900),
+    }
+}
+
+/// 把 family 里的字面收成 `(声明的 CSS 字重, 内部 OS/2 字重)`，按声明档升序。
+/// 同一档出现多个内部值时只留最小的那个（先到先得，稳定）。
+fn collect_faces(family_obj: &IDWriteFontFamily) -> Vec<(u16, u16)> {
+    let n = unsafe { family_obj.GetFontCount() };
+    let mut v: Vec<(u16, u16)> = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        if let Ok(f) = unsafe { family_obj.GetFont(i) } {
+            let os2 = unsafe { f.GetWeight() }.0.clamp(1, 1000) as u16;
+            v.push((declared_css_weight(os2), os2));
+        }
+    }
+    v.sort_unstable();
+    v.dedup_by_key(|f| f.0);
+    v
 }
 
 impl TextEngine {
@@ -84,23 +129,12 @@ impl TextEngine {
                 });
             }
             let upem = m.designUnitsPerEm.max(1);
-            let weights = {
-                let n = family_obj.GetFontCount();
-                let mut ws = Vec::with_capacity(n as usize);
-                for i in 0..n {
-                    if let Ok(f) = family_obj.GetFont(i) {
-                        ws.push(f.GetWeight().0 as u32);
-                    }
-                }
-                ws.sort_unstable();
-                ws.dedup();
-                ws
-            };
+            let faces = collect_faces(&family_obj);
             Ok(Self {
                 factory,
                 collection,
                 family: fam,
-                weights,
+                faces,
                 typo,
                 fmt_cache: RefCell::new(HashMap::new()),
                 lay_cache: RefCell::new(HashMap::new()),
@@ -172,23 +206,12 @@ impl TextEngine {
                 });
             }
             let upem = m.designUnitsPerEm.max(1);
-            let weights = {
-                let n = family_obj.GetFontCount();
-                let mut ws = Vec::with_capacity(n as usize);
-                for i in 0..n {
-                    if let Ok(f) = family_obj.GetFont(i) {
-                        ws.push(f.GetWeight().0 as u32);
-                    }
-                }
-                ws.sort_unstable();
-                ws.dedup();
-                ws
-            };
+            let faces = collect_faces(&family_obj);
             Ok(Self {
                 factory,
                 collection,
                 family: fam,
-                weights,
+                faces,
                 typo,
                 fmt_cache: RefCell::new(HashMap::new()),
                 lay_cache: RefCell::new(HashMap::new()),
@@ -209,39 +232,46 @@ impl TextEngine {
         self.format_w(size, line_box, align, 400)
     }
 
-    /// 按 CSS Fonts 4 的口径把「想要的字重」映射到**实际可用的字面**。
+    /// 按 CSS Fonts 4 的口径把「想要的字重」映射到**实际可用的字面**，返回的是
+    /// 该字面在 TTF 里的内部 OS/2 值（`CreateTextFormat` 只认这个数）。
     ///
-    /// DWrite 的 `CreateTextFormat` 只按距离取最近面：`500` 会落到 Semibold（520），
-    /// 而浏览器（400–500 区间）是**优先往下找**、500 取 Medium。差这点字重，
-    /// 天气大字的「24°」就宽 4.5px（Semibold 数字/度数号本来就宽 4%）。
+    /// 关键：CSS 的选面发生在**声明档**上，不是在内部值上。
+    /// MiSans 的三份 TTF 内部是 330 / 380 / 520（见 `declared_css_weight`），但浏览器里
+    /// 它们是 `@font-face` 声明的 400 / 500 / 600。拿内部值直接套 CSS 算法就会错：
+    /// `400` 在内部值里「没有 ≥400 又 ≤500 的档」，于是往下落到 380（Medium）——
+    /// 浏览器明明用的是 Regular（330）。Medium 的 tnum 数字每字宽 604/1000 em、Regular 是
+    /// 594，长串「279 GB / 466 GB」因此宽出 1.4%（浏览器 111.23 / 自绘 112.78），
+    /// 数字越往右错得越多。
+    ///
+    /// 所以这里先按声明档跑 CSS 算法（400→400、500→500、600→600），再翻译回内部值。
     fn css_weight(&self, want: u16) -> u16 {
-        let ws = &self.weights;
-        if ws.is_empty() {
+        let fs = &self.faces;
+        if fs.is_empty() {
             return want;
         }
-        let w = want as u32;
-        let has = |x: u32| ws.contains(&x);
+        let w = want;
+        // CSS Fonts 4 §5.2 的匹配顺序：
+        //   <400 ：先 ≤w 降序，再 >w 升序
+        //   400–500：先 [w,500] 升序，再 <w 降序，最后 >500 升序
+        //   >500 ：先 ≥w 升序，再 <w 降序
         let pick = if (400..=500).contains(&w) {
-            // 400–500：先查 [w,500] 升序，再查 >500 升序，最后往下找
-            // CSS Fonts 4：先 [w,500] 升序，再 <w 降序，最后 >500 升序
-            (w..=500)
-                .find(|x| has(*x))
-                .or_else(|| ws.iter().copied().rev().find(|x| *x < w))
-                .or_else(|| ws.iter().copied().find(|x| *x > 500))
-        } else if w > 500 {
-            // >500 交给 DWrite 自己的「最近面」：字集里 600 只有 520 这一档（700 是另一支），
-            // 按 CSS「≥w 升序」会拿到 700，时钟/网速/音乐整片变粗（实测 p95 67/83）。
-            return want;
+            fs.iter()
+                .filter(|f| f.0 >= w && f.0 <= 500)
+                .min_by_key(|f| f.0)
+                .or_else(|| fs.iter().filter(|f| f.0 < w).max_by_key(|f| f.0))
+                .or_else(|| fs.iter().filter(|f| f.0 > 500).min_by_key(|f| f.0))
         } else if w < 400 {
-            ws.iter()
-                .copied()
-                .rev()
-                .find(|x| *x <= w)
-                .or_else(|| ws.iter().copied().find(|x| *x > w))
+            fs.iter()
+                .filter(|f| f.0 <= w)
+                .max_by_key(|f| f.0)
+                .or_else(|| fs.iter().filter(|f| f.0 > w).min_by_key(|f| f.0))
         } else {
-            None
+            fs.iter()
+                .filter(|f| f.0 >= w)
+                .min_by_key(|f| f.0)
+                .or_else(|| fs.iter().filter(|f| f.0 < w).max_by_key(|f| f.0))
         };
-        pick.unwrap_or(w) as u16
+        pick.map(|f| f.1).unwrap_or(w)
     }
 
     /// 带字重建格式（DWrite 的字重只能在 `CreateTextFormat` 时给，事后改不了）。
@@ -255,7 +285,7 @@ impl TextEngine {
         unsafe {
             let face_w = self.css_weight(weight);
             if std::env::var("MC_DBG_WEIGHT").is_ok() {
-                eprintln!("want {} → face {} / 可用 {:?}", weight, face_w, self.weights);
+                eprintln!("want {} → face {} / 字面 {:?}", weight, face_w, self.faces);
             }
             let fmt = self.factory.CreateTextFormat(
                 &self.family,
@@ -612,6 +642,71 @@ mod tests {
             return None;
         }
         Some(TextEngine::new(p, "MiSans").unwrap())
+    }
+
+    /// 装齐三个字面（Regular 330 / Medium 380 / Semibold 520）的引擎 —— 选面口径的用例要用。
+    fn engine3() -> Option<TextEngine> {
+        let dir = std::path::Path::new("../assets/fonts");
+        let files: Vec<std::path::PathBuf> =
+            ["MiSans-Regular.ttf", "MiSans-Medium.ttf", "MiSans-Semibold.ttf"]
+                .iter()
+                .map(|n| dir.join(n))
+                .filter(|p| p.exists())
+                .collect();
+        if files.len() < 3 {
+            eprintln!("跳过：三个字面不全（{}）", dir.display());
+            return None;
+        }
+        let refs: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
+        Some(TextEngine::new_weights(&refs, "MiSans").unwrap())
+    }
+
+    /// CSS 字重必须落到浏览器会用的那一面：400 → Regular(330)、500 → Medium(380)、
+    /// 600 → Semibold(520)。400 若落到 Medium，tnum 数字每字宽就从 595 变 604/1000 em。
+    #[test]
+    fn css_字重映射到正确的内部字面() {
+        let Some(te) = engine3() else { return };
+        let pic = |w: u16| te.css_weight(w);
+        assert_eq!(pic(400), 330, "CSS 400 应取 Regular(330)，字面表 {:?}", te.faces);
+        assert_eq!(pic(500), 380, "CSS 500 应取 Medium(380)，字面表 {:?}", te.faces);
+        assert_eq!(pic(600), 520, "CSS 600 应取 Semibold(520)，字面表 {:?}", te.faces);
+        // 往下没有更细的面时取最近的 Regular（CSS：<400 先查 ≤w 降序，再 >w 升序）
+        assert_eq!(pic(300), 330, "CSS 300 应取 Regular(330)");
+        // 往上没有更粗的面时不能反而变细
+        assert!(pic(700) >= pic(600), "CSS 700 不该比 600 更细");
+    }
+
+    /// 选面的**后果**：400 的等宽数字是 Regular 的 594/1000 em（Medium 是 604）。
+    /// 只断言 `css_weight` 的返回值不够 —— DWrite 拿到真值才真的换了面。
+    #[test]
+    fn css_400_的等宽数字是_regular_的宽度() {
+        let Some(te) = engine3() else { return };
+        let size = 100.0;
+        let w = |weight: u16| {
+            let spec = crate::layout::TextSpec {
+                s: "0123456789".into(),
+                size,
+                line_h: size,
+                weight,
+                wrap: false,
+                align: 0,
+                tabular: true,
+                spacing_em: 0.0,
+            };
+            te.measure(&spec, 4096.0).0
+        };
+        let w400 = w(400);
+        let w500 = w(500);
+        // 10 位 × 0.594 em × 100px = 594px（Medium 是 604）
+        assert!(
+            (w400 - 594.0).abs() < 0.5,
+            "CSS 400 的 10 位 tnum 数字宽 {w400:.2}，应 = 594（Regular 594/1000 em）；\
+             落到 Medium 会是 604 —— 说明选面又错了"
+        );
+        assert!(
+            (w500 - 604.0).abs() < 1.0,
+            "CSS 500（Medium）的 10 位 tnum 数字宽 {w500:.2}，应 ≈ 604"
+        );
     }
 
     fn metrics(l: &IDWriteTextLayout) -> (f32, f32, u32) {
