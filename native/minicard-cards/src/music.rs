@@ -3,6 +3,10 @@
 //! 左封面（100×100 圆角 12 的 135° 强调色渐变 + 音符）· 右列（歌名 / 歌手 / 进度条 + 时间 /
 //! 三个按钮）。图标全是 SVG 路径原文（音符、上一首、播放/暂停、下一首），走 `Path::svg`。
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::time::Instant;
+
 use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::{
@@ -13,9 +17,9 @@ use windows_numerics::Vector2;
 use minicard_draw::color::Palette;
 use minicard_draw::gradient;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
-use minicard_draw::paint::{fill_round, set_color, stroke_path, stroke_round};
+use minicard_draw::paint::{fill_round, pop_clip, push_clip, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
-use minicard_draw::text::{Mode as TextMode, TextEngine};
+use minicard_draw::text::{draw_shadow_taps, Mode as TextMode, TextEngine, TextShadow};
 use minicard_shell::gfx::Gfx;
 
 #[derive(Clone, Debug)]
@@ -41,6 +45,126 @@ impl Music {
         let secs = (self.position_ms.min(self.duration_ms.max(self.position_ms)) / 1000) as u64;
         format!("{:02}:{:02}", secs / 60, secs % 60)
     }
+}
+
+// ────────────────────────── 长文本跑马灯（musicMarquee） ──────────────────────────
+//
+// 口径逐条照抄 `web/card.html::musicMarquee`（2026-10-09 定稿版）：
+// 两端各停 800 / 1000ms、速度 5px/s、单程上限 40s、缓动 easeInOutQuad，
+// 行程 = 溢出量 + 6px。**关键是「按文本记进度」**：同一段文本跨帧/跨重建沿用同一
+// 时间基准，换文本才从头开始 —— 否则每帧重建都会把动画打回起点（原地抖）。
+
+/// 起点停留（ms）
+pub const MQ_HOLD_A_MS: f32 = 800.0;
+/// 终点停留（ms）
+pub const MQ_HOLD_B_MS: f32 = 1000.0;
+/// 滚动速度（px/s）—— 用户定稿的整数 5
+pub const MQ_SPEED: f32 = 5.0;
+/// 单程时长上限（ms）
+pub const MQ_TR_MAX_MS: f32 = 40_000.0;
+/// 溢出多少像素才算装不下（浏览器判据 `scrollWidth - clientWidth > 2`）
+pub const MQ_MIN_OVER: f32 = 2.0;
+/// 行程额外余量（浏览器 `dist = over + 6`）
+pub const MQ_PAD: f32 = 6.0;
+
+/// easeInOutQuad（浏览器 `mqEase`）
+pub fn mq_ease(p: f32) -> f32 {
+    let p = p.clamp(0.0, 1.0);
+    if p < 0.5 {
+        2.0 * p * p
+    } else {
+        1.0 - 2.0 * (1.0 - p) * (1.0 - p)
+    }
+}
+
+/// 一条跑马灯的进度记忆：`text` 是它代表的文本，`base` 是周期原点。
+///
+/// 同一段文本反复喂进来时**必须原样沿用 base**，换文本才新建 —— 这条就是 WebView2 版
+/// `mqMemo` 的作用（跨重建续播）。自绘里状态常驻，但仍然每帧都会重算偏移，
+/// 所以「文本没变不重置」依旧是硬约束。
+#[derive(Clone, Debug)]
+pub struct Marquee {
+    pub text: String,
+    pub base: Instant,
+}
+
+impl Marquee {
+    pub fn new(text: impl Into<String>, now: Instant) -> Self {
+        Self {
+            text: text.into(),
+            base: now,
+        }
+    }
+
+    /// 单程时长（ms）：`dist / 5px每秒`，上限 40s
+    pub fn travel_ms(&self, dist: f32) -> f32 {
+        (dist / MQ_SPEED * 1000.0).min(MQ_TR_MAX_MS)
+    }
+
+    /// 一个完整来回的周期（ms）
+    pub fn period_ms(&self, dist: f32) -> f32 {
+        let tr = self.travel_ms(dist);
+        MQ_HOLD_A_MS + tr + MQ_HOLD_B_MS + tr
+    }
+
+    /// 当前该把文本往左挪多少像素
+    pub fn offset(&self, dist: f32, now: Instant) -> f32 {
+        if dist <= 0.0 {
+            return 0.0;
+        }
+        let tr = self.travel_ms(dist);
+        let period = self.period_ms(dist);
+        let age = (now.saturating_duration_since(self.base)).as_secs_f32() * 1000.0;
+        let u = age.rem_euclid(period);
+        if u < MQ_HOLD_A_MS {
+            0.0
+        } else if u < MQ_HOLD_A_MS + tr {
+            dist * mq_ease((u - MQ_HOLD_A_MS) / tr)
+        } else if u < MQ_HOLD_A_MS + tr + MQ_HOLD_B_MS {
+            dist
+        } else {
+            let back = (u - MQ_HOLD_A_MS - tr - MQ_HOLD_B_MS) / tr;
+            dist * (1.0 - mq_ease(back))
+        }
+    }
+
+    /// 是否正在位移（供调用方决定要不要 60fps 重绘；停留段为 false）
+    pub fn moving(&self, dist: f32, now: Instant) -> bool {
+        let tr = self.travel_ms(dist);
+        let u = (now.saturating_duration_since(self.base)).as_secs_f32() * 1000.0
+            % self.period_ms(dist);
+        (u >= MQ_HOLD_A_MS && u < MQ_HOLD_A_MS + tr)
+            || (u >= MQ_HOLD_A_MS + tr + MQ_HOLD_B_MS
+                && u < MQ_HOLD_A_MS + tr + MQ_HOLD_B_MS + tr)
+    }
+}
+
+thread_local! {
+    /// 两条槽（歌名 / 歌手）的进度记忆 —— 与浏览器 `mqMemo` 的键一致。
+    static MQ_MEMO: RefCell<HashMap<&'static str, Marquee>> = RefCell::new(HashMap::new());
+    /// 本帧有没有文本在滚（给 live 的按需重绘用；`paint` 每帧重置）。
+    /// 语义是「这张卡眼下有跑马灯」= 值得 60fps（浏览器那边 rAF 也是一直挂着）。
+    static MQ_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 取某一条的进度记忆：文本没变就沿用旧基准，变了才从此刻重新开始。
+pub fn marquee_for(slot: &'static str, text: &str, now: Instant) -> Marquee {
+    MQ_MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(st) = m.get(slot) {
+            if st.text == text {
+                return st.clone();
+            }
+        }
+        let st = Marquee::new(text, now);
+        m.insert(slot, st.clone());
+        st
+    })
+}
+
+/// 本帧是否有文本在滚动（供 `live` 的重绘节拍判断；调用方须在 `paint` 之后读）。
+pub fn marquee_animating() -> bool {
+    MQ_ACTIVE.with(|c| c.get())
 }
 
 /// 图标路径（viewBox 24）
@@ -296,6 +420,7 @@ pub fn paint(
     let tree = tree(t, m);
     let mut mm: &TextEngine = te;
     let placed = layout(&tree, (t.w, t.h), &mut mm);
+    MQ_ACTIVE.with(|c| c.set(false));
 
     unsafe {
         g.begin()?;
@@ -526,7 +651,8 @@ fn paint_tree(
         )?;
         let w = r.w * m.pct() / 100.0;
         if w > 0.0 {
-            set_color(g, pal.fill)?;
+            // 基准 `.mc-prog .bar > i { background: var(--accent) }`
+            set_color(g, pal.accent)?;
             fill_round(
                 g,
                 D2D_RECT_F {
@@ -559,7 +685,7 @@ fn paint_tree(
                     right: px + pw - 0.5,
                     bottom: py + ph - 0.5,
                 },
-                6.0,
+                t.btn_r,
             )?;
         }
         set_color(g, if hov { pal.fg44 } else { pal.badge_border })?;
@@ -601,23 +727,74 @@ fn paint_tree(
             9201 => pal.muted,
             _ => pal.fg,
         };
-        set_color(g, color)?;
-        let mode = if spec.size == t.title_fs || spec.size == t.artist_fs {
-            TextMode::Ellipsis
-        } else {
-            TextMode::Clip
-        };
-        let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, mode)?;
-        unsafe {
-            g.d2d.DrawTextLayout(
-                Vector2 {
-                    X: pl.rect.x,
-                    Y: pl.rect.y,
-                },
-                &lay,
-                &g.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
+        // `.card { text-shadow: 0 .833px 1.667px var(--tshadow) }`：卡内所有文字都有
+        let shadow = TextShadow::CARD.with_color(pal.shadow);
+        let mut marquee_drawn = false;
+        // 歌名 / 歌手：放不下（溢出 > 2px）就来回滚 —— 浏览器 `musicMarquee`
+        if pl.id == 9101 || pl.id == 9102 {
+            let slot = if pl.id == 9101 { "title" } else { "artist" };
+            // nowrap 的自然宽（与浏览器 `scrollWidth` 同口径）
+            let natural = te.measure(spec, 0.0).0;
+            let over = natural - pl.rect.w;
+            if over > MQ_MIN_OVER {
+                let dist = over + MQ_PAD;
+                let now = Instant::now();
+                let off = marquee_for(slot, &spec.s, now).offset(dist, now);
+                MQ_ACTIVE.with(|c| c.set(true));
+                // 布局按自然宽建，否则裁剪模式下会被 Ellipsis 截成「…」
+                let lay = te.layout_spec(
+                    spec,
+                    natural.ceil() + 2.0,
+                    spec.line_h + 6.0,
+                    TextMode::Clip,
+                )?;
+                // 纵向裁剪盒 = 元素盒（CSS `overflow:hidden`），横向随位移露字
+                push_clip(
+                    g,
+                    D2D_RECT_F {
+                        left: pl.rect.x,
+                        top: pl.rect.y,
+                        right: pl.rect.right(),
+                        bottom: pl.rect.y + spec.line_h,
+                    },
+                );
+                draw_shadow_taps(g, &lay, pl.rect.x - off, pl.rect.y, &shadow)?;
+                set_color(g, color)?;
+                unsafe {
+                    g.d2d.DrawTextLayout(
+                        Vector2 {
+                            X: pl.rect.x - off,
+                            Y: pl.rect.y,
+                        },
+                        &lay,
+                        &g.brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+                pop_clip(g);
+                marquee_drawn = true;
+            }
+        }
+        if !marquee_drawn {
+            let mode = if spec.size == t.title_fs || spec.size == t.artist_fs {
+                TextMode::Ellipsis
+            } else {
+                TextMode::Clip
+            };
+            let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, mode)?;
+            draw_shadow_taps(g, &lay, pl.rect.x, pl.rect.y, &shadow)?;
+            set_color(g, color)?;
+            unsafe {
+                g.d2d.DrawTextLayout(
+                    Vector2 {
+                        X: pl.rect.x,
+                        Y: pl.rect.y,
+                    },
+                    &lay,
+                    &g.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
         }
     }
     for c in &pl.children {
@@ -680,6 +857,92 @@ mod tests {
             ..m
         };
         assert_eq!(zero.pct(), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod marquee_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// 单程时长 = 行程 / 5px每秒（上限 40s）—— 与 `musicMarquee` 的 `trMs` 同口径。
+    #[test]
+    fn 行程时长按_5px每秒_且封顶四十秒() {
+        let m = Marquee::new("x", Instant::now());
+        // 100px 溢出 → dist = 106 → 21.2s
+        assert!((m.travel_ms(106.0) - 21_200.0).abs() < 1.0, "{}", m.travel_ms(106.0));
+        // 只有溢出 0.5px 时也是一整段（上限之外没有下限）
+        assert!((m.travel_ms(MQ_PAD + 0.5) - (MQ_PAD + 0.5) / MQ_SPEED * 1000.0).abs() < 1.0);
+        // 溢出 1px 的极端：行程 7px 也要 1.4s，不是 0
+        assert!(m.travel_ms(7.0) > 1000.0);
+        // 封顶
+        assert!((m.travel_ms(1000.0) - MQ_TR_MAX_MS).abs() < 0.01);
+    }
+
+    /// 停 800 → 滚 tr → 停 1000 → 滚回 tr：四段各占其位，半个行程落在缓动中点。
+    #[test]
+    fn 偏移按_停滚停回_四段走() {
+        let t0 = Instant::now();
+        let m = Marquee::new("x", t0);
+        let dist = 106.0f32;
+        let tr = m.travel_ms(dist);
+        let at = |ms: f32| m.offset(dist, t0 + Duration::from_micros((ms * 1000.0) as u64));
+        assert_eq!(at(0.0), 0.0);
+        assert_eq!(at(MQ_HOLD_A_MS - 5.0), 0.0, "起点停留期间不许动");
+        // easeInOutQuad 在 0.5 处正好半个行程
+        assert!(
+            (at(MQ_HOLD_A_MS + tr / 2.0) - dist / 2.0).abs() < 0.5,
+            "半程 {} 应 ≈ {}",
+            at(MQ_HOLD_A_MS + tr / 2.0),
+            dist / 2.0
+        );
+        assert!((at(MQ_HOLD_A_MS + tr) - dist).abs() < 0.01, "单程结束应到终点");
+        assert!(
+            (at(MQ_HOLD_A_MS + tr + MQ_HOLD_B_MS / 2.0) - dist).abs() < 0.01,
+            "终点停留期间停在终点"
+        );
+        assert!(
+            (at(MQ_HOLD_A_MS + tr + MQ_HOLD_B_MS + tr / 2.0) - dist / 2.0).abs() < 0.5,
+            "回程半程"
+        );
+        // 一个周期后回到起点
+        let period = MQ_HOLD_A_MS + tr + MQ_HOLD_B_MS + tr;
+        assert!(at(period) < 0.01, "周期末尾应回到 0，实得 {}", at(period));
+        // 单调：去程不许回退
+        let mut prev = -1.0;
+        for k in 0..=20 {
+            let v = at(MQ_HOLD_A_MS + tr * k as f32 / 20.0);
+            assert!(v >= prev - 1e-3, "去程出现回退：{v} < {prev}");
+            prev = v;
+        }
+    }
+
+    /// **文本没变必须沿用同一时间基准**（否则每帧重建都从 0 重放 = 原地抖），
+    /// 换文本才从头开始；歌名与歌手两条槽互不干扰。
+    #[test]
+    fn 文本没变续播_换文本从头() {
+        let t0 = Instant::now();
+        let a = marquee_for("title", "很长的歌名 ABCDEFG", t0);
+        let b = marquee_for("title", "很长的歌名 ABCDEFG", t0 + Duration::from_secs(3));
+        assert_eq!(a.base, b.base, "同文本必须续播");
+        // 3 秒后偏移已经不是起点（真的在滚，而不是每次都归零）
+        let dist = 60.0f32;
+        assert!(b.offset(dist, t0 + Duration::from_secs(3)) > 0.0);
+        let c = marquee_for("title", "换了首歌", t0 + Duration::from_secs(4));
+        assert_eq!(c.base, t0 + Duration::from_secs(4), "换文本要从头开始");
+        assert_eq!(c.offset(dist, t0 + Duration::from_secs(4)), 0.0);
+        // 另一条槽不受影响
+        let d = marquee_for("artist", "很长的歌名 ABCDEFG", t0 + Duration::from_secs(5));
+        assert_eq!(d.base, t0 + Duration::from_secs(5));
+        assert_eq!(d.text, "很长的歌名 ABCDEFG");
+    }
+
+    /// 没有溢出就不该位移（绘制层判据是 over > 2px，这里守住 dist <= 0 的下界）
+    #[test]
+    fn 没溢出就不位移() {
+        let m = Marquee::new("x", Instant::now());
+        assert_eq!(m.offset(0.0, Instant::now()), 0.0);
+        assert!(!m.moving(0.0, Instant::now()));
     }
 }
 

@@ -20,10 +20,10 @@ use windows_numerics::Vector2;
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_round};
-use minicard_draw::text::TextEngine;
+use minicard_draw::text::{draw_shadow_taps, Mode, TextEngine, TextShadow};
 use minicard_shell::gfx::Gfx;
 
-use crate::roll::{cell, draw_digit, Roll};
+use crate::roll::{cell, draw_digit_shadowed, Roll};
 
 pub struct Tokens {
     pub w: f32,
@@ -96,9 +96,26 @@ impl Clock {
         self.rolls.iter().all(|r| r.map_or(true, |r| r.done(now)))
     }
 
+    /// 四位数字 → 当天的分钟数（用于判断这一拍时间往前走了多少）。
+    fn minutes(d: [u8; 4]) -> i32 {
+        let hh = (d[0] as i32 % 24) * 10 + d[1] as i32 % 10;
+        let mm = (d[2] as i32 % 6) * 10 + d[3] as i32 % 10;
+        (hh * 60 + mm).rem_euclid(24 * 60)
+    }
+
     /// 喂新时间（hh, mm），返回是否有滚动在进行。
+    ///
+    /// 口径照 `card.html::rollSet(el, t, 300, dir=+1)`：
+    /// - **正常走时**（这一拍只往前 0~2 分钟）时每一位都滚过去，数字**下降**（5→0、2→0、
+    ///   3→0 这种跨零进位）走条尾补的 0 再瞬归 —— 浏览器就是这条路，不是瞬跳；
+    /// - **跨多位**（系统校时 / 进程被挂起后第一次喂）直接落位：一口气滚 6~8 格只会糊成一片。
     pub fn set(&mut self, hh: u8, mm: u8, now: Instant) {
         let want = [hh / 10, hh % 10, mm / 10, mm % 10];
+        let old = Self::minutes(self.digits);
+        let new = (hh as i32 % 24) * 60 + mm as i32 % 60;
+        // 0..1440 的「往前走了几分钟」：正常走秒是 0 或 1，跨零点也是 1
+        let step = (new - old).rem_euclid(24 * 60);
+        let normal = step <= 2;
         for i in 0..4 {
             if want[i] == self.digits[i] {
                 continue;
@@ -107,17 +124,14 @@ impl Clock {
             let cur = self.rolls[i]
                 .map(|r| r.at(now))
                 .unwrap_or(Self::cell(self.digits[i]));
-            // 只有「往上走一格」才滚（9→0 走末尾补格）；跨多位直接落位 ——
-            // 5→0 这种一口气滚 6 格在 300ms 里只会糊成一片。
-            let up_one = crate::roll::step_delta(self.digits[i], want[i]) == 1;
-            self.rolls[i] = if up_one {
-                Some(if want[i] == 0 {
-                    Roll::wrap(cur, 11.0, Self::cell(want[i]), now)
-                } else {
-                    Roll::new(cur, Self::cell(want[i]), now)
-                })
-            } else {
+            self.rolls[i] = if !normal {
                 None
+            } else if want[i] > self.digits[i] {
+                // 顺走（含低位进位把这一位顶上去）：直接滚到目标格
+                Some(Roll::new(cur, Self::cell(want[i]), now))
+            } else {
+                // 下降 = 跨零：走条尾补的 0（第 11 格），滚完瞬归规范格
+                Some(Roll::wrap(cur, 11.0, Self::cell(want[i]), now))
             };
             self.digits[i] = want[i];
         }
@@ -233,7 +247,8 @@ fn tree(t: &Tokens, date: &str, lunar: &str) -> Node {
         align: 0,
         tabular: true,
         spacing_em: t.spacing_em,
-    });
+    })
+    .id(3900);
     let time = Node::new(Dir::Row)
         .style(|s| s.align(Align::Center).justify(Justify::Center))
         .child(Node::text(digit_spec("0")).id(4000))
@@ -309,10 +324,10 @@ fn paint_tree(
             tabular: true,
             spacing_em: t.spacing_em,
         };
-        return draw_digit(
+        // 滚动数字同样吃 `.card` 的 text-shadow（原来完全没画，字像直接贴在玻璃上）
+        return draw_digit_shadowed(
             g,
             te,
-            pal,
             p.rect.x,
             p.rect.y,
             p.rect.w,
@@ -320,29 +335,22 @@ fn paint_tree(
             clock.idx(i, now),
             &spec,
             pal.fg,
+            Some(TextShadow::CARD.with_color(pal.shadow)),
         );
     } else if let Some(spec) = p.text() {
-        let fmt = te.format_spec(spec, minicard_draw::text::Mode::Clip)?;
-        let lay = te.layout_spec(
-            spec,
-            p.rect.w,
-            spec.line_h + 8.0,
-            minicard_draw::text::Mode::Clip,
+        // 冒号属于 .clock-time（--fg），不是日期/农历的 --muted
+        let color = if p.id == 3900 { pal.fg } else { pal.muted };
+        let lay = te.layout_spec(spec, p.rect.w, spec.line_h + 8.0, Mode::Clip)?;
+        // CSS 是**模糊**投影（0 .833px 1.667px var(--tshadow)）：原来画的是 y+0.833 的
+        // 硬边副本，字缘没有过渡、看着像双影。这里换成 3×3 高斯核的 9 次低透明度副本。
+        draw_shadow_taps(
+            g,
+            &lay,
+            p.rect.x,
+            p.rect.y,
+            &TextShadow::CARD.with_color(pal.shadow),
         )?;
-        let _ = fmt;
-        set_color(g, pal.shadow)?;
-        unsafe {
-            g.d2d.DrawTextLayout(
-                Vector2 {
-                    X: p.rect.x,
-                    Y: p.rect.y + 0.833,
-                },
-                &lay,
-                &g.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
-        set_color(g, pal.muted)?;
+        set_color(g, color)?;
         unsafe {
             g.d2d.DrawTextLayout(
                 Vector2 {
@@ -505,6 +513,19 @@ mod roll_tests {
         assert_eq!(seen, vec!['9', '0'], "个位滚动轨迹 {:?}", seen);
     }
 
+    /// 采样一整个 300ms 行程，返回「按动画进度看到的数字序列」（相邻重复合并）。
+    fn 轨迹(c: &Clock, i: usize, t0: Instant) -> Vec<char> {
+        let mut seen: Vec<char> = Vec::new();
+        for k in 0..=60 {
+            let now = t0 + Duration::from_millis(k * 5);
+            let ch = cell_char(c.idx(i, now).round() as i32);
+            if seen.last() != Some(&ch) {
+                seen.push(ch);
+            }
+        }
+        seen
+    }
+
     /// 分钟十位 5→0（12:59 → 13:00）走的是末尾补格，滚完必须归到 0 那一格
     #[test]
     fn 分钟十位跨零归位() {
@@ -519,5 +540,75 @@ mod roll_tests {
             (idx - 1.0).abs() < 0.01,
             "分钟十位应归到 0（格 1），实得 {idx}"
         );
+        // 5→0 在浏览器里是**滚过去**（走条尾补的 0），不是瞬跳：
+        // 轨迹必须是 5→6→…→9→0 这条顺路，且不许蹦出别的数字。
+        let tr = 轨迹(&c, 2, t1);
+        assert_eq!(tr, vec!['5', '6', '7', '8', '9', '0'], "分钟十位轨迹 {tr:?}");
+    }
+
+    /// 23:59 → 00:00（跨天）：小时的两位都是「下降」—— 2→0、3→0，
+    /// 同样要走补格滚过去，滚完各归到 0 的规范格。
+    #[test]
+    fn 跨零点小时位也滚过去并归位() {
+        let t0 = Instant::now();
+        let mut c = Clock::new();
+        c.snap(23, 59);
+        c.set(0, 0, t0);
+        let end = t0 + Duration::from_millis(400);
+        for i in 0..4 {
+            assert!(
+                c.rolls[i].is_some(),
+                "第 {i} 位应有滚动（23:59 → 00:00 是正常走时）"
+            );
+            let idx = c.idx(i, end);
+            assert!(
+                (idx - 1.0).abs() < 0.01,
+                "第 {i} 位滚完应归到 0（格 1），实得 {idx}"
+            );
+        }
+        // 小时十位 2→0：轨迹 2→3→…→9→0（顺路，不含其它数字）
+        let tr = 轨迹(&c, 0, t0);
+        assert_eq!(
+            tr,
+            vec!['2', '3', '4', '5', '6', '7', '8', '9', '0'],
+            "小时十位轨迹 {tr:?}"
+        );
+        // 分钟两位 59→00 与小时个位 3→0 同理：只走顺路
+        let tr1 = 轨迹(&c, 1, t0);
+        assert_eq!(tr1, vec!['3', '4', '5', '6', '7', '8', '9', '0'], "小时个位轨迹 {tr1:?}");
+        let tr2 = 轨迹(&c, 2, t0);
+        assert_eq!(tr2, vec!['5', '6', '7', '8', '9', '0'], "分钟十位轨迹 {tr2:?}");
+        let tr3 = 轨迹(&c, 3, t0);
+        assert_eq!(tr3, vec!['9', '0'], "分钟个位轨迹 {tr3:?}");
+    }
+
+    /// 系统改时间（一次跨好几分钟）**不能**滚：一口气扫 6 格只会糊成一片。
+    /// 判据 = 没有 Roll、idx 直接落在目标格。
+    #[test]
+    fn 跨多位跳变直接落位() {
+        let t0 = Instant::now();
+        let mut c = Clock::new();
+        c.snap(14, 26);
+        c.set(8, 41, t0 + Duration::from_millis(400));
+        assert!(
+            c.rolls.iter().all(|r| r.is_none()),
+            "跨多位不该建滚动：{:?}",
+            c.rolls
+        );
+        let want = [0u8, 8, 4, 1];
+        for i in 0..4 {
+            let idx = c.idx(i, t0 + Duration::from_millis(500));
+            assert!(
+                (idx - (want[i] as f32 + 1.0)).abs() < 0.01,
+                "第 {i} 位应直接落在 {}（格 {}），实得 {idx}",
+                want[i],
+                want[i] as f32 + 1.0
+            );
+        }
+        // 往回跳一分钟也算跨多位（不是正常走时）
+        let mut d = Clock::new();
+        d.snap(14, 26);
+        d.set(14, 25, t0 + Duration::from_millis(400));
+        assert!(d.rolls.iter().all(|r| r.is_none()), "时间回退不该滚");
     }
 }

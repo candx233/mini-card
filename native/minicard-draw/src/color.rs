@@ -52,6 +52,8 @@ pub struct Palette {
     pub fg55: D2D1_COLOR_F,
     /// `--accent`：强调色（待办勾选底、日历今天）。由调用方按 config 的 accent 传进来。
     pub accent: D2D1_COLOR_F,
+    /// `color-mix(in oklch, var(--accent) 66%, var(--fg))`：日历节日标签
+    pub accent_mix: D2D1_COLOR_F,
     /// `--fg-soft`：控件 hover 底（fg 6%）
     pub fg_soft: D2D1_COLOR_F,
     /// hover 时的卡片描边（fg 30%）
@@ -86,6 +88,7 @@ impl Palette {
             badge_bg: D2D1_COLOR_F { a: 0.07, ..fg },
             fg55: D2D1_COLOR_F { a: 0.55, ..fg },
             accent: srgb8(76, 154, 255),
+            accent_mix: oklch(0.781, 0.113, 256.0, 1.0),
             on_accent: oklch(0.985, 0.0, 0.0, 1.0),
             badge_border: D2D1_COLOR_F { a: 0.24, ..fg },
             fg_soft: D2D1_COLOR_F { a: 0.06, ..fg },
@@ -96,10 +99,44 @@ impl Palette {
         }
     }
 
+    /// 浅色主题（主界面「深色字」）：照 card.html::__setTheme(false) 的四个 token
+    /// 换 fg/muted/border/tshadow，其余由 fg 派生的色一并重算。
+    pub fn with_theme(mut self, dark: bool) -> Self {
+        if dark {
+            return self;
+        }
+        let fg = oklch(0.28, 0.02, 258.0, 1.0);
+        let veil_a = self.veil.a;
+        self.fg = fg;
+        self.muted = oklch(0.47, 0.02, 261.0, 1.0);
+        self.border = oklch(0.0, 0.0, 0.0, 0.10);
+        self.shadow = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.60 };
+        self.veil = D2D1_COLOR_F { a: veil_a, ..fg };
+        self.track = D2D1_COLOR_F { a: 0.25, ..fg };
+        self.fill = D2D1_COLOR_F { a: 0.90, ..fg };
+        self.track12 = D2D1_COLOR_F { a: 0.12, ..fg };
+        self.badge_bg = D2D1_COLOR_F { a: 0.07, ..fg };
+        self.fg55 = D2D1_COLOR_F { a: 0.55, ..fg };
+        self.badge_border = D2D1_COLOR_F { a: 0.24, ..fg };
+        self.fg_soft = D2D1_COLOR_F { a: 0.06, ..fg };
+        self.fg30 = D2D1_COLOR_F { a: 0.30, ..fg };
+        self.fg44 = D2D1_COLOR_F { a: 0.44, ..fg };
+        // Dock 气泡在浅色主题下翻成浅底深字
+        self.bubble_bg = D2D1_COLOR_F { r: 0.98, g: 0.98, b: 0.99, a: 0.94 };
+        self.bubble_fg = fg;
+        self
+    }
+
     /// 按 config 的强调色覆盖 `--accent` / `--on-accent`（口径同 `card.html:paintOnAccent()`）：
     /// 只有「近白强调色」或浅色主题才把压在强调色上的字翻成深色，粉/蓝/绿一律白字。
     pub fn with_accent(mut self, rgb: [u8; 3], dark_theme: bool) -> Self {
         self.accent = srgb8(rgb[0], rgb[1], rgb[2]);
+        self.accent_mix = D2D1_COLOR_F {
+            r: self.accent.r * 0.66 + self.fg.r * 0.34,
+            g: self.accent.g * 0.66 + self.fg.g * 0.34,
+            b: self.accent.b * 0.66 + self.fg.b * 0.34,
+            a: 1.0,
+        };
         // sRGB → 线性 → 相对亮度（WCAG 口径）
         let lin: Vec<f32> = rgb
             .iter()
@@ -122,5 +159,29 @@ impl Palette {
         self
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn light_theme_recomputes_fg_derived_colors() {
+        let p = Palette::new(30.0, false).with_theme(false);
+        // 浅色主题是深字（card.html --fg 0.28），所有由 fg 派生出来的色也要跟着暗
+        assert!(p.fg.r < 0.40, "fg 应翻成深色，实际 {}", p.fg.r);
+        assert!(p.muted.r < 0.60, "muted 应翻成深色，实际 {}", p.muted.r);
+        assert!(p.fill.r < 0.45, "fill 应跟 fg 一起暗，实际 {}", p.fill.r);
+        assert!(p.track.r < 0.45, "track 应跟 fg 一起暗，实际 {}", p.track.r);
+        assert!(p.border.r < 0.01 && p.border.a <= 0.10);
+        assert!(p.veil.a > 0.0, "glass alpha 不能被主题改掉");
+    }
+
+    #[test]
+    fn accent_mix_follows_accent() {
+        let p = Palette::new(30.0, false).with_accent([255, 0, 0], true);
+        assert!(p.accent_mix.r > p.accent_mix.b);
+        assert!(p.accent_mix.r < 1.0);
+    }
 }
 

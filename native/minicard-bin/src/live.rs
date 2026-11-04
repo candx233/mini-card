@@ -13,7 +13,11 @@ use std::time::{Duration, Instant};
 use windows::core::{w, Result};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::*;
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR,
+};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
+use windows_numerics::Vector2;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::Graphics::Gdi::HBRUSH;
@@ -23,11 +27,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use minicard_cards::{calendar, clock, disks, lunar, music, net, perf, pomo, todo, weather};
-use minicard_core::config::{CardKind, Config, TodoItem};
+use minicard_core::config::{self, CardKind, Config, TodoItem};
 use minicard_core::data::{self, SharedSnap};
 use minicard_core::{media, weather as wx};
 use minicard_draw::color::Palette;
 use minicard_draw::glass;
+use minicard_draw::paint::{fill_round, set_color, stroke_round};
 use minicard_draw::text::TextEngine;
 use minicard_shell::gfx::Gfx;
 
@@ -156,7 +161,10 @@ static SNAP_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 struct CardWin {
     #[allow(dead_code)]
     hwnd: HWND,
-    gfx: Gfx,
+    /// `Option`：磁盘卡按盘数改窗口高度时要「先丢旧 Gfx 再建新的」
+    /// （`CreateTargetForHwnd` 在旧合成目标还在时会报 WINDOW_ALREADY_COMPOSED），
+    /// 中间那一瞬没有 Gfx —— 见 `set_card_height`。
+    gfx: Option<Gfx>,
     kind: CardKind,
     w: f32,
     h: f32,
@@ -229,6 +237,17 @@ struct DockWin {
 /// 只有点击穿透；这也正是上方 172px 预留想要的语义。
 use std::sync::atomic::{AtomicIsize, Ordering};
 static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
+/// (hwnd, pinned)：原生卡的「固定位置」只在主界面写 config，wndproc 得有个
+/// 不读盘的查询表；建窗/热载时同步。
+static PINNED: Mutex<Vec<(isize, bool)>> = Mutex::new(Vec::new());
+
+fn is_pinned(hwnd: HWND) -> bool {
+    PINNED
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(h, p)| *h == hwnd.0 as isize && *p)
+}
 /// (left, top, right, bottom, 已放开)
 static DOCK_HIT: Mutex<(f32, f32, f32, f32, bool)> = Mutex::new((0.0, 0.0, 0.0, 0.0, false));
 
@@ -278,7 +297,9 @@ enum State {
     Net(net::NetState),
     Pomo(pomo::Pomo),
     Todo(Vec<todo::Item>),
-    Weather,
+    /// `seen_at` = 上一帧画上去的 `WeatherSnap.at`。快照换了一版就立刻重绘：
+    /// 天气卡的 refresh_ms 被钳到 60s，光等节拍最多要 60s 才看到新天气。
+    Weather { seen_at: i64 },
     Music {
         /// (封面 dataURL, 位图)；换曲才重解码
         cover: Option<(String, ID2D1Bitmap1)>,
@@ -289,6 +310,8 @@ enum State {
         flip_dir: f32,
         /// 仅 `MC_FLIP_DEMO=1` 用：下一次自动翻转的时刻（没有真换曲时也能看动画）
         demo_t0: Option<Instant>,
+        /// 上一次的 (title|artist)：只有换曲才翻卡，同曲晚到的封面只换图不翻
+        last_track: String,
     },
     Calendar(calendar::Calendar, i32, u32),
 }
@@ -307,6 +330,15 @@ fn now_parts() -> (i32, u32, u32, u8, u8, u32) {
 }
 
 const WEEK_CN: [&str; 7] = ["日", "一", "二", "三", "四", "五", "六"];
+
+fn wmo_u8(code: i32) -> u8 {
+    // -1 / 缺字段在 core 里用 unwrap_or(-1) 兜底；直接 as u8 会变 255 → 雷暴
+    if (0..=99).contains(&code) {
+        code as u8
+    } else {
+        3
+    }
+}
 
 fn date_text(y: i32, m: u32, d: u32, wd: u32) -> String {
     format!("{}年{}月{}日 周{}", y, m, d, WEEK_CN[(wd as usize) % 7])
@@ -412,9 +444,276 @@ pub fn radius_of(kind: CardKind, w: f32, h: f32) -> f32 {
     }
 }
 
+/// 采样多久没有新值算「数据异常」。
+/// 与浏览器 `card.html::computeState` 的 `Date.now() - lastAt > 3500` 同一个口径。
+const DATA_STALE_MS: u64 = 3500;
+
+/// 采样健康度：性能 / 磁盘 / 网络三张卡的空态、异常态都由它决定。
+///
+/// 浏览器是「没收到过快照 → `empty`」「3.5s 没新值 → `error`」两档；原生这边
+/// 快照自带 `at`（采样线程每拍打的 unix 毫秒，见 `data::DataSnapshot::at`），
+/// `at == 0` 就是还没采到。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DataHealth {
+    Empty,
+    Fresh,
+    Stale,
+}
+
+impl DataHealth {
+    fn of(at: u64, now_ms: u64) -> Self {
+        if at == 0 {
+            Self::Empty
+        } else if now_ms.saturating_sub(at) > DATA_STALE_MS {
+            Self::Stale
+        } else {
+            Self::Fresh
+        }
+    }
+
+    /// 整卡文案（`None` = 正常态，画各自的内容）
+    fn text(self) -> Option<&'static str> {
+        match self {
+            Self::Empty => Some("等待数据…"),
+            Self::Stale => Some("数据异常"),
+            Self::Fresh => None,
+        }
+    }
+}
+
+/// unix 毫秒（与 `DataSnapshot.at` 同一时钟）
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 「整卡一行灰字」的几何：照 `card.html` 的
+/// `.card > .card-body > .empty { flex:1; display:grid; place-items:center; font-size:.78125rem }`。
+///
+/// 居中盒是**卡片自己的 padding box**（每张卡的 padding 写在 `.card-*` 里，这里按下表取），
+/// 字号 = 0.78125rem = 0.78125 × 16k；k 与圆角同源（`border-radius:1rem` = 16k），
+/// 所以直接从 `radius_of` 反推，不用再抄一遍各卡的 BASE。
+#[derive(Clone, Copy, Debug)]
+struct StatusTok {
+    pad_lr: f32,
+    pad_tb: f32,
+    fs: f32,
+    line_h: f32,
+    radius: f32,
+}
+
+fn status_tokens(kind: CardKind, w: f32, h: f32) -> StatusTok {
+    let r = radius_of(kind, w, h); // = 1rem = 16k
+    let (pad_lr, pad_tb) = match kind {
+        // .card-perf { padding: .4375rem 1rem }
+        CardKind::Performance => (1.0 * r, 0.4375 * r),
+        // .card-disk { padding: .5rem .75rem }
+        CardKind::Disks => (0.75 * r, 0.5 * r),
+        // .card-net { padding: 0 .5rem }
+        CardKind::NetRate => (0.5 * r, 0.0),
+        // 其余卡的空态在各自模块里画；这里给 .card 的 0.875rem/1rem 兜底
+        _ => (1.0 * r, 0.875 * r),
+    };
+    let fs = 0.78125 * r;
+    StatusTok {
+        pad_lr,
+        pad_tb,
+        fs,
+        line_h: fs * 1.55, // body { line-height:1.55 }
+        radius: r,
+    }
+}
+
+/// 空态 / 异常态的整卡：玻璃 + 白纱 + 描边 + 正中一行灰字。
+/// 与其它卡一样带 `.card` 的 text-shadow（0 0.833px 1.667px #000/45%）。
+#[allow(clippy::too_many_arguments)]
+fn paint_status(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &Palette,
+    t: &StatusTok,
+    w: f32,
+    h: f32,
+    text: &str,
+    glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
+) -> Result<()> {
+    unsafe {
+        g.begin()?;
+        g.push_clip()?;
+        if let Some((bmp, rect)) = glass {
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
+        }
+        let full = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: w,
+            bottom: h,
+        };
+        set_color(g, pal.veil)?;
+        fill_round(g, full, t.radius)?;
+        set_color(
+            g,
+            if g.hover.is_some() {
+                pal.fg30
+            } else {
+                pal.border
+            },
+        )?;
+        stroke_round(
+            g,
+            D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: w - 0.5,
+                bottom: h - 0.5,
+            },
+            (t.radius - 0.5).max(0.0),
+            1.0,
+        )?;
+
+        let box_w = (w - 2.0 * t.pad_lr).max(0.0);
+        let box_h = (h - 2.0 * t.pad_tb).max(0.0);
+        let y = t.pad_tb + (box_h - t.line_h).max(0.0) / 2.0;
+        let fmt = te.format_cached(t.fs, t.line_h, 2)?; // 2 = 居中
+        let lay = te.layout_cached(2, &fmt, text, box_w, t.line_h + 8.0, false)?;
+        set_color(g, pal.shadow)?;
+        g.d2d.DrawTextLayout(
+            Vector2 {
+                X: t.pad_lr,
+                Y: y + 0.833,
+            },
+            &lay,
+            &g.brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        set_color(g, pal.muted)?;
+        g.d2d.DrawTextLayout(
+            Vector2 { X: t.pad_lr, Y: y },
+            &lay,
+            &g.brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+
+        g.pop_clip();
+        g.end()?;
+    }
+    Ok(())
+}
+
+/// 磁盘卡此刻该不该换高度、换成多少（`None` = 不动）。
+///
+/// 三个「不动」的条件都很重要：
+/// - 不是磁盘卡（其它卡尺寸由 config 定死）；
+/// - 拖动中（改窗口尺寸会跟 guide.rs 的磁吸 / 落点吸附打架，外壳同一条规则）；
+/// - 采样不是新鲜态（没到 / 断了都保持当前高度，别先缩成 180 的空档再弹回来）。
+///
+/// 高度是**派生值**，只用于建窗 / SetWindowPos，**绝不写回 config**：
+/// 写回去的话，3 盘机器上跑一次就把 180 存成 120，换到 5 盘机器就是 5 行塞进 120 高。
+fn disk_height_for(
+    kind: CardKind,
+    cur_h: f32,
+    disk_n: usize,
+    health: DataHealth,
+    dragging: bool,
+) -> Option<f32> {
+    if !matches!(kind, CardKind::Disks) || dragging || health != DataHealth::Fresh {
+        return None;
+    }
+    let want = config::disk_height_px(disk_n);
+    // 幂等：已经是目标高度就别每秒 SetWindowPos（会抖）
+    if (cur_h - want).abs() < 0.5 {
+        None
+    } else {
+        Some(want)
+    }
+}
+
+/// 磁盘卡的窗口高度 = **派生值**：1 盘 60 / 2–3 盘 120 / 4–5 盘 180（`config::disk_height_px`）。
+///
+/// 只改窗口和 Gfx，**不写回 config**（写回去就成了「3 盘机器上跑一次 → 5 盘机器按 3 盘高显示」）。
+/// 换尺寸必须重造 Gfx：swapchain / D2D 目标位图都是按窗口像素建的，
+/// 旧的得先 `detach` 再丢掉，否则 `CreateTargetForHwnd` 报 WINDOW_ALREADY_COMPOSED
+/// （`dock_rebuild` 同一条路）。
+fn set_card_height(
+    win: &mut CardWin,
+    new_h: f32,
+    wall: &Option<glass::Wall>,
+    blur: f32,
+) -> Result<()> {
+    let old_h = win.h;
+    let w_px = (win.w * win.dpi / 96.0).round().max(1.0) as i32;
+    let old_h_px = (old_h * win.dpi / 96.0).round().max(1.0) as i32;
+    let h_px = (new_h * win.dpi / 96.0).round().max(1.0) as i32;
+    unsafe {
+        let _ = SetWindowPos(
+            win.hwnd,
+            None,
+            0,
+            0,
+            w_px,
+            h_px,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    if let Some(old) = win.gfx.take() {
+        old.detach();
+    }
+    match Gfx::new(
+        win.hwnd,
+        w_px as u32,
+        h_px as u32,
+        win.dpi,
+        radius_of(win.kind, win.w, new_h),
+    ) {
+        Ok(mut g) => {
+            g.text_dx = 0.0;
+            win.gfx = Some(g);
+            win.h = new_h;
+        }
+        Err(e) => {
+            // 回滚：窗口退回旧高度，尽量重造一份能画的 Gfx（至少别留一块空白卡）
+            unsafe {
+                let _ = SetWindowPos(
+                    win.hwnd,
+                    None,
+                    0,
+                    0,
+                    w_px,
+                    old_h_px,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            win.gfx = Gfx::new(
+                win.hwnd,
+                w_px as u32,
+                old_h_px as u32,
+                win.dpi,
+                radius_of(win.kind, win.w, old_h),
+            )
+            .ok();
+            if let Some(g) = win.gfx.as_mut() {
+                g.text_dx = 0.0;
+            }
+            return Err(e);
+        }
+    }
+    // 玻璃是按窗口像素切的：高度变了必须重切，否则磨砂层错位
+    reslice(win, wall, blur);
+    win.next_draw = Instant::now();
+    Ok(())
+}
+
 /// 卡片落在哪块屏（物理像素）：返回 (left, top, w, h)
 fn monitor_of(x: i32, y: i32) -> (f32, f32, f32, f32) {
-    use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
@@ -638,8 +937,16 @@ pub fn run(
                 CardKind::NetRate => State::Net(net::NetState::new(0.0, 0.0, now)),
                 CardKind::Pomodoro => State::Pomo(pomo::Pomo::new()),
                 CardKind::Todo => State::Todo(todo_items(&card.todo)),
-                CardKind::Weather => State::Weather,
-                CardKind::Music => State::Music { cover: None, prev: None, flip_t0: None, flip_dir: 1.0, demo_t0: None },
+                CardKind::Weather => State::Weather {
+                    // 初值就取当前快照的 at：首次绘制之后只有「换了一版」才触发额外重绘
+                    seen_at: wshared
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .map(|s| s.at)
+                        .unwrap_or(i64::MIN),
+                },
+                CardKind::Music => State::Music { cover: None, prev: None, flip_t0: None, flip_dir: 1.0, demo_t0: None, last_track: String::new() },
                 CardKind::Calendar => {
                     let (y, m, d, _, _, _) = now_parts();
                     State::Calendar(calendar_of(y, m, d), 0, d)
@@ -652,9 +959,10 @@ pub fn run(
                 }
             }
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            PINNED.lock().unwrap().push((hwnd.0 as isize, card.pinned));
             wins.push(CardWin {
                 hwnd,
-                gfx,
+                gfx: Some(gfx),
                 kind: card.kind,
                 w: win_w,
                 h: win_h,
@@ -822,6 +1130,8 @@ pub fn run(
         // 帧循环：自节拍 16.667ms（与单窗模式同一套），消息循环与绘制交替
         let _timer = windows::Win32::Media::timeBeginPeriod(1);
         let t_start = Instant::now();
+        // 上一拍的数据健康度（只在换档时唤醒卡片，别每帧都叫）
+        let mut last_health = DataHealth::Empty;
         let mut cfg_mtime = std::fs::metadata(minicard_core::config::path())
             .and_then(|m| m.modified())
             .ok();
@@ -1170,6 +1480,72 @@ pub fn run(
             let date = date_text(y, mo, d, now_parts().5);
             let lunar_txt = lunar::lunar_text(y, mo, d).unwrap_or_default();
 
+            // ── 采样健康度：性能/磁盘/网络三卡的「等待数据…／数据异常」都按它判 ──
+            // 判据与浏览器同一条（`card.html::computeState`）：没有快照 = 空态，
+            // 3.5s 没有新值 = 异常。`at` 由采样线程每拍打（`data::DataSnapshot::at`），
+            // 不能拿「数值变了没有」去推 —— 空载机器的 CPU/内存/网速/盘占用能一连几秒一模一样。
+            let health = {
+                let s = snap.read().unwrap();
+                DataHealth::of(s.at, unix_ms())
+            };
+            // 健康度换档（正常 ↔ 空/异常）的那一拍立刻重绘：数据断了以后不会再有
+            // 采样事件叫醒卡片，光等 refresh 节拍最多要 60s 才看见「数据异常」。
+            if health != last_health {
+                last_health = health;
+                for win in wins.iter_mut() {
+                    if matches!(
+                        win.kind,
+                        CardKind::Performance | CardKind::Disks | CardKind::NetRate
+                    ) {
+                        win.next_draw = now;
+                    }
+                }
+            }
+
+            // ── 天气刷新后立刻重绘 ──
+            // 天气卡的 refresh_ms 会被钳到 60s，而天气线程是 10 分钟一轮；不在这里唤醒的话，
+            // 新天气最多要等 60s 才上屏（且「城市改了 → 立刻刷」也看不见）。
+            {
+                let cur = wshared
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|s| s.at)
+                    .unwrap_or(i64::MIN);
+                for win in wins.iter_mut() {
+                    if let State::Weather { seen_at } = &win.state {
+                        if *seen_at != cur {
+                            win.next_draw = now;
+                        }
+                    }
+                }
+            }
+
+            // ── 磁盘卡高度跟盘数走（派生值，绝不写回 config） ──
+            // 1 盘 60 / 2–3 盘 120 / 4–5 盘 180，与 `config::disk_height_px` 同源。
+            // 只在数据新鲜时跟随：采样没到、或中途断了，都保持当前高度
+            // （不然启动瞬间会先缩成 180 的空档再弹回来）。拖动中跳过 ——
+            // 换尺寸会跟磁吸/落点吸附打架（外壳 `sync_disk_height` 同一条规则）。
+            {
+                let disk_n = snap.read().unwrap().disks.len();
+                let dragging = DRAG.lock().unwrap().is_some();
+                for win in wins.iter_mut() {
+                    let Some(want) =
+                        disk_height_for(win.kind, win.h, disk_n, health, dragging)
+                    else {
+                        continue;
+                    };
+                    match set_card_height(win, want, &wall, blur) {
+                        Ok(()) => minicard_shell::mlog!(
+                            "磁盘卡高度：{disk_n} 盘 → {want:.0}px（窗口 {:.0}×{:.0}）",
+                            win.w,
+                            win.h
+                        ),
+                        Err(e) => minicard_shell::mlog!("磁盘卡换高度失败：{e:?}"),
+                    }
+                }
+            }
+
             // 悬停：指针在哪张卡上（卡片内坐标），变了就立刻重绘
             let mut cur_pt = POINT::default();
             let _ = GetCursorPos(&mut cur_pt);
@@ -1194,8 +1570,9 @@ pub fn run(
                 } else {
                     None
                 };
-                if win.gfx.hover != hov {
-                    win.gfx.hover = hov;
+                let Some(g) = win.gfx.as_mut() else { continue };
+                if g.hover != hov {
+                    g.hover = hov;
                     win.next_draw = now;
                 }
             }
@@ -1252,6 +1629,7 @@ pub fn run(
                     if pal_changed {
                         let dark = !matches!(nc.settings.theme, minicard_core::config::Theme::Light);
                         pal = Palette::new(nc.settings.glass_alpha as f32, false)
+                            .with_theme(dark)
                             .with_accent(nc.settings.accent, dark);
                         minicard_shell::mlog!(
                             "config 热载：强调色 rgb{:?} / 玻璃 {}/100 / 主题 {:?}",
@@ -1273,6 +1651,7 @@ pub fn run(
                         }
                         minicard_shell::mlog!("config 热载：层级 {:?}", nc.settings.z_order);
                     }
+                    let dragging_now = DRAG.lock().unwrap().is_some();
                     for win in wins.iter_mut() {
                         if blur_changed {
                             reslice(win, &wall, blur);
@@ -1280,6 +1659,35 @@ pub fn run(
                         if let Some(card) = nc.cards.get(win.cfg_idx) {
                             win.refresh =
                                 Duration::from_millis(card.refresh_ms.clamp(200, 60_000));
+                            if let Some(e) = PINNED
+                                .lock()
+                                .unwrap()
+                                .iter_mut()
+                                .find(|(h, _)| *h == win.hwnd.0 as isize)
+                            {
+                                e.1 = card.pinned;
+                            }
+                            // 主界面位置面板 / 外部改 config：原生窗不在主进程里，
+                            // 只能由绘制进程按盘上的 pos 自己搬；拖动中不动（磁吸在跟手）。
+                            if !dragging_now {
+                                let mut r = RECT::default();
+                                if GetWindowRect(win.hwnd, &mut r).is_ok() {
+                                    let tx = card.pos[0].round() as i32;
+                                    let ty = card.pos[1].round() as i32;
+                                    if r.left != tx || r.top != ty {
+                                        let _ = SetWindowPos(
+                                            win.hwnd,
+                                            None,
+                                            tx,
+                                            ty,
+                                            0,
+                                            0,
+                                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                                        );
+                                        reslice(win, &wall, blur);
+                                    }
+                                }
+                            }
                             match &mut win.state {
                                 State::Perf { show_gpu, .. } => *show_gpu = card.show_gpu,
                                 State::Disks { warn90 } => *warn90 = card.warn90,
@@ -1649,18 +2057,18 @@ pub fn run(
                     &wshared,
                     &te,
                     &pal,
+                    health,
                     now,
                     (y, mo, d, hh, mm),
                     &date,
                     &lunar_txt,
                 )?;
-                // 动画中 60fps；静置按 1s 走（采样也是 1s 一拍），空闲几乎不烧 CPU
-                win.next_draw = now
-                    + if animating {
-                        Duration::from_micros(16_667)
-                    } else {
-                        win.refresh
-                    };
+                // 动画中按卡片类型分频；静置按 1s 走（采样也是 1s 一拍），空闲几乎不烧 CPU
+                // 短动效（待办勾选/FLIP、翻月、时钟翻位）用 200Hz：这几段只有
+                // 280~420ms，60fps 在 200Hz 屏上会明显跳；连续补间（性能/网络条、
+                // 音乐播放、番茄钟进度）仍走 60fps，别让常驻卡白烧 CPU。
+                let anim_step = anim_step(win.kind, animating, win.refresh);
+                win.next_draw = now + anim_step;
                 if win.next_draw < earliest {
                     earliest = win.next_draw;
                 }
@@ -1704,6 +2112,7 @@ fn draw_one(
     wshared: &wx::SharedWeather,
     te: &TextEngine,
     pal: &Palette,
+    health: DataHealth,
     now: Instant,
     t: (i32, u32, u32, u8, u8),
     date: &str,
@@ -1722,6 +2131,22 @@ fn draw_one(
             },
         )
     });
+    // 磁盘卡换高度的那一拍没有 Gfx（旧的已拆、新的还没建好）：这一帧跳过
+    let Some(gfx) = win.gfx.as_ref() else {
+        return Ok(false);
+    };
+    // 性能 / 磁盘 / 网络：采样没到 → 「等待数据…」，3.5s 没新值 → 「数据异常」。
+    // 浏览器口径是整卡替换（`card.html::computeState` + `.empty`），内容/进度条都不画。
+    if let Some(txt) = health.text() {
+        if matches!(
+            win.kind,
+            CardKind::Performance | CardKind::Disks | CardKind::NetRate
+        ) {
+            let tk = status_tokens(win.kind, win.w, win.h);
+            paint_status(gfx, te, pal, &tk, win.w, win.h, txt, glass_pair)?;
+            return Ok(false);
+        }
+    }
     let snap_r = snap.read().unwrap();
     let animating = match (&mut win.state, win.kind) {
         (State::Perf { show_gpu, tweens }, _) => {
@@ -1740,7 +2165,7 @@ fn draw_one(
             }
             let animating = tweens.iter().any(|t| t.live(now));
             let tk = perf::Tokens::perf(win.w, win.h);
-            perf::paint(&win.gfx, te, pal, &tk, &rows, glass_pair, false)?;
+            perf::paint(gfx, te, pal, &tk, &rows, glass_pair, false)?;
             animating
         }
         (State::Disks { warn90 }, _) => {
@@ -1755,39 +2180,39 @@ fn draw_one(
                 })
                 .collect();
             let tk = disks::Tokens::disks(win.w, win.h, list.len());
-            disks::paint(&win.gfx, te, pal, &tk, &list, glass_pair, *warn90, false)?;
+            disks::paint(gfx, te, pal, &tk, &list, glass_pair, *warn90, false)?;
             false
         }
         (State::Clock(c), _) => {
             c.set(hh, mm, now);
             let tk = clock::Tokens::clock(win.w, win.h);
-            clock::paint(&win.gfx, te, pal, &tk, c, date, lunar_txt, now, glass_pair)?;
+            clock::paint(gfx, te, pal, &tk, c, date, lunar_txt, now, glass_pair)?;
             !c.idle(now)
         }
         (State::Net(st), _) => {
             st.set(snap_r.net.tx, snap_r.net.rx, now);
             let tk = net::Tokens::net(win.w, win.h, 1.044, 0.282);
-            net::paint(&win.gfx, te, pal, &tk, st, now, glass_pair)?;
+            net::paint(gfx, te, pal, &tk, st, now, glass_pair)?;
             st.animating(now)
         }
         (State::Pomo(p), _) => {
             p.tick(now);
             let tk = pomo::Tokens::pomo(win.w, win.h);
-            pomo::paint(&win.gfx, te, pal, &tk, p, now, glass_pair)?;
+            pomo::paint(gfx, te, pal, &tk, p, now, glass_pair)?;
             p.is_running()
         }
         (State::Todo(items), _) => {
             let tk = todo::Tokens::todo(win.w, win.h);
-            todo::paint(&win.gfx, te, pal, &tk, items, now, glass_pair)?;
+            todo::paint(gfx, te, pal, &tk, items, now, glass_pair)?;
             todo::animating(items, now)
         }
-        (State::Weather, _) => {
+        (State::Weather { seen_at }, _) => {
             let ws = wshared.read().unwrap().clone();
             let (city, temp, code, air, hum, days) = match &ws {
                 Some(s) => (
                     s.city.clone(),
                     Some(s.temp as f32),
-                    s.code as u8,
+                    wmo_u8(s.code),
                     Some(s.air.clone()),
                     Some(s.humidity as i32),
                     s.days
@@ -1796,7 +2221,7 @@ fn draw_one(
                             label: d.label.clone(),
                             hi: Some(d.hi as f32),
                             lo: Some(d.lo as f32),
-                            code: d.code as u8,
+                            code: wmo_u8(d.code),
                         })
                         .collect(),
                 ),
@@ -1810,22 +2235,25 @@ fn draw_one(
                 days,
                 air,
                 humidity: hum,
+                empty: ws.is_none(),
             };
-            weather::paint(&win.gfx, te, pal, &wk, &wv, glass_pair)?;
+            weather::paint(gfx, te, pal, &wk, &wv, glass_pair)?;
+            // 记下画的是哪一版（主循环拿它判断「天气刷新了 → 立刻重绘」）
+            *seen_at = ws.as_ref().map(|s| s.at).unwrap_or(i64::MIN);
             false
         }
-        (State::Music { cover, prev, flip_t0, flip_dir, demo_t0 }, _) => {
+        (State::Music { cover, prev, flip_t0, flip_dir, demo_t0, last_track }, _) => {
             let m = media::snapshot();
             let mw = match &m {
-                Some(s) => music::Music {
+                Some(s) if s.present => music::Music {
                     title: s.title.clone(),
                     artist: s.artist.clone(),
                     playing: s.status == "playing",
                     position_ms: s.position_ms as u64,
                     duration_ms: s.duration_ms as u64,
                 },
-                None => music::Music {
-                    // 无会话 = 占位样张（字面词，不填样例数据）
+                _ => music::Music {
+                    // 无会话 / present=false = 占位样张（字面词，不填样例数据）
                     title: "歌名".into(),
                     artist: "歌手".into(),
                     playing: false,
@@ -1834,11 +2262,22 @@ fn draw_one(
                 },
             };
             let mk = music::Tokens::music(win.w, win.h);
+            let track_key = m
+                .as_ref()
+                .filter(|s| s.present)
+                .map(|s| format!("{}|{}", s.title, s.artist))
+                .unwrap_or_default();
+            let track_changed = track_key != *last_track;
+            if track_changed {
+                *last_track = track_key;
+            }
             // 封面：换曲/首次才解码（data URL → 缩到封面尺寸 → 圆角烘 alpha → 上传）
-            if let Some(s) = &m {
-                if !s.cover.is_empty()
-                    && cover.as_ref().map(|(u, _)| u.as_str()) != Some(s.cover.as_str())
-                {
+            if let Some(s) = m.as_ref().filter(|s| s.present) {
+                if s.cover.is_empty() {
+                    // 这歌确实没封面：别把上一首的图一直挂着（浏览器回落渐变+音符）
+                    *cover = None;
+                    *prev = None;
+                } else if cover.as_ref().map(|(u, _)| u.as_str()) != Some(s.cover.as_str()) {
                     match minicard_draw::image::decode_data_url(&s.cover) {
                         Ok(img) => {
                             let px = (win.h - 2.0 * mk.pad) * win.dpi / 96.0;
@@ -1848,10 +2287,10 @@ fn draw_one(
                                 &mut small,
                                 mk.cover_r * win.dpi / 96.0,
                             );
-                            match win.gfx.bitmap_from_bgra(&small.bgra, small.w, small.h) {
+                            match gfx.bitmap_from_bgra(&small.bgra, small.w, small.h) {
                                 Ok(b) => {
-                                    // 换曲：旧图留作翻转的「转出面」
-                                    if cover.is_some() {
+                                    // 换曲才翻；同一首晚到的封面只换图（不二次翻卡）
+                                    if cover.is_some() && track_changed {
                                         minicard_shell::mlog!("music flip start（dir {}）", *flip_dir);
                                         *prev = cover.take().map(|(_, b)| b);
                                         *flip_t0 = Some(now);
@@ -1864,6 +2303,10 @@ fn draw_one(
                         Err(e) => minicard_shell::mlog!("封面解码失败: {e:?}"),
                     }
                 }
+            } else {
+                // 无会话/断流：清掉旧封面，回到渐变 + 音符占位
+                *cover = None;
+                *prev = None;
             }
             // 开发用：MC_FLIP_DEMO=1 时每 2s 自翻一次（没有真换曲也能验动画）
             if std::env::var_os("MC_FLIP_DEMO").is_some() && cover.is_some() {
@@ -1880,7 +2323,7 @@ fn draw_one(
                 new: cover.as_ref().map(|(_, b)| b),
             });
             music::paint(
-                &win.gfx,
+                gfx,
                 te,
                 pal,
                 &mk,
@@ -1895,8 +2338,10 @@ fn draw_one(
                 .unwrap_or(false);
             if !flipping {
                 *flip_t0 = None;
+                // 方向提示用完复位（默认下一首）；否则点过一次「上一首」后整场都反着翻
+                *flip_dir = 1.0;
             }
-            mw.playing || flipping
+            mw.playing || flipping || music::marquee_animating()
         }
         (State::Calendar(c, off, built_day), _) => {
             let (cy, cm) = month_with_offset(y, mo, *off);
@@ -1907,7 +2352,7 @@ fn draw_one(
                 *built_day = today_day;
             }
             let ck = calendar::Tokens::cal(win.w, win.h);
-            calendar::paint(&win.gfx, te, pal, &ck, c, glass_pair)?;
+            calendar::paint(gfx, te, pal, &ck, c, glass_pair)?;
             // 翻月/按压缩放还在跑：保持 60fps，别等 1s 节拍
             c.animating(now)
         }
@@ -1928,7 +2373,12 @@ fn calendar_for(y: i32, m: u32, off: i32, today: u32) -> calendar::Calendar {
     let days = calendar::days_in_month_of(cy, cm);
     let wd1 = calendar::weekday(cy, cm, 1);
     let mut c = calendar::Calendar::build(cy, cm, wd1, days, if off == 0 { today } else { 0 });
-    c.holiday = calendar::holiday(cy, cm, if off == 0 { today } else { 1 });
+    // 只在本月视图显示今天的节日；翻到别的月标题行留空（别拿 1 号的节日冒充今天）
+    c.holiday = if off == 0 {
+        calendar::holiday(cy, cm, today)
+    } else {
+        String::new()
+    };
     c
 }
 
@@ -2019,8 +2469,8 @@ fn click(
                 c.tap(dir);
             }
         }
-        State::Music { cover, prev, flip_t0, flip_dir, demo_t0 } => {
-            let _ = (&cover, &prev, &flip_t0, &flip_dir, &demo_t0);
+        State::Music { cover, prev, flip_t0, flip_dir, demo_t0, last_track } => {
+            let _ = (&cover, &prev, &flip_t0, &flip_dir, &demo_t0, &last_track);
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) => music::Music {
@@ -2050,10 +2500,14 @@ fn click(
                     music::Hit::Prev => "previous",
                     music::Hit::Play => "toggle",
                     music::Hit::Next => "next",
-                };
-                if let Err(e) = media::action(cmd) {
-                    minicard_shell::mlog!("音乐控制 {cmd} 失败: {e}");
                 }
+                .to_string();
+                // 播放器不响应时 RequestAsync().join() 会阻塞；别冻住九张卡共用的消息循环
+                std::thread::spawn(move || {
+                    if let Err(e) = media::action(&cmd) {
+                        minicard_shell::mlog!("音乐控制 {cmd} 失败: {e}");
+                    }
+                });
             }
         }
         _ => {}
@@ -2108,7 +2562,8 @@ fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
         pad_px + margin_px,
         blur * k,
     );
-    match win.gfx.bitmap_from_bgra(&cap.bgra, cap.w, cap.h) {
+    let Some(gfx) = win.gfx.as_ref() else { return };
+    match gfx.bitmap_from_bgra(&cap.bgra, cap.w, cap.h) {
         Ok(b) => {
             let pad_dip = pad_px * 96.0 / win.dpi + DRAG_MARGIN;
             win.glass = Some((
@@ -2380,9 +2835,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let _ = GetCursorPos(&mut pt);
                     let (dx, dy) = (pt.x - d.cx, pt.y - d.cy);
                     if !d.moved && dx.abs() + dy.abs() > 4 {
+                        // 固定位置的卡：算一次「拖过」但不移动，松手不当点击，
+                        // 避免在卡上按住划一下误触待办/番茄钟按钮。
+                        if is_pinned(hwnd) {
+                            d.moved = true;
+                            return LRESULT(0);
+                        }
                         d.moved = true;
                     }
-                    if d.moved {
+                    if d.moved && !is_pinned(hwnd) {
                         let (mut nx, mut ny) = (d.wx + dx, d.wy + dy);
                         // 磁吸（对齐 + 固定间距）：位移直接并进落点，跟手不抖
                         if SNAP_ON.load(std::sync::atomic::Ordering::Relaxed) {
@@ -2516,6 +2977,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
+/// 动画重绘间隔：短动效按 200Hz 跑，连续补间保持 60Hz。
+///
+/// 200Hz 屏上 60fps 的 280~420ms 勾选/FLIP 只有 17~25 帧，肉眼就是一跳一跳；
+/// 而性能/网络的条宽补间、音乐播放、番茄钟进度是常驻的，提到 200Hz 会白烧 CPU。
+fn anim_step(kind: CardKind, animating: bool, refresh: Duration) -> Duration {
+    if !animating {
+        return refresh;
+    }
+    match kind {
+        CardKind::Todo | CardKind::Clock | CardKind::Calendar => Duration::from_micros(5_000),
+        _ => Duration::from_micros(16_667),
+    }
+}
+
 /// 供 `main` 调用的入口：读 config、装字体、跑循环
 pub fn start(font: &std::path::Path, blur: f32, topmost: bool, exit_after: Option<u64>) -> Result<()> {
     let cfg = Config::load();
@@ -2525,6 +3000,7 @@ pub fn start(font: &std::path::Path, blur: f32, topmost: bool, exit_after: Optio
     // 强调色/压在强调色上的字色按 config（口径同 card.html:paintOnAccent）
     let dark_theme = !matches!(cfg.settings.theme, minicard_core::config::Theme::Light);
     let pal = Palette::new(cfg.settings.glass_alpha as f32, false)
+        .with_theme(dark_theme)
         .with_accent(cfg.settings.accent, dark_theme);
     minicard_shell::mlog!(
         "live：强调色 rgb{:?} / 玻璃 {}/100 / 模糊 {}px / 主题 {:?}",
@@ -2533,3 +3009,419 @@ pub fn start(font: &std::path::Path, blur: f32, topmost: bool, exit_after: Optio
     run(cfg, te, pal, blur, topmost, exit_after)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_animations_run_at_200hz_continuous_ones_stay_60hz() {
+        let idle = Duration::from_millis(1000);
+        assert_eq!(
+            anim_step(CardKind::Todo, true, idle),
+            Duration::from_micros(5_000)
+        );
+        assert_eq!(
+            anim_step(CardKind::Clock, true, idle),
+            Duration::from_micros(5_000)
+        );
+        assert_eq!(
+            anim_step(CardKind::Calendar, true, idle),
+            Duration::from_micros(5_000)
+        );
+        assert_eq!(
+            anim_step(CardKind::Performance, true, idle),
+            Duration::from_micros(16_667)
+        );
+        assert_eq!(
+            anim_step(CardKind::Music, true, idle),
+            Duration::from_micros(16_667)
+        );
+    }
+
+    #[test]
+    fn idle_cards_use_their_refresh_interval() {
+        let refresh = Duration::from_millis(1000);
+        assert_eq!(anim_step(CardKind::Todo, false, refresh), refresh);
+        assert_eq!(anim_step(CardKind::Performance, false, refresh), refresh);
+    }
+
+    /// 三态判据与浏览器同一条（card.html::computeState）：
+    /// 没采到 → 空态；3.5s 没新值 → 异常；其余正常。
+    #[test]
+    fn data_health_matches_browser_thresholds() {
+        assert_eq!(DataHealth::of(0, 1_000_000), DataHealth::Empty, "at=0 = 还没采到");
+        assert_eq!(DataHealth::of(1_000, 1_000), DataHealth::Fresh);
+        assert_eq!(DataHealth::of(1_000, 1_000 + 3_500), DataHealth::Fresh, "整 3500ms 还算新鲜");
+        assert_eq!(DataHealth::of(1_000, 1_001 + 3_500), DataHealth::Stale);
+        // 系统时钟回拨（at 在未来）：不能误报异常
+        assert_eq!(DataHealth::of(2_000, 1_000), DataHealth::Fresh);
+        // 文案就是浏览器那两句
+        assert_eq!(DataHealth::Empty.text(), Some("等待数据…"));
+        assert_eq!(DataHealth::Stale.text(), Some("数据异常"));
+        assert_eq!(DataHealth::Fresh.text(), None);
+    }
+
+    /// 磁盘卡高度按盘数派生（浏览器/外壳同口径），且只在「数据新鲜 + 不是拖动中 + 真的变了」时动手。
+    #[test]
+    fn disk_card_height_follows_disk_count() {
+        // 1 盘 60 / 2–3 盘 120 / 4–5 盘 180
+        // 起点故意用「另一个档」，否则目标 == 当前高度时会按幂等规则返回 None
+        for (n, cur, want) in [
+            (1usize, 180.0f32, 60.0f32),
+            (2, 60.0, 120.0),
+            (3, 180.0, 120.0),
+            (4, 120.0, 180.0),
+            (5, 60.0, 180.0),
+        ] {
+            assert_eq!(
+                disk_height_for(CardKind::Disks, cur, n, DataHealth::Fresh, false),
+                Some(want),
+                "{n} 块盘应给 {want}px"
+            );
+            assert_eq!(
+                config::disk_height_px(n),
+                want,
+                "{n} 块盘的高度必须与 config::disk_height_px 同源"
+            );
+        }
+        // 采样还没到（0 块盘只是「未知」）：保持默认档 180，别先缩成空态
+        assert_eq!(config::disk_height_px(0), 180.0);
+        assert_eq!(
+            disk_height_for(CardKind::Disks, 180.0, 0, DataHealth::Fresh, false),
+            None,
+            "默认档本身就是 180，不该动"
+        );
+        // 已经是目标高度：不动（否则每秒 SetWindowPos 会让窗口抖）
+        assert_eq!(
+            disk_height_for(CardKind::Disks, 120.0, 3, DataHealth::Fresh, false),
+            None
+        );
+        // 拖动中：不动（改尺寸会跟磁吸打架）
+        assert_eq!(
+            disk_height_for(CardKind::Disks, 180.0, 1, DataHealth::Fresh, true),
+            None
+        );
+        // 采样没到 / 断了：保持当前高度
+        assert_eq!(
+            disk_height_for(CardKind::Disks, 180.0, 1, DataHealth::Empty, false),
+            None
+        );
+        assert_eq!(
+            disk_height_for(CardKind::Disks, 180.0, 1, DataHealth::Stale, false),
+            None
+        );
+        // 其它卡尺寸由 config 定死，绝不跟着盘数变
+        assert_eq!(
+            disk_height_for(CardKind::Performance, 120.0, 5, DataHealth::Fresh, false),
+            None
+        );
+    }
+
+    /// 空态/异常态那行字的盒子照 `card.html` 的 `.empty`：
+    /// 字号 0.78125rem、居中盒 = 各卡自己的 padding box（`.card-*` 原文）。
+    #[test]
+    fn status_tokens_match_browser_empty_box() {
+        let cases = [
+            // (卡, 宽, 高, 圆角, 字号, 左右内边距, 上下内边距)
+            (CardKind::Performance, 240.0, 120.0, 10.0, 7.8125, 10.0, 4.375),
+            (CardKind::Disks, 240.0, 60.0, 15.0, 11.71875, 11.25, 7.5),
+            (CardKind::NetRate, 120.0, 120.0, 16.0, 12.5, 8.0, 0.0),
+        ];
+        for (kind, w, h, radius, fs, pad_lr, pad_tb) in cases {
+            let t = status_tokens(kind, w, h);
+            assert!((t.radius - radius).abs() < 1e-4, "{kind:?} 圆角 {:.4}", t.radius);
+            assert!((t.fs - fs).abs() < 1e-4, "{kind:?} 字号 {:.4}", t.fs);
+            assert!((t.pad_lr - pad_lr).abs() < 1e-4, "{kind:?} 左右 {:.4}", t.pad_lr);
+            assert!((t.pad_tb - pad_tb).abs() < 1e-4, "{kind:?} 上下 {:.4}", t.pad_tb);
+            // body { line-height:1.55 }
+            assert!((t.line_h - fs * 1.55).abs() < 1e-4);
+            // 圆角必须与正常态那张卡自己的一致，否则空态会露出硬边
+            assert!((t.radius - radius_of(kind, w, h)).abs() < 1e-4);
+        }
+    }
+}
+
+/// 真窗口回归：纯函数测不出的两件事在这里验 ——
+/// ① 磁盘卡换高度真的改了窗口物理尺寸、并换了一份能画的 Gfx；
+/// ② 空态/异常态那张「整卡一行灰字」真的画出来了（灰度/居中都能查）。
+///
+/// 没有桌面 / D3D 时整条跳过（`eprintln!` 说明原因），不让 CI/无头环境红。
+#[cfg(test)]
+mod gfx_tests {
+    use super::*;
+    use std::sync::Once;
+
+    static REG: Once = Once::new();
+
+    fn hidden_window() -> Option<HWND> {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            );
+        }
+        let hinst = unsafe { GetModuleHandleW(None).ok()? };
+        let cls = w!("MiniCardLiveTest");
+        REG.call_once(|| unsafe {
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(wndproc),
+                hInstance: hinst.into(),
+                lpszClassName: cls,
+                hbrBackground: HBRUSH::default(),
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+        });
+        // 摆在所有显示器外面，别打扰正在用的桌面
+        unsafe {
+            CreateWindowExW(
+                WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                cls,
+                w!("mc-live-test"),
+                WS_POPUP,
+                -4000,
+                -4000,
+                240,
+                180,
+                None,
+                None,
+                Some(hinst.into()),
+                None,
+            )
+            .ok()
+        }
+    }
+
+    fn test_win(hwnd: HWND, kind: CardKind, w: f32, h: f32) -> Option<CardWin> {
+        let dpi = {
+            let d = unsafe { GetDpiForWindow(hwnd) };
+            if d == 0 {
+                96
+            } else {
+                d
+            }
+        } as f32;
+        let w_px = (w * dpi / 96.0).round() as u32;
+        let h_px = (h * dpi / 96.0).round() as u32;
+        let mut gfx = Gfx::new(hwnd, w_px, h_px, dpi, radius_of(kind, w, h)).ok()?;
+        gfx.text_dx = 0.0;
+        let state = match kind {
+            CardKind::Weather => State::Weather { seen_at: i64::MIN },
+            _ => State::Disks { warn90: true },
+        };
+        Some(CardWin {
+            hwnd,
+            gfx: Some(gfx),
+            kind,
+            w,
+            h,
+            state,
+            glass: None,
+            next_draw: Instant::now(),
+            refresh: Duration::from_millis(5000),
+            cfg_idx: 0,
+            dpi,
+            slice_origin: (0, 0),
+            glass_off: (0.0, 0.0),
+        })
+    }
+
+    fn test_engine() -> Option<TextEngine> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts");
+        let files: Vec<std::path::PathBuf> = ["MiSans-Regular.ttf", "MiSans-Medium.ttf"]
+            .iter()
+            .map(|n| dir.join(n))
+            .filter(|p| p.exists())
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        let refs: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
+        TextEngine::new_weights(&refs, "MiSans").ok()
+    }
+
+    /// 磁盘卡：1 / 3 / 5 盘 → 窗口 60 / 120 / 180（逻辑点），且每次都重造了 Gfx。
+    #[test]
+    fn 磁盘卡换高度真的改窗口尺寸并重建绘图() {
+        let Some(hwnd) = hidden_window() else {
+            eprintln!("跳过：建不了窗口");
+            return;
+        };
+        let Some(mut win) = test_win(hwnd, CardKind::Disks, 240.0, 180.0) else {
+            eprintln!("跳过：D3D/DComp 不可用");
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return;
+        };
+        for (n, want) in [(1usize, 60.0f32), (3, 120.0), (5, 180.0)] {
+            let target = disk_height_for(win.kind, win.h, n, DataHealth::Fresh, false)
+                .unwrap_or_else(|| panic!("{n} 盘应该换高度"));
+            assert_eq!(target, want, "{n} 盘的目标高度");
+            set_card_height(&mut win, target, &None, 30.0).expect("换高度");
+            let mut r = RECT::default();
+            unsafe { GetWindowRect(hwnd, &mut r) }.expect("GetWindowRect");
+            let got = (r.bottom - r.top) as f32 * 96.0 / win.dpi;
+            eprintln!(
+                "{n} 盘 → 窗口 {}×{} 物理 px = {got:.1} 逻辑点（目标 {want:.0}）",
+                r.right - r.left,
+                r.bottom - r.top
+            );
+            assert!(
+                (got - want).abs() <= 1.0,
+                "{n} 盘：窗口 {got} 逻辑点，应为 {want}"
+            );
+            assert!((win.h - want).abs() < 0.5, "win.h 应同步成 {want}");
+            assert!(win.gfx.is_some(), "换完高度必须还有一份能画的 Gfx");
+        }
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    /// 空态 / 异常态：整卡一行字，且**居中**（取字墨迹包围盒的中心）。
+    /// dump 出来的 BGRA 留在 `MC_EVIDIR`（默认临时目录），便于人眼复核。
+    #[test]
+    fn 空态与异常态各画出一行居中的字() {
+        let Some(hwnd) = hidden_window() else {
+            eprintln!("跳过：建不了窗口");
+            return;
+        };
+        let Some(mut win) = test_win(hwnd, CardKind::Disks, 240.0, 60.0) else {
+            eprintln!("跳过：D3D/DComp 不可用");
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return;
+        };
+        let Some(te) = test_engine() else {
+            eprintln!("跳过：没有字体");
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return;
+        };
+        let pal = Palette::new(30.0, false);
+        let dir = std::env::var("MC_EVIDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let tk = status_tokens(win.kind, win.w, win.h);
+        for (txt, name) in [("等待数据…", "empty"), ("数据异常", "error")] {
+            let path = dir.join(format!("live-status-{name}.bgra"));
+            win.gfx.as_mut().unwrap().dump = Some(path.clone());
+            paint_status(
+                win.gfx.as_ref().unwrap(),
+                &te,
+                &pal,
+                &tk,
+                win.w,
+                win.h,
+                txt,
+                None,
+            )
+            .expect("画空态");
+            win.gfx.as_mut().unwrap().dump = None;
+
+            let pix = std::fs::read(&path).expect("dump 文件");
+            let dims = std::fs::read_to_string(path.with_extension("txt")).expect("dump 尺寸");
+            let (w, h) = {
+                let mut it = dims.split('x').filter_map(|v| v.parse::<usize>().ok());
+                (it.next().expect("w"), it.next().expect("h"))
+            };
+            assert_eq!(pix.len(), w * h * 4, "{name}: 读回的像素数与尺寸不符");
+
+            // ① 卡片铺满（白纱 alpha 很低但不是 0）：四个角之外都该有像素
+            let a = |x: usize, y: usize| pix[(y * w + x) * 4 + 3];
+            assert!(a(w / 2, h / 2) > 0 || a(w / 2, 4) > 0, "{name}: 卡片没画出来");
+
+            // ② 中间那一带必须有「字」（muted 是不透明的，白纱只有 ~9% alpha）
+            let mut ink = 0usize;
+            let (mut x0, mut x1, mut y0, mut y1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+            for yy in (h / 4)..(h * 3 / 4) {
+                for xx in 0..w {
+                    if a(xx, yy) > 150 {
+                        ink += 1;
+                        x0 = x0.min(xx);
+                        x1 = x1.max(xx);
+                        y0 = y0.min(yy);
+                        y1 = y1.max(yy);
+                    }
+                }
+            }
+            assert!(ink > 40, "{name}: 中间带只有 {ink} 个字墨迹像素");
+            let cx = (x0 + x1) as f32 / 2.0;
+            let cy = (y0 + y1) as f32 / 2.0;
+            assert!(
+                (cx - w as f32 / 2.0).abs() <= 4.0,
+                "{name}: 字没水平居中（墨迹中心 {cx:.1}，卡片中心 {:.1}）",
+                w as f32 / 2.0
+            );
+            assert!(
+                (cy - h as f32 / 2.0).abs() <= 4.0,
+                "{name}: 字没垂直居中（墨迹中心 {cy:.1}，卡片中心 {:.1}）",
+                h as f32 / 2.0
+            );
+            eprintln!("{name}: {w}×{h}, 墨迹 {ink}px 中心 ({cx:.1},{cy:.1}) → {}", path.display());
+        }
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    /// 天气刷新线程只写共享值，重绘得靠这条链路：draw_one 记下画的是哪一版 `at`，
+    /// 主循环发现 `at` 变了就把 `next_draw` 提到当下（不然最多等 60s 的 refresh 节拍）。
+    #[test]
+    fn 天气换版后记下新的_at() {
+        let Some(hwnd) = hidden_window() else {
+            eprintln!("跳过：建不了窗口");
+            return;
+        };
+        let Some(mut win) = test_win(hwnd, CardKind::Weather, 240.0, 180.0) else {
+            eprintln!("跳过：D3D/DComp 不可用");
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return;
+        };
+        let Some(te) = test_engine() else {
+            eprintln!("跳过：没有字体");
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return;
+        };
+        win.state = State::Weather { seen_at: 100 };
+        let wsnap = wx::WeatherSnap {
+            at: 200,
+            city: "北京".into(),
+            temp: 21.0,
+            code: 0,
+            humidity: 40,
+            air: "优".into(),
+            ..Default::default()
+        };
+        let ws: wx::SharedWeather = Arc::new(std::sync::RwLock::new(Some(wsnap)));
+        let snap = data::spawn_sampler();
+        let pal = Palette::new(30.0, false);
+        draw_one(
+            &mut win,
+            &snap,
+            &ws,
+            &te,
+            &pal,
+            DataHealth::Fresh,
+            Instant::now(),
+            (2026, 11, 4, 10, 30),
+            "2026年11月4日 周三",
+            "",
+        )
+        .expect("画天气卡");
+        match win.state {
+            State::Weather { seen_at } => assert_eq!(seen_at, 200, "应记下画上去的那一版 at"),
+            _ => panic!("状态变了"),
+        }
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+}

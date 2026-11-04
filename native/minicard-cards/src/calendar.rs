@@ -14,7 +14,7 @@ use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
-use minicard_draw::text::{Mode as TextMode, TextEngine};
+use minicard_draw::text::{draw_shadow_taps, Mode as TextMode, TextEngine, TextShadow};
 use minicard_shell::gfx::Gfx;
 
 #[derive(Clone, Debug)]
@@ -296,7 +296,7 @@ impl Tokens {
             nav_btn: 1.25 * r,
             nav_gap: 0.125 * r,
             nav_r: 0.375 * r,
-            chev: 1.0 * r,
+            chev: 0.75 * r,
             page_gap: 0.25 * r,
             wd_fs: 0.8125 * r,
             wd_lh: 0.8125 * r * 1.4,
@@ -640,7 +640,9 @@ fn paint_tree(
         };
         let color = if is_today {
             pal.on_accent
-        } else if (9520..9530).contains(&pl.id) || pl.id == 9502 {
+        } else if pl.id == 9502 {
+            pal.accent_mix
+        } else if (9520..9530).contains(&pl.id) {
             pal.muted
         } else {
             pal.fg
@@ -651,7 +653,6 @@ fn paint_tree(
         } else {
             color
         };
-        set_color(g, color)?;
         // 宽度必须**恰好**等于盒子：多给 2px 在居中时会把文字推右 1px（实测 dx 趋势揭示的）
         let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, TextMode::Clip)?;
         // 今日数字要在 22 高的块里居中（普通格是 17.5 的行盒，直接画即可）
@@ -663,6 +664,22 @@ fn paint_tree(
             0.0
         };
         let dx = 0.0;
+        // `.card { text-shadow: 0 .833px 1.667px var(--tshadow) }`：标题 / 节日 / 星期 / 日期
+        // 全部同吃这一条。跨月格是 `.cal-d.other { opacity: .32 }`（整元素不透明度），
+        // 投影也得跟着淡下去 —— 只给正文乘 alpha、影保持满黑，跨月格会冒出一圈深灰边。
+        let mut sh = TextShadow::CARD.with_color(pal.shadow);
+        if other {
+            sh.color.a *= 0.32;
+        }
+        draw_shadow_taps(
+            g,
+            &lay,
+            pl.rect.x + dx + g.text_dx,
+            pl.rect.y + dy + g.text_dy,
+            &sh,
+        )?;
+        // 阴影会把笔刷改成影色 —— 正文必须在自己画之前重新上色，否则整卡文字都是「影色」
+        set_color(g, color)?;
         unsafe {
             g.d2d.DrawTextLayout(
                 Vector2 {

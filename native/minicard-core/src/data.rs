@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use sysinfo::{Disks, Networks, System};
@@ -51,9 +51,24 @@ pub struct DataSnapshot {
     pub disks: Vec<DiskInfo>,
     pub gpus: Vec<GpuInfo>,
     pub net: NetInfo,
+    /// 这一拍的采样时刻（unix 毫秒；0 = 还没采到）。
+    ///
+    /// 卡片页判「数据异常」的口径是「3.5s 没有新值」（`card.html::computeState`），
+    /// 而**数值本身可能一连几秒完全不变**（空载机器的 CPU/内存/网速/盘占用都能一模一样），
+    /// 所以时间戳必须由采样线程每拍自己打，不能靠「值变了没有」去推。
+    pub at: u64,
 }
 
 pub type SharedSnap = Arc<RwLock<DataSnapshot>>;
+
+/// unix 毫秒（快照的 `at`）。时钟被回拨时退回 0 —— 那只会让卡片把它当「还没采到」，
+/// 不会把正常数据误判成「数据异常」。
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 pub fn spawn_sampler() -> SharedSnap {
     let snap: SharedSnap = Arc::new(RwLock::new(DataSnapshot::default()));
@@ -144,6 +159,7 @@ fn run(out: SharedSnap) {
             disks,
             gpus,
             net,
+            at: unix_ms(),
         };
 
         thread::sleep(Duration::from_millis(1000));

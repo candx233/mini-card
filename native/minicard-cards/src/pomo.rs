@@ -19,10 +19,10 @@ use windows_numerics::Vector2;
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_round};
-use minicard_draw::text::{Mode as TextMode, TextEngine};
+use minicard_draw::text::{draw_shadow_taps, Mode as TextMode, TextEngine, TextShadow};
 use minicard_shell::gfx::Gfx;
 
-use crate::roll::{cell, draw_digit, Roll, ROLL_MS};
+use crate::roll::{cell, draw_digit_shadowed, Roll, ROLL_MS};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PomoMode {
@@ -533,10 +533,16 @@ fn paint_tree(
         } else {
             pal.fg
         };
-        return draw_digit(
+        // 滚动数字同样吃 `.card` 的 text-shadow：阴影逐格跟着那一格走（`draw_digit_shadowed` 里
+        // 用的是同一个 `yy`），滚到半路时影不会留在原地。`done` 态 `.pm-time` 是 `opacity:.55`，
+        // 影一起淡下去才与 CSS 的整元素不透明度同口径。
+        let mut sh = TextShadow::CARD.with_color(pal.shadow);
+        if mode == PomoMode::Done {
+            sh.color.a *= 0.55;
+        }
+        return draw_digit_shadowed(
             g,
             te,
-            pal,
             pl.rect.x,
             pl.rect.y,
             pl.rect.w,
@@ -544,6 +550,7 @@ fn paint_tree(
             p.idx(i, now),
             &spec,
             col,
+            Some(sh),
         );
     }
 
@@ -596,11 +603,6 @@ fn paint_tree(
         };
         let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 8.0, TextMode::Clip)?;
         let id = pl.id;
-        if id == 6200 + 1 || id == 6200 + 2 || id == 6200 || id == 6200 + 3 {
-            set_color(g, pal.fg)?;
-        } else {
-            set_color(g, color)?;
-        }
         // 文字在自己的盒里居中（模拟 text-align:center）
         let tw = te.measure(spec, 0.0).0;
         let dx = ((pl.rect.w - tw) / 2.0).max(0.0);
@@ -617,6 +619,23 @@ fn paint_tree(
         } else {
             0.0
         };
+        // `.card { text-shadow: 0 .833px 1.667px var(--tshadow) }`：阶段文字 / − + / 按钮文字
+        // 都在卡内，同吃这一条。坐标与正文完全一致（dx 是盒内居中量、dy 是各分支的落位）。
+        draw_shadow_taps(
+            g,
+            &lay,
+            pl.rect.x + dx,
+            pl.rect.y + dy,
+            &TextShadow::CARD.with_color(pal.shadow),
+        )?;
+        set_color(
+            g,
+            if id == 6200 + 1 || id == 6200 + 2 || id == 6200 || id == 6200 + 3 {
+                pal.fg
+            } else {
+                color
+            },
+        )?;
         unsafe {
             g.d2d.DrawTextLayout(
                 Vector2 {

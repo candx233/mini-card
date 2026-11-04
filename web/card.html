@@ -1986,7 +1986,7 @@
   function renderTodo() {
     var items = TDO || [];
     if (!items.length) {
-      return '<div class="card-body"><div class="empty td-empty-l">暂无待办<span>在主界面 · 参数 里添加</span></div></div>';
+      return '<div class="card-body"><div class="empty td-empty-l">暂无待办<span>双击卡片名添加</span></div></div>';
     }
     // 未完成在上、完成沉底（排序见 todoOrder；与 todoPaint 共用，两处口径必须一致）
     var shown = todoShown(items);

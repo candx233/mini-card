@@ -496,6 +496,7 @@ pub fn weather_sheet(
         code: 2,
         air: Some("优".into()),
         humidity: Some(62),
+        empty: false,
         days: vec![
             Day { label: "今天".into(), hi: Some(26.2), lo: Some(18.4), code: 2 },
             Day { label: "明天".into(), hi: Some(23.1), lo: Some(17.2), code: 61 },

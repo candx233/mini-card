@@ -21,7 +21,7 @@ use windows_numerics::Vector2;
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_rect, fill_round, set_color, stroke_round};
-use minicard_draw::text::TextEngine;
+use minicard_draw::text::{draw_shadow_taps, TextEngine, TextShadow};
 use minicard_shell::gfx::Gfx;
 
 /// 补间时长（与 card.html 的 `netTick` 一致）
@@ -337,6 +337,16 @@ fn paint_tree(g: &Gfx, te: &TextEngine, pal: &Palette, t: &Tokens, p: &Placed) -
             0.0
         };
         let muted = (5000..5100).contains(&p.id) == false && spec.size == t.unit_fs;
+        // `.card { text-shadow: 0 .833px 1.667px var(--tshadow) }` 对箭头/数值/单位都生效。
+        // 坐标必须与正文**完全同一个** (x + dx, y)：箭头是「只挪墨迹」的相对定位，
+        // 阴影漏掉 dx 就会在箭头旁边留下一条错位的影子。
+        draw_shadow_taps(
+            g,
+            &lay,
+            p.rect.x + dx,
+            p.rect.y,
+            &TextShadow::CARD.with_color(pal.shadow),
+        )?;
         set_color(g, if muted { pal.muted } else { pal.fg })?;
         unsafe {
             g.d2d.DrawTextLayout(

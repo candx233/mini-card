@@ -264,7 +264,7 @@ fn tree(t: &Tokens, items: &[Item]) -> Node {
             .child(text_node("暂无待办", 0.875 * t.r, 0.875 * t.r * 1.3, 400).id(7001))
             .child(
                 text_node(
-                    "在主界面 · 参数 里添加",
+                    "双击卡片名添加",
                     0.6875 * t.r,
                     0.6875 * t.r * 1.3,
                     400,

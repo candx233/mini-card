@@ -484,6 +484,7 @@ pub struct Settings {
     pub z_order: ZOrder,
     /// 卡片走 Rust 自绘（`minicard-bin --live`）而不是 WebView2：
     /// 打开后主窗不再建 card.html 的窗口，改由一个原生绘制进程把九张卡画出来。
+    /// 0.1.2 起设置页已移除这个选项，默认只走原生（字段保留作内部回滚）。
     #[serde(default)]
     pub native_cards: bool,
     /// 卡片白色叠加 alpha（玻璃厚度），0-255
@@ -519,7 +520,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            native_cards: false,
+            native_cards: true,
             snap_on_drag: true,
             card_gap: 0.0,
             autostart: false,
@@ -550,6 +551,14 @@ pub struct Config {
     pub dock: Dock,
     /// 主页面 [x, y, w, h]
     pub main_window: [f32; 4],
+    /// 主窗落盘时是否处于最大化。
+    /// **必须单独记一位**：最大化时 `outer_position/outer_size` 是满屏外框（Win10 还是
+    /// -8,-8 带一圈边框），写进 `main_window` 就把「还原几何」顶掉了 —— 托盘唤回时
+    /// 先 set_size 满屏再 maximize()，一取消最大化就再也回不到原尺寸。所以最大化只写
+    /// 这一位，几何保留上一次正常窗口的真值；`ensure_main` 建窗后按它补 maximize()。
+    /// 老 config 没有这个字段 → false（结构体级 `#[serde(default)]` 兜底，不从最大化启动）。
+    #[serde(default)]
+    pub main_maxed: bool,
     /// 尺寸迁移版本：< SIZE_VERSION 时把老卡片尺寸落到该类型的固定尺寸（只做一次）
     /// 注意：必须用字段级 `default = "…"`，因为结构体上的 `#[serde(default)]` 会拿
     /// `Config::default()`（= SIZE_VERSION）去补缺失字段，那样老 config 会被当成已迁移，迁移永不触发。
@@ -620,6 +629,7 @@ impl Default for Config {
             settings: Settings::default(),
             dock: Dock::default(),
             main_window: [520.0, 250.0, MAIN_W, MAIN_H],
+            main_maxed: false,
             size_version: SIZE_VERSION,
             ui_version: UI_VERSION,
         }
@@ -673,6 +683,15 @@ impl Config {
             let _ = cfg.save();
         }
         cfg
+    }
+
+    /// 主窗恢复计划：(外框几何, 是否最大化)。
+    ///
+    /// 几何**永远是「上一次正常窗口」的外框**（最大化时 `overlay_main_bounds` 只置
+    /// `main_maxed`、不覆盖它），所以建窗时可以直接 set_position/set_size 这份几何，
+    /// 再按 flag 补一次 `maximize()` —— 顺序反了（先拿满屏外框当几何）就再也取消不回去。
+    pub fn main_restore(&self) -> ([f32; 4], bool) {
+        (self.main_window, self.main_maxed)
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -901,5 +920,38 @@ size = [320.0, 190.0]
         d7.items[5].divider_before = true;
         assert_eq!(d7.bar_width(), 460.0);
         assert_eq!(d7.item_center_x(6), 18.0 + 24.0 + 6.0 * 60.0 + 16.0);
+    }
+
+    /// 老 config（0.1.1 及以前）没有 `main_maxed` → 必须是 false：
+    /// 不能因为「字段缺失」把用户一开程序就顶成最大化。
+    #[test]
+    fn legacy_config_without_main_maxed_starts_normal() {
+        let legacy = r#"
+main_window = [520.0, 250.0, 992.0, 672.0]
+[settings]
+"#;
+        let cfg: Config = toml::from_str(legacy).expect("老 config 应能解析");
+        assert!(!cfg.main_maxed, "缺字段必须当作「没最大化」");
+        assert_eq!(cfg.main_window, [520.0, 250.0, 992.0, 672.0]);
+        assert_eq!(cfg.main_restore(), ([520.0, 250.0, 992.0, 672.0], false));
+    }
+
+    /// 托盘关闭 → 唤回这条路只靠 config 里的两位：(正常外框, main_maxed)。
+    /// 这个测试钉住「字段真能落盘并读回」+「恢复计划给的几何是正常窗口那份」。
+    #[test]
+    fn main_maxed_round_trips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.main_window = [200.0, 120.0, 992.0, 672.0];
+        cfg.main_maxed = true;
+        let text = toml::to_string_pretty(&cfg).expect("序列化");
+        assert!(
+            text.lines().any(|l| l.trim_start().starts_with("main_maxed")),
+            "main_maxed 必须真的写进 config.toml（否则唤回时无从恢复）：\n{text}"
+        );
+        let back: Config = toml::from_str(&text).expect("反序列化");
+        assert!(back.main_maxed, "最大化状态必须能读回来");
+        let (bounds, maxed) = back.main_restore();
+        assert_eq!(bounds, [200.0, 120.0, 992.0, 672.0], "几何是上次正常窗口的外框，不是满屏");
+        assert!(maxed, "恢复计划要带最大化标记（ensure_main 据此补 maximize()）");
     }
 }

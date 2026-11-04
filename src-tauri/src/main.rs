@@ -9,6 +9,68 @@
 // `pub use` 而不是 `mod`：`crate::config::…` / `crate::data::…` 的引用一处都不用改。
 pub use minicard_core::{config, data};
 
+/// 原生绘制进程 + MiSans TTF 的发布期内嵌。
+///
+/// release 构建时 `build.rs` 把 `native/minicard-bin/target/release/minicard-bin.exe`
+/// 和三个字体文件写进 `OUT_DIR/native/assets.rs`；首次启动解到
+/// `%APPDATA%\mini-card\native\<版本>\`。这样 0.1.1 的旧更新器只换主 exe 也不会
+/// 出现「没有绘制进程、九张卡全没」；debug 构建拿到空常量，走开发态路径。
+mod native_embed {
+    include!(concat!(env!("OUT_DIR"), "/native/assets.rs"));
+
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    static CACHE: OnceLock<Option<(PathBuf, PathBuf)>> = OnceLock::new();
+
+    /// 返回（绘制进程 exe，字体目录）；debug / 未嵌入时返回 None。
+    pub fn ensure() -> Option<(PathBuf, PathBuf)> {
+        CACHE
+            .get_or_init(|| {
+                if NATIVE_BIN.is_empty() {
+                    return None;
+                }
+                let base = std::env::var_os("APPDATA")
+                    .or_else(|| std::env::var_os("LOCALAPPDATA"))
+                    .map(PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir);
+                let dir = base
+                    .join("mini-card")
+                    .join("native")
+                    .join(env!("CARGO_PKG_VERSION"));
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    crate::spawn_log(&format!("native embed: 建目录失败 {e}"));
+                    return None;
+                }
+                let files: [(&str, &[u8]); 4] = [
+                    ("minicard-bin.exe", NATIVE_BIN),
+                    ("MiSans-Regular.ttf", FONT_REGULAR),
+                    ("MiSans-Medium.ttf", FONT_MEDIUM),
+                    ("MiSans-Semibold.ttf", FONT_SEMIBOLD),
+                ];
+                for (name, bytes) in files {
+                    let p = dir.join(name);
+                    // 字节级比较：同版本重打包（0.1.1 曾同版本重传过）时长度可能一样，
+                    // 只比长度会把旧绘制进程/字体留在盘上。
+                    let need = std::fs::read(&p)
+                        .map(|old| old != bytes)
+                        .unwrap_or(true);
+                    if need {
+                        if let Err(e) = std::fs::write(&p, bytes) {
+                            crate::spawn_log(&format!(
+                                "native embed: 写 {} 失败 {e}",
+                                p.display()
+                            ));
+                            return None;
+                        }
+                    }
+                }
+                Some((dir.join("minicard-bin.exe"), dir))
+            })
+            .clone()
+    }
+}
+
 mod display;
 mod dock;
 mod dock_drop;
@@ -202,8 +264,24 @@ fn sync_disk_height(app: &AppHandle, count: usize, stale: bool) {
     }
 }
 
-/// 窗口当前外框（物理像素 → 逻辑点）写进 cfg.main_window
+/// 窗口几何能不能当「还原几何」落盘：
+/// · 最小化 → `outer_position` 是 -32000 残影、尺寸是 160×28 徽章；
+/// · 最大化 → 外框是满屏（Win10 还是 -8,-8 连边框一起），存进去就把正常尺寸顶掉了。
+fn bounds_usable(iconic: bool, maxed: bool) -> bool {
+    !iconic && !maxed
+}
+
+/// 窗口当前外框（物理像素 → 逻辑点）写进 cfg.main_window，并记下最大化状态。
+///
+/// **最大化时只记 `main_maxed`、不写几何**：这时 `outer_position/outer_size` 是满屏外框，
+/// 写进 `main_window` 就把上次正常窗口的尺寸吃了 —— 托盘唤回（ensure_main）拿它
+/// set_position/set_size 再 maximize()，用户一取消最大化就回不到原尺寸。
 fn overlay_main_bounds(w: &WebviewWindow, cfg: &mut Config) {
+    let maxed = w.is_maximized().unwrap_or(false);
+    cfg.main_maxed = maxed;
+    if !bounds_usable(is_iconic(w), maxed) {
+        return;
+    }
     let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) else {
         return;
     };
@@ -623,9 +701,111 @@ fn card_pin(app: AppHandle, id: String, pinned: bool) -> Result<Config, String> 
     Ok(cfg)
 }
 
+/// 原生卡的窗口句柄：类名固定、标题 `MiniCardLive · <Kind>`；按绘制进程 pid 复核，
+/// 防止旧进程残留窗同名。
+fn native_live_hwnd(kind: CardKind) -> Option<*mut core::ffi::c_void> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
+    let pid = NATIVE_CHILD.lock().unwrap().as_ref().map(|c| c.id())?;
+    let class: Vec<u16> = "MiniCardNativeLive\0".encode_utf16().collect();
+    let title: Vec<u16> = format!("MiniCardLive · {kind:?}\0").encode_utf16().collect();
+    let h = unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) };
+    if h.is_null() {
+        return None;
+    }
+    let mut wpid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(h, &mut wpid);
+    }
+    if wpid != pid {
+        return None;
+    }
+    Some(h)
+}
+
+fn locate_native(mut cfg: Config, id: &str) -> bool {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let Some(card) = cfg.cards.iter().find(|c| c.id == id) else {
+        return false;
+    };
+    let kind = card.kind;
+    let Some(h) = native_live_hwnd(kind) else {
+        return false;
+    };
+    let mut r = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(h, &mut r);
+    }
+    let rect = (r.left, r.top, r.right, r.bottom);
+    let full: Vec<display::R4> = display::monitors().into_iter().map(|(m, _)| m).collect();
+    if !full.is_empty() && !display::visible_enough(rect, &full, 32) {
+        if let Some(work) = display::nearest_work(rect) {
+            let (nx, ny) = display::clamp_into(rect, work, 40);
+            unsafe {
+                let _ = SetWindowPos(
+                    h,
+                    std::ptr::null_mut(),
+                    nx,
+                    ny,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            let dpi = unsafe { GetDpiForWindow(h) } as f32;
+            let s = if dpi > 0.0 { dpi / 96.0 } else { 1.0 };
+            if let Some(c) = cfg.cards.iter_mut().find(|c| c.id == id) {
+                c.pos = [nx as f32 / s, ny as f32 / s];
+                let _ = cfg.save();
+            }
+        }
+    }
+    // 短暂置顶当作「高亮」；没有 WebView 的 __flash 圈，但用户能看到卡片跳出来
+    unsafe {
+        let _ = SetWindowPos(
+            h,
+            -1isize as *mut core::ffi::c_void,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+        );
+        let z = cfg.settings.z_order;
+        let raw = h as isize;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            let h = raw as *mut core::ffi::c_void;
+            match z {
+                ZOrder::Desktop => apply_desktop_zorder(h),
+                ZOrder::Normal => {
+                    let _ = SetWindowPos(
+                        h,
+                        -2isize as *mut core::ffi::c_void, // HWND_NOTOPMOST
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                    );
+                }
+                ZOrder::Top => {}
+            }
+        });
+    }
+    true
+}
+
 /// 主界面「定位」：卡片跑出屏幕就搬回可见区 → 闪一圈高亮 → 短暂置顶，1.8s 后归位
 #[tauri::command]
 fn card_locate(app: AppHandle, id: String) -> bool {
+    let cfg = Config::load();
+    if cfg.settings.native_cards {
+        return locate_native(cfg, &id);
+    }
     let Some(w) = app.get_webview_window(&card_label(&id)) else {
         return false;
     };
@@ -2005,6 +2185,12 @@ static NATIVE_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 /// 找绘制进程的可执行文件：开发态在 native/minicard-bin/target/debug，
 /// 装好的版本跟主程序同目录（`minicard-cards.exe`）。
 fn native_cards_exe() -> Option<PathBuf> {
+    // 发布版：绘制进程内嵌在主 exe，首次启动已解到 APPDATA（旧更新器只换主 exe 也能用）
+    if let Some((p, _)) = native_embed::ensure() {
+        if p.exists() {
+            return Some(p);
+        }
+    }
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let cands = [
         exe_dir.join("minicard-bin.exe"),
@@ -2045,7 +2231,12 @@ fn ensure_native_cards(app: &AppHandle, cfg: &Config) {
     if NATIVE_CHILD.lock().unwrap().is_some() {
         return;
     }
-    let Some(exe) = native_cards_exe() else {
+    let embedded = native_embed::ensure();
+    let Some(exe) = embedded
+        .as_ref()
+        .map(|(p, _)| p.clone())
+        .or_else(native_cards_exe)
+    else {
         spawn_log(&format!("找不到绘制进程，exe_dir={:?}", std::env::current_exe()));
         let _ = app.emit("native-cards-missing", ());
         return;
@@ -2054,7 +2245,10 @@ fn ensure_native_cards(app: &AppHandle, cfg: &Config) {
     cmd.arg("--live")
         .arg("--blur")
         .arg(cfg.settings.glass_blur.to_string());
-    if let Some(exe_dir) = exe.parent() {
+    if let Some((_, fd)) = &embedded {
+        // 内嵌解出来的三份 TTF 与 exe 同目录
+        cmd.arg("--font").arg(fd.join("MiSans-Regular.ttf"));
+    } else if let Some(exe_dir) = exe.parent() {
         if let Some(fd) = font_dir_of(exe_dir) {
             cmd.arg("--font").arg(fd.join("MiSans-Regular.ttf"));
         }
@@ -2928,23 +3122,33 @@ async fn dock_item_update(
 /// · 尺寸过 `snap_size` 闸门（手改 config 的野值也在 Rust 侧收口）
 #[tauri::command]
 async fn dock_update(app: AppHandle, dock: config::Dock) -> Result<serde_json::Value, String> {
-    let cfg = {
+    let (cfg, switched) = {
         let _g = dock_cfg_lock();
         let mut cfg = Config::load();
         let mut d = dock;
+        // 原生/自绘是运行时形态，不由 Dock 设置页改；旧前端 payload 缺这个字段时
+        // serde 会按 Dock::default 取 false，必须从盘上真值补回来。
+        d.native = cfg.dock.native;
         d.cx = cfg.dock.cx;
         d.y = cfg.dock.y;
         d.auto_hide = cfg.dock.auto_hide;
         d.items = cfg.dock.items.clone();
         d.size = cfg.dock.snap_size(d.size);
         d.mag = d.mag.min(100);
+        let switched = d.enabled != cfg.dock.enabled || d.native != cfg.dock.native;
         if d.hide_desktop_icons != cfg.dock.hide_desktop_icons {
             dock::set_desktop_icons(d.hide_desktop_icons)?;
         }
         cfg.dock = d;
         cfg.save()?;
-        cfg
+        (cfg, switched)
     };
+    // 原生 Dock 的窗口集合在绘制进程启动时就定了：开关切换必须重启子进程，
+    // 否则关掉后条还挂在桌面上（开关→没有任何反应）。
+    if switched {
+        stop_native_cards();
+        ensure_native_cards(&app, &cfg);
+    }
     dock_after_change(&app, &cfg);
     Ok(dock_payload(&cfg))
 }
@@ -3119,6 +3323,25 @@ fn ensure_main(app: &AppHandle) -> Option<WebviewWindow> {
         }
     };
     apply_main_chrome(&win, cfg.main_window);
+    // 托盘关闭时是最大化：几何落的是「上次正常窗口」的外框（overlay_main_bounds 在最大化
+    // 时不覆盖它），所以这里必须补一枪 maximize()。少了它唤回后窗口只是「摆成了正常尺寸，
+    // 却没最大化」：body 没有 .maxed（18px 圆角直接露在桌面上）、◻ 还画成「最大化」。
+    // 顺序：chrome（含 HICON）→ maximize → show —— maximize 会顺带显示窗口，
+    // 图标仍然在首次显示之前设好。
+    if cfg.main_maxed {
+        if let Err(e) = win.maximize() {
+            mlog(&format!("ensure_main: maximize ERR {e}"));
+        }
+    }
+    // 以窗口真值为准（maximize 失败时别把 ◻ 画成「还原」）
+    let maxed_now = win.is_maximized().unwrap_or(cfg.main_maxed);
+    if maxed_now != cfg.main_maxed {
+        mlog(&format!(
+            "ensure_main: maxed mismatch want={} real={maxed_now}",
+            cfg.main_maxed
+        ));
+    }
+    MAIN_MAXED.store(maxed_now, Ordering::Relaxed);
     if let Err(e) = win.show() {
         mlog(&format!("ensure_main: show ERR {e}"));
     }
@@ -3701,5 +3924,15 @@ mod tests {
         let g5 = super::dock_window_rect(&d);
         assert_eq!(g5.2, 5.0 * (56.0 + 12.0) + 24.0 + 2.0 * super::dock_side_reserve(&d));
         assert_eq!(g5.0 + g5.2 / 2.0, d.cx);
+    }
+
+    /// 主窗几何落盘判据：正常才写外框；最小化（-32000 残影）与最大化（满屏外框）
+    /// 都必须拒绝 —— 后者若写进去，托盘唤回后再「取消最大化」就回不到原尺寸。
+    #[test]
+    fn main_bounds_only_persisted_when_normal() {
+        assert!(super::bounds_usable(false, false), "正常窗口：写");
+        assert!(!super::bounds_usable(true, false), "最小化：残影几何不能写");
+        assert!(!super::bounds_usable(false, true), "最大化：满屏外框不能当还原几何");
+        assert!(!super::bounds_usable(true, true), "最小化 + 最大化：都不写");
     }
 }

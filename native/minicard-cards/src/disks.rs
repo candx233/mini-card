@@ -114,7 +114,13 @@ pub fn fmt_size(b: u64) -> String {
         if tb >= 100.0 {
             format!("{} TB", tb.round() as i64)
         } else {
-            format!("{:.1} TB", (tb * 10.0).round() / 10.0)
+            let t = (tb * 10.0).round() / 10.0;
+            // 浏览器 JS 数字 2.0 打印成「2」；Rust 的 {:.1} 会多出 .0
+            if (t - t.round()).abs() < 0.0001 {
+                format!("{} TB", t.round() as i64)
+            } else {
+                format!("{t:.1} TB")
+            }
         }
     } else if b >= GB {
         format!("{} GB", (b / GB).round() as i64)

@@ -423,9 +423,12 @@ impl TextEngine {
         height: f32,
         mode: Mode,
     ) -> Result<IDWriteTextLayout> {
+        // 键里必须带字号/行高/tabular：同串同盒不同字号会串（日历 35 格最易命中）。
+        // 这里拼进字符串而不是扩元组，避免动到 layout_mode/layout_cached 共用的缓存类型。
+        let composite = format!("{}|{}|{}|{}", t.s, t.size, t.line_h, t.tabular as u8);
         let key = (
             t.align,
-            t.s.clone(),
+            composite,
             width.to_bits(),
             height.to_bits(),
             mode as u8,
@@ -453,7 +456,7 @@ impl TextEngine {
         }
         {
             let mut c = self.lay_cache.borrow_mut();
-            if c.len() > 64 {
+            if c.len() > 256 {
                 c.clear();
             }
             c.insert(key, l.clone());
@@ -798,6 +801,102 @@ mod tests {
     }
 }
 
+/// CSS `text-shadow: 0 Ypx Rpx color` 的全部参数。
+///
+/// `.card` 上那条是 `0 0.833px 1.667px var(--tshadow)`：只往下挪 0.833px、模糊半径 1.667px。
+/// 颜色走色板的 `--tshadow`（深色主题黑 45%、浅色主题白 60%），别写死黑色。
+#[derive(Clone, Copy, Debug)]
+pub struct TextShadow {
+    /// 阴影色（alpha 是该次阴影的总不透明度）
+    pub color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
+    /// 3×3 抽样网格的步长（≈ CSS 模糊半径的一半，实测 0.8335 与参考图最贴）
+    pub sigma: f32,
+    /// 纵向偏移（CSS 的第二个参数）
+    pub dy: f32,
+}
+
+impl TextShadow {
+    /// `.card { text-shadow: 0 0.833px 1.667px var(--tshadow) }` 的几何部分 + 深色主题的影色。
+    pub const CARD: Self = Self {
+        color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.45,
+        },
+        sigma: 0.8335,
+        dy: 0.833,
+    };
+
+    /// 只换影色（色板里的 `--tshadow`），几何仍按 CSS。
+    pub fn with_color(self, color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F) -> Self {
+        Self { color, ..self }
+    }
+}
+
+/// 3×3 高斯核的 9 个抽样点 `(dx, dy, 归一化权重)`。
+///
+/// 硬边偏移副本在每条字形边缘都会差一大截（边缘渐变完全没有），所以阴影一律走这一套。
+pub fn gauss_taps(sigma: f32) -> [(f32, f32, f32); 9] {
+    let mut total = 0.0f32;
+    let mut taps = [(0.0f32, 0.0f32, 0.0f32); 9];
+    let mut k = 0;
+    for i in -1..=1 {
+        for j in -1..=1 {
+            let (ox, oy) = (i as f32 * sigma, j as f32 * sigma);
+            let wt = (-(ox * ox + oy * oy) / (2.0 * sigma * sigma)).exp();
+            taps[k] = (ox, oy, wt);
+            total += wt;
+            k += 1;
+        }
+    }
+    if total > 0.0 {
+        for t in taps.iter_mut() {
+            t.2 /= total;
+        }
+    }
+    taps
+}
+
+/// 给**已经建好**的文本布局画一遍高斯阴影（不画正文）。
+///
+/// 滚动数字那种「每帧都在改字符」的场合复用它：布局已经在手，不必为了阴影再排版一次。
+pub fn draw_shadow_taps(
+    g: &minicard_shell::gfx::Gfx,
+    lay: &IDWriteTextLayout,
+    x: f32,
+    y: f32,
+    sh: &TextShadow,
+) -> Result<()> {
+    use windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE;
+    use windows_numerics::Vector2;
+    if sh.color.a <= 0.0 || sh.sigma <= 0.0 {
+        return Ok(());
+    }
+    for (ox, oy, wt) in gauss_taps(sh.sigma) {
+        let a = sh.color.a * wt;
+        if a <= 0.001 {
+            continue;
+        }
+        crate::paint::set_color(
+            g,
+            windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a, ..sh.color },
+        )?;
+        unsafe {
+            g.d2d.DrawTextLayout(
+                Vector2 {
+                    X: x + ox,
+                    Y: y + oy + sh.dy,
+                },
+                lay,
+                &g.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// CSS `text-shadow: 0 Ypx Rpx color` 的近似：R 是模糊半径（= 2σ），用 3×3 高斯核
 /// 画 9 遍低透明度副本。注意**不是**硬边偏移 —— 硬边在每一条字形边缘都会差一大截。
 #[allow(clippy::too_many_arguments)]
@@ -815,40 +914,21 @@ pub fn draw_shadowed(
     dy: f32,
     te: &TextEngine,
 ) -> Result<()> {
-    use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
     use windows_numerics::Vector2;
-    if shadow_a > 0.0 && sigma > 0.0 {
-        let mut total = 0.0f32;
-        let mut taps = [(0.0f32, 0.0f32, 0.0f32); 9];
-        let mut k = 0;
-        for i in -1..=1 {
-            for j in -1..=1 {
-                let (ox, oy) = (i as f32 * sigma, j as f32 * sigma);
-                let wt = (-(ox * ox + oy * oy) / (2.0 * sigma * sigma)).exp();
-                taps[k] = (ox, oy, wt);
-                total += wt;
-                k += 1;
-            }
-        }
-        let lay = te.layout_spec(spec, w, h, mode)?;
-        for (ox, oy, wt) in taps {
-            let a = shadow_a * wt / total;
-            if a <= 0.001 {
-                continue;
-            }
-            crate::paint::set_color(g, D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a })?;
-            unsafe {
-                g.d2d.DrawTextLayout(
-                    Vector2 { X: x + ox, Y: y + oy + dy },
-                    &lay,
-                    &g.brush,
-                    windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
-        }
-    }
-    crate::paint::set_color(g, color)?;
     let lay = te.layout_spec(spec, w, h, mode)?;
+    // 老三参版本（todo / 磁盘在用）保持黑影：几何与 α 都不变，逐字节等价
+    let sh = TextShadow {
+        color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: shadow_a,
+        },
+        sigma,
+        dy,
+    };
+    draw_shadow_taps(g, &lay, x, y, &sh)?;
+    crate::paint::set_color(g, color)?;
     unsafe {
         g.d2d.DrawTextLayout(
             Vector2 { X: x, Y: y },

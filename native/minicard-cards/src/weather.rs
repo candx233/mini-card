@@ -15,7 +15,7 @@ use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_rect, fill_round, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
-use minicard_draw::text::{Mode as TextMode, TextEngine};
+use minicard_draw::text::{draw_shadow_taps, Mode as TextMode, TextEngine, TextShadow};
 use minicard_shell::gfx::Gfx;
 
 /// 文字基线的整像素落位：Chrome 把基线**向下取整**、D2D/DWrite 是四舍五入 —— 基线小数部分
@@ -41,6 +41,8 @@ pub struct Weather {
     pub days: Vec<Day>,
     pub air: Option<String>,
     pub humidity: Option<i32>,
+    /// 还没拿到快照（浏览器口径：整卡「等待数据…」）
+    pub empty: bool,
 }
 
 /// WMO 天气码 → 图标名（与 `wmoIcon` 一致）
@@ -261,6 +263,18 @@ fn deg(v: Option<f32>) -> String {
 }
 
 fn tree(t: &Tokens, w: &Weather) -> Node {
+    if w.empty {
+        return Node::new(Dir::Column)
+            .style(move |s| {
+                s.size(Dim::Px(t.w), Dim::Px(t.h))
+                    .pad([t.pad_v, t.pad_h, t.pad_v, t.pad_h])
+            })
+            .child(
+                Node::new(Dir::Row)
+                    .style(|s| s.grow(1.0).basis(0.0).align(Align::Center).justify(Justify::Center))
+                    .child(text_node("等待数据…", t.air_fs, t.air_lh, 400).id(8000)),
+            );
+    }
     // 顶部：左（城市 + 大温度）右（图标）
     let left = Node::new(Dir::Column)
         .style(|s| s.align(Align::Start))
@@ -327,8 +341,8 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
 
     // 底行：空气质量 / 湿度
     let air = match (&w.air, w.humidity) {
-        (Some(a), _) => format!("空气质量 {a}"),
-        (None, _) => "空气质量 --".to_string(),
+        (Some(a), _) if !a.trim().is_empty() => format!("空气质量 {a}"),
+        _ => "空气质量 --".to_string(),
     };
     let hum = match w.humidity {
         Some(h) if h >= 0 => format!("湿度 {h}%"),
@@ -385,12 +399,12 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
 /// 画一个 24 网格的图标：`size` 是边长，`off` 是原版对 viewBox 的平移
 fn draw_icon(
     g: &Gfx,
-    pal: &Palette,
     name: &str,
     x: f32,
     y: f32,
     size: f32,
     stroke: f32,
+    color: D2D1_COLOR_F,
     opacity: f32,
 ) -> Result<()> {
     let (d, (ox, oy), circles, nc) = icon_paths(name);
@@ -400,19 +414,19 @@ fn draw_icon(
     let ty = -oy;
     let to = |px: f32, py: f32| (x + (px + tx) * s, y + (py + ty) * s);
 
+    let col = D2D1_COLOR_F { a: color.a * opacity, ..color };
     // 先画圆（sun 的太阳本体 / snow 的三粒雪）
     for c in circles.iter().take(nc) {
         let p = Path::circle(to(c.0, c.1).0, to(c.0, c.1).1, c.2 * s);
-        set_color(g, pal.fg)?;
+        set_color(g, col)?;
         stroke_path(g, &p, stroke * s, false)?;
     }
     // 再把 `M` 起头的路径按子路径分组（SVG 的 M 也会开新子路径）
     for seg in d.split('M').filter(|s| !s.is_empty()) {
         let p = Path::svg(&format!("M{seg}"));
-        set_color(g, pal.fg)?;
+        set_color(g, col)?;
         stroke_path(g, &p.scale(x + tx * s, y + ty * s, s), stroke * s, false)?;
     }
-    let _ = opacity;
     Ok(())
 }
 
@@ -428,12 +442,12 @@ fn paint_tree(
     if pl.id == 8010 {
         draw_icon(
             g,
-            pal,
             icon_of(w.code),
             pl.rect.x,
             pl.rect.y,
             t.sun_sz,
             t.sun_stroke,
+            pal.fg,
             0.9,
         )?;
         return Ok(());
@@ -444,12 +458,12 @@ fn paint_tree(
         let code = w.days.get(i).map(|d| d.code).unwrap_or(3);
         draw_icon(
             g,
-            pal,
             icon_of(code),
             pl.rect.x,
             pl.rect.y,
             t.day_ic,
             t.day_stroke,
+            pal.muted,
             1.0,
         )?;
         return Ok(());
@@ -496,7 +510,6 @@ fn paint_tree(
             8130..=8139 => pal.fg,
             _ => pal.muted,
         };
-        set_color(g, color)?;
         let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 8.0, TextMode::Clip)?;
         // 基线整像素落位：Chrome 按 floor、D2D 按 round，基线小数 ≥0.5 的行自绘会低 1px。
         // 实测（320×240 参考图逐带最佳位移）：套上校正后三日温度/大温度/图标全部 dy=0
@@ -504,6 +517,16 @@ fn paint_tree(
         // 三日日期与底行仍是低 1px（DWrite 对 CJK 字形另有 hint 相位，统一公式盖不住）。
         // 净效果 p95 22 → 19 / 平均 4.41 → 3.81，故保留。
         let ty = snap_text_y(te, spec, pl.rect.y);
+        // `.card { text-shadow: 0 .833px 1.667px var(--tshadow) }` 对卡内所有文字生效：
+        // 这里原来只有一次 DrawTextLayout，等于整张天气卡没有任何投影。
+        draw_shadow_taps(
+            g,
+            &lay,
+            pl.rect.x,
+            ty,
+            &TextShadow::CARD.with_color(pal.shadow),
+        )?;
+        set_color(g, color)?;
         unsafe {
             g.d2d.DrawTextLayout(
                 Vector2 {

@@ -18,7 +18,7 @@ use windows_numerics::Vector2;
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Dim, Dir, Justify, Node, Placed, Rect, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_round};
-use minicard_draw::text::TextEngine;
+use minicard_draw::text::{draw_shadow_taps, TextEngine, TextShadow};
 use minicard_shell::gfx::Gfx;
 
 pub struct Row {
@@ -172,10 +172,14 @@ fn tree(t: &Tokens, rows: &[Row]) -> Node {
         let bar = Node::new(Dir::Row)
             .id(1000 + i as u32)
             .style(|s| s.size(Dim::Pct(1.0), Dim::Px(t.bar_h)));
-        Node::new(Dir::Column)
+        let mut col = Node::new(Dir::Column)
             .style(|s| s.grow(1.0).basis(0.0).justify(Justify::Center).gap(t.gap))
-            .child(line)
-            .child(bar)
+            .child(line);
+        // GPU 不可用 / 未检测到：浏览器只输出一行文字，不带空进度条。
+        if r.pct.is_some() {
+            col = col.child(bar);
+        }
+        col
     });
     Node::new(Dir::Column)
         .style(|s| {
@@ -231,18 +235,12 @@ fn paint_tree(
             spec.line_h + 8.0,
             spec.tabular,
         )?;
-        set_color(g, pal.shadow)?;
+        // `.card` 的 text-shadow 是**模糊**投影（0 .833px 1.667px var(--tshadow)）：
+        // 原来画的是 y+0.833 的硬边副本，字缘没有任何过渡、看着像双影。
+        // 换成 3×3 高斯核的 9 次低透明度副本，坐标与正文一致（y 已含整像素吸附）。
+        draw_shadow_taps(g, &lay, p.rect.x, y, &TextShadow::CARD.with_color(pal.shadow))?;
+        set_color(g, pal.fg)?;
         unsafe {
-            g.d2d.DrawTextLayout(
-                Vector2 {
-                    X: p.rect.x,
-                    Y: y + 0.833,
-                },
-                &lay,
-                &g.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-            set_color(g, pal.fg)?;
             g.d2d.DrawTextLayout(
                 Vector2 { X: p.rect.x, Y: y },
                 &lay,
@@ -275,5 +273,49 @@ fn to_d2d(r: Rect) -> D2D_RECT_F {
         top: r.y,
         right: r.right(),
         bottom: r.bottom(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 收集场景树里的进度条节点（id 1000+i）
+    fn bars(n: &Node, out: &mut Vec<u32>) {
+        if (1000..2000).contains(&n.id) {
+            out.push(n.id);
+        }
+        for c in &n.children {
+            bars(c, out);
+        }
+    }
+
+    /// GPU「未检测到」：浏览器只输出一行文字（card.html 的 `pct === null` 分支），
+    /// 不带空进度条。三行里只有 CPU / RAM 两根条；关掉 GPU 选项时两行两根条。
+    #[test]
+    fn gpu_missing_has_no_empty_bar() {
+        let t = Tokens::perf(240.0, 120.0);
+        let rows = vec![
+            Row { label: "CPU".into(), text: "12%".into(), pct: Some(12.0) },
+            Row { label: "RAM".into(), text: "48%".into(), pct: Some(48.0) },
+            Row { label: "GPU".into(), text: "未检测到".into(), pct: None },
+        ];
+        let mut ids = Vec::new();
+        bars(&tree(&t, &rows), &mut ids);
+        assert_eq!(ids, vec![1000, 1001], "GPU 行不该有进度条节点");
+
+        let mut two = Vec::new();
+        bars(&tree(&t, &rows[..2]), &mut two);
+        assert_eq!(two, vec![1000, 1001], "两行卡就是两根条");
+
+        // 反过来：GPU 有数据时必须有自己的条（别把整行都吞掉）
+        let rows3 = vec![
+            Row { label: "CPU".into(), text: "12%".into(), pct: Some(12.0) },
+            Row { label: "RAM".into(), text: "48%".into(), pct: Some(48.0) },
+            Row { label: "GPU".into(), text: "30%".into(), pct: Some(30.0) },
+        ];
+        let mut three = Vec::new();
+        bars(&tree(&t, &rows3), &mut three);
+        assert_eq!(three, vec![1000, 1001, 1002]);
     }
 }
