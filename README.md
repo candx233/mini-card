@@ -10,7 +10,7 @@
 
 <img src="https://img.candx.cn/blog/minicard/cards.png" width="820" alt="桌面卡片：桌面时钟 / 天气 / 性能监控 / 磁盘容量 / 网络速率 / 番茄钟">
 
-<img src="https://img.candx.cn/blog/minicard/maininterface.png" width="820" alt="主界面：卡片库 / 桌面卡片 / 外观 / 设置">
+<img src="https://img.candx.cn/blog/minicard/maininterface_dark.png" width="820" alt="主界面：卡片库 / 桌面卡片 / 外观 / 设置">
 
 ## 特性
 
