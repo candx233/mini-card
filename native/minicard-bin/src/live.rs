@@ -36,6 +36,18 @@ use minicard_draw::paint::{fill_round, set_color, stroke_round};
 use minicard_draw::text::TextEngine;
 use minicard_shell::gfx::Gfx;
 
+/// 超采样倍率（环境变量控制，默认 1 = 现有行为）：`MC_SS=2` 时卡片/Dock 按 2× 像素渲染、
+/// DComp 0.5 缩放显示 —— 文字边缘多 4 倍采样。取证/对照阶段由脚本设，稳定后再改默认。
+/// 超采样倍率：默认 **2×**（0.1.3 起，文字边缘更软/台阶更少；release 实测 9 卡
+/// 只 +0.9～1.8 单核百分点、私有内存 +1.4～1.9 MB）。`MC_SS=1` 可退回 1×（A/B 对照用）。
+fn ss_factor() -> u32 {
+    std::env::var("MC_SS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(2)
+        .clamp(1, 4)
+}
+
 
 /// 窗口线程只往里塞事件，动作在主循环里做（这样能正常借用 wins/cfg，不用满地 static mut）
 enum UiEvent {
@@ -667,12 +679,13 @@ fn set_card_height(
     if let Some(old) = win.gfx.take() {
         old.detach();
     }
-    match Gfx::new(
+    match Gfx::new_scaled(
         win.hwnd,
         w_px as u32,
         h_px as u32,
         win.dpi,
         radius_of(win.kind, win.w, new_h),
+        ss_factor(),
     ) {
         Ok(mut g) => {
             g.text_dx = 0.0;
@@ -692,12 +705,13 @@ fn set_card_height(
                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
-            win.gfx = Gfx::new(
+            win.gfx = Gfx::new_scaled(
                 win.hwnd,
                 w_px as u32,
                 old_h_px as u32,
                 win.dpi,
                 radius_of(win.kind, win.w, old_h),
+                ss_factor(),
             )
             .ok();
             if let Some(g) = win.gfx.as_mut() {
@@ -877,7 +891,7 @@ pub fn run(
             let w_px = (win_w * dpi / 96.0).round() as u32;
             let h_px = (win_h * dpi / 96.0).round() as u32;
             let radius = radius_of(card.kind, win_w, win_h);
-            let mut gfx = Gfx::new(hwnd, w_px, h_px, dpi, radius)?;
+            let mut gfx = Gfx::new_scaled(hwnd, w_px, h_px, dpi, radius, ss_factor())?;
             gfx.text_dx = 0.0;
 
             // 玻璃：按卡位从壁纸切一块（含 pad）再模糊，与 card.html 的 .wall 同一口径
@@ -1027,7 +1041,14 @@ pub fn run(
                     } as f32;
                     let w_p = (dk.w * dpi / 96.0).round() as u32;
                     let h_p = (dk.h * dpi / 96.0).round() as u32;
-                    let mut gfx = Gfx::new(hwnd, w_p, h_p, dpi, minicard_cards::dock::RADIUS)?;
+                    let mut gfx = Gfx::new_scaled(
+                        hwnd,
+                        w_p,
+                        h_p,
+                        dpi,
+                        minicard_cards::dock::RADIUS,
+                        ss_factor(),
+                    )?;
                     gfx.text_dx = 0.0;
                     // 图标：与外壳同一套缓存命名
                     let mut icons: Vec<Option<ID2D1Bitmap1>> = Vec::new();
@@ -2208,6 +2229,15 @@ fn draw_one(
         }
         (State::Weather { seen_at }, _) => {
             let ws = wshared.read().unwrap().clone();
+            // 浏览器口径（card.html::computeState）：>35 分钟没新快照 = 整卡「数据异常」
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let stale = ws
+                .as_ref()
+                .map(|s| s.at > 0 && now_secs.saturating_sub(s.at) > 35 * 60)
+                .unwrap_or(false);
             let (city, temp, code, air, hum, days) = match &ws {
                 Some(s) => (
                     s.city.clone(),
@@ -2236,6 +2266,7 @@ fn draw_one(
                 air,
                 humidity: hum,
                 empty: ws.is_none(),
+                error: stale,
             };
             weather::paint(gfx, te, pal, &wk, &wv, glass_pair)?;
             // 记下画的是哪一版（主循环拿它判断「天气刷新了 → 立刻重绘」）
@@ -2657,7 +2688,14 @@ fn dock_rebuild(
         old.detach();
     }
     dw.gfx = None; // 先把旧 Gfx 丢干净，否则 CreateTargetForHwnd 会报 WINDOW_ALREADY_COMPOSED
-    dw.gfx = Some(Gfx::new(dw.hwnd, w_px as u32, h_px as u32, dw.dpi, minicard_cards::dock::RADIUS)?);
+    dw.gfx = Some(Gfx::new_scaled(
+        dw.hwnd,
+        w_px as u32,
+        h_px as u32,
+        dw.dpi,
+        minicard_cards::dock::RADIUS,
+        ss_factor(),
+    )?);
     // 玻璃：与建窗时同一口径
     let pad_px = ((blur * 3.0).max(60.0) * dw.dpi / 96.0).round() as i32;
     let mon = monitor_of(x, y);
@@ -3203,7 +3241,7 @@ mod gfx_tests {
         } as f32;
         let w_px = (w * dpi / 96.0).round() as u32;
         let h_px = (h * dpi / 96.0).round() as u32;
-        let mut gfx = Gfx::new(hwnd, w_px, h_px, dpi, radius_of(kind, w, h)).ok()?;
+        let mut gfx = Gfx::new_scaled(hwnd, w_px, h_px, dpi, radius_of(kind, w, h), ss_factor()).ok()?;
         gfx.text_dx = 0.0;
         let state = match kind {
             CardKind::Weather => State::Weather { seen_at: i64::MIN },

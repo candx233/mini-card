@@ -7,6 +7,7 @@
 //! ④ 裁剪：右缘 100 的裁剪盒里画一条超宽文字，右侧越界部分必须没画出来
 
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use windows::core::Result;
 
 use minicard_draw::paint::{
@@ -341,11 +342,13 @@ pub fn disks_sheet(
 }
 
 /// 第七张测试图：时钟卡（240×120，静止态；日期取固定串以便与浏览器对比）。
+/// `glass` 传入时画真实玻璃底（真机 1× 对照窗用），None = 透明底（离屏逐像素对照用）。
 pub fn clock_sheet(
     g: &Gfx,
     te: &TextEngine,
     pal: &minicard_draw::color::Palette,
     debug_layout: bool,
+    glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
 ) -> Result<()> {
     use minicard_cards::clock::{self, Clock, Tokens};
 
@@ -365,7 +368,7 @@ pub fn clock_sheet(
             t.r, t.pad_lr, t.pad_tb, t.gap, t.body_pb, t.date_mt, t.time_fs, t.time_lh, t.date_fs, t.date_lh
         );
     }
-    clock::paint(g, te, pal, &t, &c, &date, &lunar, std::time::Instant::now(), None)
+    clock::paint(g, te, pal, &t, &c, &date, &lunar, std::time::Instant::now(), glass)
 }
 
 /// 滚动中途的一帧：从 14:26 跳到 14:27，并把时间轴拨到滚动开始后 120ms。
@@ -497,6 +500,7 @@ pub fn weather_sheet(
         air: Some("优".into()),
         humidity: Some(62),
         empty: false,
+        error: false,
         days: vec![
             Day { label: "今天".into(), hi: Some(26.2), lo: Some(18.4), code: 2 },
             Day { label: "明天".into(), hi: Some(23.1), lo: Some(17.2), code: 61 },

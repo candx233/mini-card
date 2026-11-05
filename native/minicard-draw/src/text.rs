@@ -1004,10 +1004,73 @@ unsafe fn custom_rendering_params(
     p1.cast()
 }
 
+/// 超采样时给文字加的灰阶对比度补偿：2× 盒式降采样会把字压瘦 ~3–6%，
+/// 这个参数把灰阶 AA 的中间调抬回来（spike 实测 w50 1.333→1.434，接近参考 1.495）。
+const SS_GRAYSCALE_CONTRAST: f32 = 0.5;
+
+/// `IDWriteRenderingParams3`：比 v1 多出 `grayscaleEnhancedContrast` 与 `gridFitMode`。
+unsafe fn install_params3(
+    d2d: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext,
+    gc: f32,
+    downsampled: bool,
+) -> Result<()> {
+    use windows::Win32::Graphics::DirectWrite::{
+        DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_PIXEL_GEOMETRY_FLAT,
+        DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
+        DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED,
+    };
+    let f: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+    let f3: IDWriteFactory3 = f.cast()?;
+    let rmode = if downsampled {
+        DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED
+    } else {
+        DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC
+    };
+    let rp3 = f3.CreateCustomRenderingParams(
+        DEFAULT_TEXT_GAMMA,
+        0.0,
+        gc,
+        0.0,
+        DWRITE_PIXEL_GEOMETRY_FLAT,
+        rmode,
+        DWRITE_GRID_FIT_MODE_DEFAULT,
+    )?;
+    let rp: windows::Win32::Graphics::DirectWrite::IDWriteRenderingParams = rp3.cast()?;
+    d2d.SetTextRenderingParams(&rp);
+    Ok(())
+}
+
 /// 把出图默认参数套到一个 D2D 设备上下文上（由 `Gfx::new` 通过钩子调用）。
 fn install_default_text_raster(
     d2d: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext,
+    ss: u32,
 ) {
+    // 实验钩子（默认不生效）：MC_TEXT_MODE=ds[+gc] / gs[+gc]
+    //   ds = NATURAL_SYMMETRIC_DOWNSAMPLED（DWrite 为「高分辨率渲染后再降采样」准备的档）
+    //   gs = NATURAL_SYMMETRIC + grayscaleEnhancedContrast（只影响灰阶 AA 的中间调）
+    if let Ok(mode) = std::env::var("MC_TEXT_MODE") {
+        if mode.starts_with("ds") || mode.starts_with("gs") {
+            let downsampled = mode.starts_with("ds");
+            let gc: f32 = mode[2..].trim_start_matches('+').parse().unwrap_or(0.0);
+            match unsafe { install_params3(d2d, gc, downsampled) } {
+                Ok(()) => minicard_shell::mlog!(
+                    "文字栅格化：MC_TEXT_MODE={mode}（downsampled={downsampled}, gc={gc}）"
+                ),
+                Err(e) => minicard_shell::mlog!("MC_TEXT_MODE 失败（回落默认）: {e:?}"),
+            }
+            return;
+        }
+    }
+    // 超采样：默认改用 params3 + 灰阶对比度补偿（不然 2× 降采样会让字变瘦）
+    if ss > 1 {
+        match unsafe { install_params3(d2d, SS_GRAYSCALE_CONTRAST, false) } {
+            Ok(()) => minicard_shell::mlog!(
+                "文字栅格化：超采样 ss={ss} → grayscaleEnhancedContrast={SS_GRAYSCALE_CONTRAST}"
+            ),
+            Err(e) => minicard_shell::mlog!("超采样文字参数失败（回落默认）: {e:?}"),
+        }
+        return;
+    }
     // COM 指针不 Send，用 thread_local 缓存：每线程建一次参数对象，之后每窗只是套一遍。
     thread_local! {
         static RP: std::cell::RefCell<

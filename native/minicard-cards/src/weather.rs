@@ -43,6 +43,8 @@ pub struct Weather {
     pub humidity: Option<i32>,
     /// 还没拿到快照（浏览器口径：整卡「等待数据…」）
     pub empty: bool,
+    /// 快照超过 35 分钟没更新（浏览器口径：整卡「数据异常」，`card.html::computeState`）
+    pub error: bool,
 }
 
 /// WMO 天气码 → 图标名（与 `wmoIcon` 一致）
@@ -263,7 +265,15 @@ fn deg(v: Option<f32>) -> String {
 }
 
 fn tree(t: &Tokens, w: &Weather) -> Node {
-    if w.empty {
+    // 与浏览器同口径：没快照 = 等待数据…；有快照但超过 35 分钟没更新 = 数据异常
+    let state_text = if w.error {
+        Some("数据异常")
+    } else if w.empty {
+        Some("等待数据…")
+    } else {
+        None
+    };
+    if let Some(txt) = state_text {
         return Node::new(Dir::Column)
             .style(move |s| {
                 s.size(Dim::Px(t.w), Dim::Px(t.h))
@@ -272,7 +282,7 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
             .child(
                 Node::new(Dir::Row)
                     .style(|s| s.grow(1.0).basis(0.0).align(Align::Center).justify(Justify::Center))
-                    .child(text_node("等待数据…", t.air_fs, t.air_lh, 400).id(8000)),
+                    .child(text_node(txt, t.air_fs, t.air_lh, 400).id(8000)),
             );
     }
     // 顶部：左（城市 + 大温度）右（图标）
@@ -613,6 +623,41 @@ mod tests {
         assert!((s.stack_pt - 2.0).abs() < 0.01, "stack_pt = {:.4}", s.stack_pt);
         // 下内边距仍是 padding-block 那 1px（两档差 1.667px，别把二者写成一档）
         assert!(t.stack_pt > 0.0625 * t.r + 1.0);
+    }
+
+    fn collect_text(n: &minicard_draw::layout::Node, out: &mut Vec<String>) {
+        if let minicard_draw::layout::Content::Text(t) = &n.content {
+            out.push(t.s.clone());
+        }
+        for c in &n.children {
+            collect_text(c, out);
+        }
+    }
+
+    /// 状态文案与浏览器同口径（card.html::computeState）：
+    /// 没快照 = 「等待数据…」；有快照但 >35 min 没更新 = 「数据异常」，且 error 优先于 empty。
+    #[test]
+    fn 天气状态文案() {
+        let t = Tokens::weather(240.0, 180.0);
+        let texts = |empty: bool, error: bool| {
+            let w = Weather {
+                city: "杭州".into(),
+                temp: Some(24.0),
+                code: 2,
+                air: Some("优".into()),
+                humidity: Some(50),
+                empty,
+                error,
+                days: Vec::new(),
+            };
+            let mut out = Vec::new();
+            collect_text(&tree_hook(&t, &w), &mut out);
+            out
+        };
+        assert!(texts(true, false).iter().any(|s| s == "等待数据…"));
+        assert!(texts(false, true).iter().any(|s| s == "数据异常"));
+        let normal = texts(false, false);
+        assert!(!normal.iter().any(|s| s == "等待数据…" || s == "数据异常"));
     }
 }
 

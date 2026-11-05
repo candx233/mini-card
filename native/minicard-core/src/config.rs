@@ -170,8 +170,9 @@ pub struct Dock {
     pub z: ZOrder,
     /// 隐藏系统桌面图标（HKCU\...\Explorer\Advanced\HideIcons）
     pub hide_desktop_icons: bool,
-    /// Dock 走 Rust 自绘（`minicard-bin` 里的 dock 模块）而不是 dock.html
-    #[serde(default)]
+    /// Dock 走 Rust 自绘（`minicard-bin` 里的 dock 模块）而不是 dock.html。
+    /// 0.1.3 起默认 true；手改 false 仍可回退 WebView 版（一次性迁移见 `dock_native_version`）。
+    #[serde(default = "default_true")]
     pub native: bool,
     /// 边缘自动隐藏（P6，先只留字段，行为不实现）
     pub auto_hide: bool,
@@ -189,7 +190,7 @@ impl Default for Dock {
             mag: 55,
             z: ZOrder::Top,
             hide_desktop_icons: false,
-            native: false,
+            native: true,
             auto_hide: false,
             items: Vec::new(),
         }
@@ -569,6 +570,10 @@ pub struct Config {
     /// `Config::default()`（= UI_VERSION）补缺字段，老 config 就永远迁不动。
     #[serde(default = "ui_version_legacy")]
     pub ui_version: u32,
+    /// Dock 原生自绘转正迁移版本（< DOCK_NATIVE_VERSION 时把 `dock.native` 置 true，只做一次）。
+    /// 0.1.2 的 config 里 `native` 被显式写成 false，靠 serde 默认补不到 → 单独记一位。
+    #[serde(default = "dock_native_version_legacy")]
+    pub dock_native_version: u32,
 }
 
 /// 老 config 缺 `size_version` 时按 0 处理（= 需要迁移一次）
@@ -581,8 +586,21 @@ fn ui_version_legacy() -> u32 {
     0
 }
 
+/// 老 config 缺 `dock_native_version` 时按 0 处理（= 需要迁移一次）
+fn dock_native_version_legacy() -> u32 {
+    0
+}
+
+/// `Dock.native` 的 serde 默认值（字段整个缺失时 = true；0.1.3 起原生 Dock 是默认路径）
+fn default_true() -> bool {
+    true
+}
+
 /// 当前尺寸迁移版本
 pub const SIZE_VERSION: u32 = 4;
+
+/// Dock 原生自绘转正迁移版本（0.1.3：把老 config 里显式写死的 `native=false` 迁到 true）
+pub const DOCK_NATIVE_VERSION: u32 = 1;
 
 /// 主窗默认尺寸。界面字号整档上调（正文 13→14px）时，外壳/控件/间距一起放大一档，
 /// 窗口也跟着长 —— 928×628 → 992×672（+6.9%，与字号同比例）。
@@ -632,6 +650,7 @@ impl Default for Config {
             main_maxed: false,
             size_version: SIZE_VERSION,
             ui_version: UI_VERSION,
+            dock_native_version: DOCK_NATIVE_VERSION,
         }
     }
 }
@@ -682,7 +701,23 @@ impl Config {
             cfg.size_version = SIZE_VERSION;
             let _ = cfg.save();
         }
+        // Dock 原生自绘转正（只做一次）：0.1.2 的 config 把 `dock.native` 显式写成了 false，
+        // serde 默认补不到 → 用版本位迁一次；迁完之后用户手改 false 仍会被尊重（回退口）。
+        if cfg.migrate_dock_native() {
+            let _ = cfg.save();
+        }
         cfg
+    }
+
+    /// Dock 原生自绘转正（只做一次，纯内存）。返回是否有改动（`load` 据此决定落盘）。
+    fn migrate_dock_native(&mut self) -> bool {
+        if self.dock_native_version < DOCK_NATIVE_VERSION {
+            self.dock.native = true;
+            self.dock_native_version = DOCK_NATIVE_VERSION;
+            true
+        } else {
+            false
+        }
     }
 
     /// 主窗恢复计划：(外框几何, 是否最大化)。
@@ -801,6 +836,30 @@ size = [320.0, 190.0]
         assert_eq!(cfg.cards[0].size, [320.0, 190.0]);
         // 迁移后落到该类型的固定尺寸（性能 = 4×2 格 = 240×120）
         assert_eq!(cfg.cards[0].kind.migrated_size(320.0, 190.0), [240.0, 120.0]);
+    }
+
+    /// Dock 原生自绘转正：老 config 显式 `native=false` 也要迁一次；迁完之后手改 false 要被尊重
+    #[test]
+    fn dock_native_migrates_once() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+[dock]
+native = false
+"#,
+        )
+        .expect("老 config 应能解析");
+        assert!(!cfg.dock.native);
+        assert_eq!(cfg.dock_native_version, 0, "缺字段必须按 0 = 待迁移");
+        assert!(cfg.migrate_dock_native());
+        assert!(cfg.dock.native, "迁移后 Dock 必须默认原生");
+        assert_eq!(cfg.dock_native_version, DOCK_NATIVE_VERSION);
+        // 迁移只做一次：用户之后手改 false 是回退口，不能被再次覆盖
+        cfg.dock.native = false;
+        assert!(!cfg.migrate_dock_native());
+        assert!(!cfg.dock.native);
+        // 字段整个缺失时 serde 默认 true（新装 / 极老 config）
+        let fresh: Config = toml::from_str("").expect("空 config 应能解析");
+        assert!(fresh.dock.native);
     }
 
     /// 迁移：不管老尺寸是什么，都落到该卡类型的固定尺寸，且固定尺寸本身必须是整格

@@ -50,6 +50,9 @@ struct Args {
     y: i32,
     w: f32,
     h: f32,
+    /// 超采样倍率（**仅 --probe + --no-glass 的离屏取证用**）：按 ss× 像素渲染，
+    /// swapchain/dump 也是 ss×，由外部脚本盒式降采样回 1× 再比对。
+    ss: u32,
     font: PathBuf,
     glass: f32,
     blur: f32,
@@ -90,6 +93,7 @@ impl Args {
             y: 300,
             w: 240.0,
             h: 120.0,
+            ss: 1,
             font: PathBuf::from(r"..\assets\fonts\MiSans-Regular.ttf"),
             glass: 30.0,
             blur: 30.0,
@@ -135,6 +139,7 @@ impl Args {
                 "--y" => a.y = next(&mut i).parse().unwrap_or(a.y),
                 "--w" => a.w = next(&mut i).parse().unwrap_or(a.w),
                 "--h" => a.h = next(&mut i).parse().unwrap_or(a.h),
+                "--ss" => a.ss = next(&mut i).parse().unwrap_or(1).max(1).min(4),
                 "--font" => a.font = PathBuf::from(next(&mut i)),
                 "--glass" => a.glass = next(&mut i).parse().unwrap_or(a.glass),
                 "--blur" => a.blur = next(&mut i).parse().unwrap_or(a.blur),
@@ -320,6 +325,7 @@ impl App {
                         &self.te,
                         &self.pal,
                         self.debug_layout,
+                        self.glass_bmp.as_ref().map(|b| (b, self.glass_rect)),
                     ),
                     "disks" => probe::disks_sheet(
                         &self.gfx,
@@ -528,6 +534,9 @@ fn main() -> Result<()> {
         } as f32;
         let w_px = (args.w * dpi / 96.0).round() as u32;
         let h_px = (args.h * dpi / 96.0).round() as u32;
+        // 超采样：Gfx 内部按 ss× 建 swapchain + ss 倍基础变换，DComp 1/ss 缩放显示；
+        // 逻辑坐标不变，玻璃/图片位图仍按 1× 素材（被 2× 采样后再缩回）。
+        let ss = args.ss.max(1);
         SetWindowPos(
             hwnd,
             None,
@@ -552,7 +561,16 @@ fn main() -> Result<()> {
             Some("dock") => minicard_cards::dock::RADIUS,
             _ => tokens.radius,
         };
-        let mut gfx = gfx::Gfx::new(hwnd, w_px, h_px, dpi, clip_radius)?;
+        let mut gfx = gfx::Gfx::new_scaled(hwnd, w_px, h_px, dpi, clip_radius, ss)?;
+        if ss > 1 {
+            mlog!(
+                "超采样 ss={}：swapchain {}×{}（窗口 1×，DComp 1/{} 缩放）",
+                ss,
+                w_px * ss,
+                h_px * ss,
+                ss
+            );
+        }
         gfx.dump = args.dump.clone();
         gfx.embolden_off = args.emb_off;
         gfx.embolden_a = args.emb_a;
@@ -705,6 +723,7 @@ fn main() -> Result<()> {
         let ptr = Box::into_raw(app);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
 
+        // 超采样时窗口内容由 DComp 缩回 1×，可以正常显示（真机 1× 对照就靠它）
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         if args.desktop_layer {
             match desktop::insert_above_desktop(hwnd) {

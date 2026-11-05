@@ -35,7 +35,8 @@ use windows::Win32::Graphics::Dxgi::{
 /// 所以本 crate 建不出 `IDWriteRenderingParams`。改成由 `minicard-draw` 的
 /// `TextEngine` 注册一个安装函数，`Gfx::new` 每建一个设备上下文套一次 ——
 /// 九张卡 / Dock / 右键菜单的窗口全部走 `Gfx::new`，一处注册就全生效。
-type TextRasterHook = fn(&ID2D1DeviceContext);
+/// 参数 = (设备上下文, 超采样倍率)：文字侧据此决定是否加「降采样补偿」参数。
+type TextRasterHook = fn(&ID2D1DeviceContext, u32);
 
 static TEXT_RASTER_HOOK: std::sync::RwLock<Option<TextRasterHook>> =
     std::sync::RwLock::new(None);
@@ -53,27 +54,27 @@ pub fn set_text_raster_hook(f: TextRasterHook) {
 
 thread_local! {
     /// 建上下文时钩子还没注册 → 先记下来，等 draw 侧注册时回填。
-    static PENDING_TEXT_RASTER: std::cell::RefCell<Vec<ID2D1DeviceContext>> =
+    static PENDING_TEXT_RASTER: std::cell::RefCell<Vec<(ID2D1DeviceContext, u32)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// 把已注册的参数套到上下文；没注册就先排队等补。
-fn apply_text_raster(d2d: &ID2D1DeviceContext) {
+fn apply_text_raster(d2d: &ID2D1DeviceContext, ss: u32) {
     if let Ok(r) = TEXT_RASTER_HOOK.read() {
         if let Some(f) = *r {
-            f(d2d);
+            f(d2d, ss);
             return;
         }
     }
-    PENDING_TEXT_RASTER.with(|p| p.borrow_mut().push(d2d.clone()));
+    PENDING_TEXT_RASTER.with(|p| p.borrow_mut().push((d2d.clone(), ss)));
 }
 
 fn flush_pending_text_raster() {
     let hook = TEXT_RASTER_HOOK.read().ok().and_then(|r| *r);
     let Some(f) = hook else { return };
     PENDING_TEXT_RASTER.with(|p| {
-        for d2d in p.borrow_mut().drain(..) {
-            f(&d2d);
+        for (d2d, ss) in p.borrow_mut().drain(..) {
+            f(&d2d, ss);
         }
     });
 }
@@ -100,6 +101,8 @@ pub struct Gfx {
     pub w: f32, // DIPs
     pub h: f32,
     pub dpi: f32,
+    /// 超采样倍率：1 = 正常；2 = swapchain 2× 像素渲染、DComp 0.5 缩放显示。
+    pub scale: f32,
     /// 设了就把每帧的面板缓冲读回来落盘（BGRA 原始像素 + `<path>.txt` 里的 "宽x高"）
     pub dump: Option<std::path::PathBuf>,
     /// 连续帧序列目录 + 剩余帧数（动效取证用）
@@ -118,6 +121,22 @@ pub struct Gfx {
 
 impl Gfx {
     pub fn new(hwnd: HWND, w_px: u32, h_px: u32, dpi: f32, radius_dip: f32) -> Result<Self> {
+        Self::new_scaled(hwnd, w_px, h_px, dpi, radius_dip, 1)
+    }
+
+    /// `ss` = 超采样倍率：swapchain 按 ss× 像素建，D2D 上下文带 ss 倍基础变换，
+    /// DComp visual 按 1/ss 缩放显示。**逻辑坐标（DIP）与 `w/h` 不变**，命中测试不用改；
+    /// 文字与矢量图形因此在 ss 倍分辨率上栅格化，再降采样到屏幕。
+    pub fn new_scaled(
+        hwnd: HWND,
+        w_px: u32,
+        h_px: u32,
+        dpi: f32,
+        radius_dip: f32,
+        ss: u32,
+    ) -> Result<Self> {
+        let ss = ss.max(1).min(4);
+        let (sw, sh) = (w_px * ss, h_px * ss);
         unsafe {
             let levels = [
                 D3D_FEATURE_LEVEL_11_0,
@@ -144,8 +163,8 @@ impl Gfx {
             let factory2: IDXGIFactory2 = adapter.GetParent()?;
 
             let desc = DXGI_SWAP_CHAIN_DESC1 {
-                Width: w_px,
-                Height: h_px,
+                Width: sw,
+                Height: sh,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 Stereo: false.into(),
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
@@ -171,7 +190,7 @@ impl Gfx {
             d2d.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             // 灰阶下真正决定「字缘软硬」的是 IDWriteRenderingParams（gamma / 渲染模式），
             // 由 minicard-draw 侧注册的钩子套上来（见 set_text_raster_hook）。
-            apply_text_raster(&d2d);
+            apply_text_raster(&d2d, ss);
 
             let surface: IDXGISurface = swap.GetBuffer(0)?;
             let props = D2D1_BITMAP_PROPERTIES1 {
@@ -191,6 +210,14 @@ impl Gfx {
             let comp_target = comp.CreateTargetForHwnd(hwnd, true)?;
             let visual = comp.CreateVisual()?;
             visual.SetContent(&swap)?;
+            if ss > 1 {
+                // 2× 缓冲区按 1/2 缩回窗口逻辑尺寸；DComp 在 2:1 下每输出像素采 4 个输入像素（盒式均值）
+                let inv = 1.0f32 / ss as f32;
+                let m = Matrix3x2 { M11: inv, M22: inv, ..Default::default() };
+                let mt = comp.CreateMatrixTransform()?;
+                mt.SetMatrix(&m)?;
+                visual.SetTransform(&mt)?;
+            }
             comp_target.SetRoot(&visual)?;
             comp.Commit()?;
 
@@ -223,6 +250,7 @@ impl Gfx {
                 w,
                 h,
                 dpi,
+                scale: ss as f32,
                 dump: None,
                 dump_seq: None,
                 dump_seq_left: std::cell::Cell::new(0),
@@ -240,6 +268,11 @@ impl Gfx {
         unsafe {
             self.d2d.BeginDraw();
             self.d2d.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            if self.scale != 1.0 {
+                // 基础变换 = ss 倍：所有逻辑坐标按 ss 倍栅格化（文字/图形吃满 2× 采样）
+                let m = Matrix3x2 { M11: self.scale, M22: self.scale, ..Default::default() };
+                self.d2d.SetTransform(&m);
+            }
             Ok(())
         }
     }
