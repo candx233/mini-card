@@ -1845,7 +1845,11 @@ pub fn run(
                     static T0: OnceLock<Instant> = OnceLock::new();
                     let t0 = T0.get_or_init(Instant::now);
                     let s = t0.elapsed().as_secs_f32();
-                    Some((dw.t.w / 2.0 + 380.0 * (s * 1.4).sin()).clamp(0.0, dw.t.w))
+                    // 扫掠幅度不出条：旧的 380 比条半宽还大（条宽 520 → 半宽 260），
+                    // 约 47% 时间指针被 clamp 停在条外、内容不变 → 合法跳帧，会把
+                    // 「两次 paint 的间隔」拉成 ~150 ms 的假停顿（2026-11-05 已归因）
+                    let amp = (dw.t.w / 2.0 - 60.0).max(40.0);
+                    Some((dw.t.w / 2.0 + amp * (s * 1.4).sin()).clamp(0.0, dw.t.w))
                 } else {
                     None
                 };
@@ -2083,12 +2087,18 @@ pub fn run(
                     if std::env::var("MC_DOCK_LOG").is_ok() {
                         static LAST_PAINT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
                         static DTS: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
+                        static DROPPED: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
                         let prev = *LAST_PAINT.lock().unwrap();
                         *LAST_PAINT.lock().unwrap() = Some(now);
                         if let Some(pv) = prev {
                             let d = (now - pv).as_secs_f32() * 1000.0;
                             if d > 0.0 && d < 500.0 {
                                 DTS.lock().unwrap().push(d);
+                            } else if d >= 500.0 {
+                                // 静置/跳帧（paint gating）造成的长间隔单独计数：
+                                // 它们是「没变化所以没画」，不是卡顿，不该混进 max
+                                DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                         let mut v = DTS.lock().unwrap();
@@ -2098,8 +2108,9 @@ pub fn run(
                             let p50 = v[n / 2];
                             let p95 = v[n * 95 / 100];
                             let mx = v[n - 1];
+                            let dropped = DROPPED.swap(0, std::sync::atomic::Ordering::Relaxed);
                             minicard_shell::mlog!(
-                                "dock 帧间隔 p50 {p50:.1} / p95 {p95:.1} / max {mx:.1} ms（{n} 帧）绘制 {dock_paint_ms:.2} ms"
+                                "dock 帧间隔 p50 {p50:.1} / p95 {p95:.1} / max {mx:.1} ms（{n} 帧，跳帧 {dropped} 次）绘制 {dock_paint_ms:.2} ms"
                             );
                             v.clear();
                         }
