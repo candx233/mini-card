@@ -78,6 +78,8 @@ struct Args {
     gamma: f32,
     contrast: f32,
     rmode: u8,
+    /// probe 用：按浅色主题出图（验浅色阴影/字色；live 走 config 的 theme）
+    theme_light: bool,
     live: bool,
     live_topmost: bool,
     emb_off: f32,
@@ -119,6 +121,7 @@ impl Args {
             gamma: 0.0,
             contrast: 0.0,
             rmode: 0,
+            theme_light: false,
             live: false,
             live_topmost: false,
             emb_off: 0.0,
@@ -171,6 +174,7 @@ impl Args {
                 "--live" => a.live = true,
                 "--live-topmost" => a.live_topmost = true,
                 "--rmode" => a.rmode = next(&mut i).parse().unwrap_or(0),
+                "--theme-light" => a.theme_light = true,
                 "--embolden-off" => a.emb_off = next(&mut i).parse().unwrap_or(0.0),
                 "--embolden-a" => a.emb_a = next(&mut i).parse().unwrap_or(0.0),
                 "--text-dx" => a.text_dx = next(&mut i).parse().unwrap_or(0.0),
@@ -682,7 +686,8 @@ fn main() -> Result<()> {
         let mut app = Box::new(App {
             gfx,
             te,
-            pal: Palette::new(args.glass, args.debug_alpha),
+            pal: Palette::new(args.glass, args.debug_alpha)
+                .with_theme(!args.theme_light),
             tokens,
             glass_bmp,
             glass_rect,

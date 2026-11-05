@@ -388,13 +388,14 @@ fn paint_tree(
                 }
             }
             for (ox, oy, wt) in taps {
-                let a = 0.45 * wt / total;
+                // 阴影色跟主题走（深色黑 45% / 浅色白 60%），与其它 7 张卡同源
+                let a = pal.shadow.a * wt / total;
                 set_color(
                     g,
                     D2D1_COLOR_F {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
+                        r: pal.shadow.r,
+                        g: pal.shadow.g,
+                        b: pal.shadow.b,
                         a,
                     },
                 )?;

@@ -177,6 +177,18 @@ mod tests {
         assert!(p.veil.a > 0.0, "glass alpha 不能被主题改掉");
     }
 
+    /// C1（0.1.3）：文字阴影色必须跟主题走 —— 深色黑 45% / 浅色白 60%。
+    /// 以前 todo/disks 写死黑色，浅色主题下这两张卡是「黑晕」、其余七张是「白晕」。
+    #[test]
+    fn 文字阴影色跟主题走() {
+        let dark = Palette::new(30.0, false);
+        assert_eq!((dark.shadow.r, dark.shadow.g, dark.shadow.b), (0.0, 0.0, 0.0));
+        assert!((dark.shadow.a - 0.45).abs() < 1e-6);
+        let light = Palette::new(30.0, false).with_theme(false);
+        assert_eq!((light.shadow.r, light.shadow.g, light.shadow.b), (1.0, 1.0, 1.0));
+        assert!((light.shadow.a - 0.60).abs() < 1e-6);
+    }
+
     #[test]
     fn accent_mix_follows_accent() {
         let p = Palette::new(30.0, false).with_accent([255, 0, 0], true);

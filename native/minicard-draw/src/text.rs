@@ -909,24 +909,16 @@ pub fn draw_shadowed(
     h: f32,
     mode: Mode,
     color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
-    shadow_a: f32,
+    shadow: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
     sigma: f32,
     dy: f32,
     te: &TextEngine,
 ) -> Result<()> {
     use windows_numerics::Vector2;
     let lay = te.layout_spec(spec, w, h, mode)?;
-    // 老三参版本（todo / 磁盘在用）保持黑影：几何与 α 都不变，逐字节等价
-    let sh = TextShadow {
-        color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: shadow_a,
-        },
-        sigma,
-        dy,
-    };
+    // 阴影色跟主题走：深色 = 黑 45%、浅色 = 白 60%（`Palette::shadow`）。
+    // 以前这里写死黑色 → 浅色主题下待办/磁盘卡是「黑晕」，其余 7 张卡是「白晕」。
+    let sh = TextShadow { color: shadow, sigma, dy };
     draw_shadow_taps(g, &lay, x, y, &sh)?;
     crate::paint::set_color(g, color)?;
     unsafe {
