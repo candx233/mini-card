@@ -1299,13 +1299,28 @@ fn autostart_state() -> bool {
 
 // ─── 软件更新：查 Release / 自更新（实现在 update.rs）───
 
+/// 把「有新版 / 没有」写回 config：主窗是「用时建、闲时销毁」，自动检查的事件只在主窗
+/// 活着时能收到 → 落盘后在 `ensure_main` 重建主窗时补发一次（0.1.3）。
+fn persist_pending_update(info: &serde_json::Value) {
+    let has_new = info.get("has_new").and_then(|x| x.as_bool()).unwrap_or(false);
+    let latest = info.get("latest").and_then(|x| x.as_str()).unwrap_or("").to_owned();
+    let want = if has_new && !latest.is_empty() { Some(latest) } else { None };
+    let mut cfg = Config::load();
+    if cfg.settings.pending_update != want {
+        cfg.settings.pending_update = want;
+        let _ = cfg.save();
+    }
+}
+
 /// 真查一次：有新版回 has_new=true（界面 toast + 可以自己点开 url）
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<serde_json::Value, String> {
     let cur = app.package_info().version.to_string();
-    tauri::async_runtime::spawn_blocking(move || update::check(&cur))
+    let info = tauri::async_runtime::spawn_blocking(move || update::check(&cur))
         .await
-        .map_err(|e| format!("检查更新失败：{e}"))?
+        .map_err(|e| format!("检查更新失败：{e}"))??;
+    persist_pending_update(&info);
+    Ok(info)
 }
 
 /// 自更新：下载 → ed25519 验签 → sha256 校验 → 解压 → 改名替换 → 启动新版 → 本进程退出。
@@ -1316,6 +1331,14 @@ async fn update_install(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || update::install(&handle))
         .await
         .map_err(|e| format!("更新失败：{e}"))??;
+    // 更新已装好：清掉待更新标记，避免新版本第一次开主窗误报「发现新版本 v当前版本」
+    {
+        let mut cfg = Config::load();
+        if cfg.settings.pending_update.is_some() {
+            cfg.settings.pending_update = None;
+            let _ = cfg.save();
+        }
+    }
     // 替换已就位、新版已拉起 → 落盘窗口位置后退出（新版在单实例锁上等着接管）
     let h2 = app.clone();
     let _ = tauri::async_runtime::spawn_blocking(move || quit(&h2)).await;
@@ -3395,6 +3418,23 @@ fn ensure_main(app: &AppHandle) -> Option<WebviewWindow> {
     if let Err(e) = win.show() {
         mlog(&format!("ensure_main: show ERR {e}"));
     }
+    // 0.1.3：自动检查的 update_available 事件只在主窗活着时能收到（主窗闲时销毁）→
+    // 在 config 里记了待更新版本，主窗重建时补发一次（延迟 1s 等前端 listener 挂上）。
+    if let Some(latest) = cfg.settings.pending_update.clone() {
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            let cur = app2.package_info().version.to_string();
+            let payload = serde_json::json!({
+                "has_new": true,
+                "latest": latest,
+                "current": cur,
+                "can_update": false,
+                "pending": true,
+            });
+            let _ = app2.emit("update_available", payload);
+        });
+    }
     Some(win)
 }
 
@@ -3850,6 +3890,7 @@ fn main() {
                     let _ = tauri::async_runtime::block_on(async move {
                         match check_update(upd_handle.clone()).await {
                             Ok(info) => {
+                                persist_pending_update(&info);
                                 if info.get("has_new").and_then(|x| x.as_bool()).unwrap_or(false) {
                                     let _ = upd_handle.emit("update_available", info);
                                 }
