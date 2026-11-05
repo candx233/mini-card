@@ -1580,7 +1580,7 @@
     var esc2 = function (s) { return String(s).replace(/[&<>"]/g, function (ch) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]; }); };
     return '<div class="te-row">' +
       '<input class="input te-t" maxlength="80" placeholder="写点什么…" value="' + esc2(text) + '">' +
-      '<button class="icon-btn te-del" type="button" title="删除" aria-label="删除">' +
+      '<button class="icon-btn btn-del" type="button" title="删除" aria-label="删除">' +
         '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' +
       '</div>';
   }
@@ -1668,7 +1668,7 @@
       teWrap.addEventListener('click', function (e) {
         var t = e.target;
         if (!t || !t.closest) return;
-        var del = t.closest('.te-del');
+        var del = t.closest('.btn-del');
         if (del) del.closest('.te-row').remove();
       });
       var addBtn = $('#pm-todo-add');
