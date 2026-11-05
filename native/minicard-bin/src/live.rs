@@ -48,6 +48,70 @@ fn ss_factor() -> u32 {
         .clamp(1, 4)
 }
 
+/// 当前 unix 毫秒（番茄钟持久化用绝对时刻，跨进程/跨重启都对得上）
+fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 从 config 恢复番茄钟（0.1.3 持久化）：run 态按绝对结束时刻补偿；end 已过 = 「本轮完成」。
+fn pomo_from_state(st: Option<&config::PomoState>, now: Instant) -> pomo::Pomo {
+    let mut p = pomo::Pomo::new();
+    let Some(st) = st else { return p };
+    p.dur = st.dur.clamp(5, 120);
+    p.remain_ms = st.remain_ms.clamp(0.0, p.total_ms());
+    match st.mode.as_str() {
+        "run" => {
+            p.mode = pomo::PomoMode::Run;
+            let end_ms = st.end_unix_ms.unwrap_or_else(|| unix_now_ms() + p.remain_ms as i64);
+            let left = end_ms.saturating_sub(unix_now_ms()).max(0);
+            p.end_at = Some(now + Duration::from_millis(left as u64));
+        }
+        "paused" => p.mode = pomo::PomoMode::Paused,
+        "done" => {
+            p.mode = pomo::PomoMode::Done;
+            p.remain_ms = 0.0;
+            p.end_at = None;
+        }
+        _ => {
+            p.mode = pomo::PomoMode::Set;
+            p.remain_ms = p.total_ms();
+            p.end_at = None;
+        }
+    }
+    // 直接落成当前 mm:ss，避免重建后第一帧显示默认的 25:00
+    p.shown = p.mmss(now);
+    p
+}
+
+/// 把番茄钟写回 config（每次用户动作后调用；run 态存绝对结束时刻）。
+fn save_pomo(p: &pomo::Pomo) {
+    let now = Instant::now();
+    let mode = match p.mode {
+        pomo::PomoMode::Set => "set",
+        pomo::PomoMode::Run => "run",
+        pomo::PomoMode::Paused => "paused",
+        pomo::PomoMode::Done => "done",
+    };
+    let end_unix_ms = if matches!(p.mode, pomo::PomoMode::Run) {
+        p.end_at.map(|e| unix_now_ms() + (e - now).as_millis() as i64)
+    } else {
+        None
+    };
+    let mut cfg = Config::load();
+    cfg.pomodoro = Some(config::PomoState {
+        mode: mode.to_owned(),
+        dur: p.dur,
+        remain_ms: p.remain(now),
+        end_unix_ms,
+    });
+    if let Err(e) = cfg.save() {
+        minicard_shell::mlog!("番茄钟状态落盘失败: {e}");
+    }
+}
+
 
 /// 窗口线程只往里塞事件，动作在主循环里做（这样能正常借用 wins/cfg，不用满地 static mut）
 enum UiEvent {
@@ -59,6 +123,8 @@ enum UiEvent {
     DockDrop { x: f32 },
     /// Dock 右键（窗内坐标 + 屏幕坐标：TrackPopupMenu 要屏幕点）
     DockMenu { x: f32, y: f32, sx: i32, sy: i32 },
+    /// 显示器增删 / DPI 变化（WM_DISPLAYCHANGE / WM_DPICHANGED）：0.1.3 保底重采样
+    DisplayChanged,
 }
 
 static EVENTS: Mutex<Vec<UiEvent>> = Mutex::new(Vec::new());
@@ -949,7 +1015,7 @@ pub fn run(
                     State::Clock(c)
                 }
                 CardKind::NetRate => State::Net(net::NetState::new(0.0, 0.0, now)),
-                CardKind::Pomodoro => State::Pomo(pomo::Pomo::new()),
+                CardKind::Pomodoro => State::Pomo(pomo_from_state(cfg.pomodoro.as_ref(), now)),
                 CardKind::Todo => State::Todo(todo_items(&card.todo)),
                 CardKind::Weather => State::Weather {
                     // 初值就取当前快照的 at：首次绘制之后只有「换了一版」才触发额外重绘
@@ -1176,6 +1242,10 @@ pub fn run(
             let mut dock_need_rebuild = false;
             for ev in events {
                 match ev {
+                    UiEvent::DisplayChanged => {
+                        // 屏/DPI 变了：按当前窗口 DPI 重采样 + 重切玻璃 + 夹回工作区
+                        handle_display_changed(&mut wins, dock_win.as_mut(), &cfg, &wall, blur);
+                    }
                     UiEvent::Click { hwnd, x, y } => {
                         click(&mut wins, &mut cfg, &te, &pal, HWND(hwnd as *mut _), x, y);
                     }
@@ -2483,6 +2553,8 @@ fn click(
                         _ => {}
                     },
                 }
+                // 0.1.3：状态变化即时落盘（重启/电脑重启后计时不丢）
+                save_pomo(p);
             }
         }
         State::Calendar(c, off, built_day) => {
@@ -2610,6 +2682,104 @@ fn reslice(win: &mut CardWin, wall: &Option<glass::Wall>, blur: f32) {
             win.glass_off = (0.0, 0.0);
         }
         Err(e) => minicard_shell::mlog!("重切玻璃失败: {e:?}"),
+    }
+}
+
+/// 把窗口左上角夹进工作区（物理 px）。显示器被拔掉 / 改主屏后窗口可能整个落在屏外。
+fn clamp_pos(pos: (i32, i32), size: (i32, i32), work: crate::guide::R4) -> (i32, i32) {
+    let max_x = (work.2 - size.0).max(work.0);
+    let max_y = (work.3 - size.1).max(work.1);
+    (pos.0.clamp(work.0, max_x), pos.1.clamp(work.1, max_y))
+}
+
+/// 显示器增删 / DPI 变化后的保底处理（0.1.3）：
+/// 逐卡按「当前窗口 DPI」重设物理尺寸 → 重建 Gfx（swapchain 跟 DPI 走）→ 重切玻璃 →
+/// 位置夹回可见工作区；Dock 按 config 重建一次。逐像素重排留给后续版本，这里只保证不跑丢/不错位。
+fn handle_display_changed(
+    wins: &mut [CardWin],
+    dock_win: Option<&mut DockWin>,
+    cfg: &Config,
+    wall: &Option<glass::Wall>,
+    blur: f32,
+) {
+    // 每个窗口都会收到一次 WM_DPICHANGED / WM_DISPLAYCHANGE → 合并成一次处理
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut g = LAST.lock().unwrap();
+        let now = Instant::now();
+        if let Some(t) = *g {
+            if now.duration_since(t) < Duration::from_millis(300) {
+                return;
+            }
+        }
+        *g = Some(now);
+    }
+    for win in wins.iter_mut() {
+        let new_dpi = win_dpi(win.hwnd);
+        if new_dpi > 0.0 && (new_dpi - win.dpi).abs() > 0.01 {
+            win.dpi = new_dpi;
+            let s = new_dpi / 96.0;
+            let (w_px, h_px) = ((win.w * s).round() as i32, (win.h * s).round() as i32);
+            // 换尺寸必须先断开旧合成（同一 HWND 再 CreateTargetForHwnd 会报 WINDOW_ALREADY_COMPOSED）
+            if let Some(old) = win.gfx.take() {
+                old.detach();
+            }
+            unsafe {
+                let _ = SetWindowPos(
+                    win.hwnd,
+                    None,
+                    0,
+                    0,
+                    w_px,
+                    h_px,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            match Gfx::new_scaled(
+                win.hwnd,
+                w_px as u32,
+                h_px as u32,
+                new_dpi,
+                radius_of(win.kind, win.w, win.h),
+                ss_factor(),
+            ) {
+                Ok(g) => win.gfx = Some(g),
+                Err(e) => minicard_shell::mlog!("DPI 变化后重建 Gfx 失败: {e:?}"),
+            }
+            minicard_shell::mlog!("卡 {:?} DPI → {new_dpi}，窗口 {w_px}×{h_px}", win.kind);
+        }
+        if let Some(work) = work_area(win.hwnd) {
+            let mut r = RECT::default();
+            if unsafe { GetWindowRect(win.hwnd, &mut r) }.is_ok() {
+                let (w, h) = (r.right - r.left, r.bottom - r.top);
+                let (nx, ny) = clamp_pos((r.left, r.top), (w, h), work);
+                if nx != r.left || ny != r.top {
+                    unsafe {
+                        let _ = SetWindowPos(
+                            win.hwnd,
+                            None,
+                            nx,
+                            ny,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                    }
+                    minicard_shell::mlog!("卡 {:?} 跑出工作区 → 夹回 ({nx},{ny})", win.kind);
+                }
+            }
+        }
+        reslice(win, wall, blur);
+        win.next_draw = Instant::now();
+    }
+    if let Some(dw) = dock_win {
+        let new_dpi = win_dpi(dw.hwnd);
+        if new_dpi > 0.0 {
+            dw.dpi = new_dpi;
+        }
+        if let Err(e) = dock_rebuild(dw, cfg, wall, blur) {
+            minicard_shell::mlog!("显示器变化后 Dock 重建失败: {e:?}");
+        }
     }
 }
 
@@ -3007,6 +3177,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             PostQuitMessage(0);
             LRESULT(0)
         }
+        // 显示器增删 / 每显示器 DPI 变化：只入队，真正的重采样在主循环做（能借用 wins/cfg）
+        WM_DPICHANGED | WM_DISPLAYCHANGE => {
+            let _ = EVENTS.lock().unwrap().push(UiEvent::DisplayChanged);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_KEYDOWN if wp.0 == 0x1B => {
             PostQuitMessage(0);
             LRESULT(0)
@@ -3050,6 +3225,63 @@ pub fn start(font: &std::path::Path, blur: f32, topmost: bool, exit_after: Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0.1.3：显示器增删 / DPI 变化后，窗口位置必须夹回可见工作区（不跑丢）
+    #[test]
+    fn 显示器变化后窗口夹回工作区() {
+        use crate::guide::R4;
+        let work: R4 = (0, 0, 1920, 1040);
+        // 完全在右侧屏外 → 贴右缘
+        assert_eq!(clamp_pos((2500, 300), (240, 120), work), (1680, 300));
+        // 负坐标（副屏被拔掉）→ 贴左/上缘
+        assert_eq!(clamp_pos((-500, -200), (240, 120), work), (0, 0));
+        // 正常位置不动
+        assert_eq!(clamp_pos((100, 100), (240, 120), work), (100, 100));
+        // 比工作区还大的窗口：对齐左上（不产生小于 min 的值）
+        assert_eq!(clamp_pos((500, 500), (3000, 2000), work), (0, 0));
+    }
+
+    /// 0.1.3 番茄钟持久化：run 态按绝对结束时刻补偿；paused 保剩余；end 已过 = 完成
+    #[test]
+    fn pomo_restore_from_config() {
+        let now = Instant::now();
+        let running = config::PomoState {
+            mode: "run".into(),
+            dur: 25,
+            remain_ms: 25.0 * 60000.0,
+            end_unix_ms: Some(unix_now_ms() + 120_000),
+        };
+        let p = pomo_from_state(Some(&running), now);
+        assert_eq!(p.mode, pomo::PomoMode::Run);
+        assert!((p.remain(now) - 120_000.0).abs() < 1_500.0, "remain = {}", p.remain(now));
+        assert_eq!(p.mmss(now), [0, 2, 0, 0], "恢复后应立刻是 02:00 那一档，不是默认 25:00");
+
+        let paused = config::PomoState {
+            mode: "paused".into(),
+            dur: 30,
+            remain_ms: 42_000.0,
+            end_unix_ms: None,
+        };
+        let p2 = pomo_from_state(Some(&paused), now);
+        assert_eq!(p2.mode, pomo::PomoMode::Paused);
+        assert_eq!(p2.total_ms(), 30.0 * 60000.0);
+        assert!((p2.remain(now) - 42_000.0).abs() < 1.0);
+
+        // end 已过：仍记 run，但有效模式是「本轮完成」
+        let expired = config::PomoState {
+            mode: "run".into(),
+            dur: 25,
+            remain_ms: 0.0,
+            end_unix_ms: Some(unix_now_ms() - 1_000),
+        };
+        let p3 = pomo_from_state(Some(&expired), now);
+        assert_eq!(p3.eff_mode(now), pomo::PomoMode::Done);
+
+        // 没有持久化字段 = 全新状态
+        let fresh = pomo_from_state(None, now);
+        assert_eq!(fresh.mode, pomo::PomoMode::Set);
+        assert_eq!(fresh.dur, 25);
+    }
 
     #[test]
     fn short_animations_run_at_200hz_continuous_ones_stay_60hz() {

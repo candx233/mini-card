@@ -151,6 +151,22 @@ impl Default for DockItem {
     }
 }
 
+/// 番茄钟持久化状态（0.1.3）。
+///
+/// `run` 态以 `end_unix_ms` 为准（绝对时刻，跨进程/跨重启都对得上）；`paused/set/done`
+/// 用 `remain_ms`。恢复时如果在 run 且 end 已过 → 直接是「本轮完成」。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PomoState {
+    /// "set" | "run" | "paused" | "done"
+    pub mode: String,
+    /// 设定的分钟数（5..120）
+    pub dur: u8,
+    /// 暂停 / 设定态的剩余毫秒
+    pub remain_ms: f64,
+    /// run 态的绝对结束时刻（unix 毫秒）
+    pub end_unix_ms: Option<i64>,
+}
+
 /// Dock 配置（单例）。
 /// `cx`/`y` 是逻辑像素下的窗口位置：`cx` = 窗口**中心 x**（宽随图标数变化，按中心回推左上角，
 /// 免得整条漂移），`y` = 上边缘。-1 = 未设置 → 建窗时按「主屏底部居中、距底边 8px」自动落位并写回。
@@ -500,6 +516,10 @@ pub struct Settings {
     pub accent: [u8; 3],
     /// 设置页「软件更新 → 自动检查」：启动后自动查一次 GitHub Release
     pub update_auto: bool,
+    /// 已知可用版本（0.1.3 起落盘）：主窗「用时建、闲时销毁」，事件只在主窗活着时能收到 →
+    /// 把「有新版」写进 config，主窗下次重建时再提示一次。None = 没有待更新。
+    #[serde(default)]
+    pub pending_update: Option<String>,
     /// 拖动时磁吸 + 出对齐辅助线（关掉就是完全自由摆放）
     #[serde(default = "yes")]
     pub snap_on_drag: bool,
@@ -535,6 +555,7 @@ impl Default for Settings {
             theme: Theme::Dark,
             accent: [76, 154, 255],
             update_auto: true,
+            pending_update: None,
             weather_city: String::new(),
             weather_lat: None,
             weather_lon: None,
@@ -550,6 +571,9 @@ pub struct Config {
     pub settings: Settings,
     /// Dock（玻璃启动栏，0.1.2）：单例，enabled=false 时窗口不建
     pub dock: Dock,
+    /// 番茄钟状态（0.1.3 起持久化）：native 卡进程重启 / 电脑重启后计时与剩余时间不丢
+    #[serde(default)]
+    pub pomodoro: Option<PomoState>,
     /// 主页面 [x, y, w, h]
     pub main_window: [f32; 4],
     /// 主窗落盘时是否处于最大化。
@@ -646,6 +670,7 @@ impl Default for Config {
             ],
             settings: Settings::default(),
             dock: Dock::default(),
+            pomodoro: None,
             main_window: [520.0, 250.0, MAIN_W, MAIN_H],
             main_maxed: false,
             size_version: SIZE_VERSION,
