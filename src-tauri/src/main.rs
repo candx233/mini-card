@@ -979,6 +979,54 @@ async fn weather_set_place(
 /// 卡片当前是否显示（热键是运行时开关，不改 config 的 enabled）
 struct CardVis(AtomicBool);
 
+/// 原生自绘卡 / Dock 的显隐：它们全在 `minicard-bin` 子进程里画（0.1.2 起），
+/// 不走 Tauri 的 `get_webview_window`，所以热键必须单独按「子进程 pid + 窗口类名」枚举。
+/// 类名是本仓库自己的 `MiniCardNativeLive`（卡片与 Dock 共用，见 native/minicard-bin/src/live.rs），
+/// 比标题之类的隐式契约稳。
+fn toggle_native_card_windows(hide: bool) {
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible, ShowWindow, SW_HIDE,
+        SW_SHOWNOACTIVATE,
+    };
+
+    struct Ctx {
+        pid: u32,
+        hide: bool,
+    }
+
+    unsafe extern "system" fn cb(hwnd: HWND, lp: LPARAM) -> BOOL {
+        let ctx = &*(lp as *const Ctx);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != ctx.pid {
+            return 1;
+        }
+        let mut buf = [0u16; 64];
+        let n = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if n <= 0 || String::from_utf16_lossy(&buf[..n as usize]) != "MiniCardNativeLive" {
+            return 1;
+        }
+        let visible = IsWindowVisible(hwnd) != 0;
+        if ctx.hide && visible {
+            ShowWindow(hwnd, SW_HIDE);
+        } else if !ctx.hide && !visible {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        1
+    }
+
+    let pid = match NATIVE_CHILD.lock().unwrap().as_ref() {
+        Some(c) => c.id(),
+        None => return,
+    };
+    let ctx = Ctx { pid, hide };
+    unsafe {
+        EnumWindows(Some(cb), &ctx as *const Ctx as LPARAM);
+    }
+}
+
 fn toggle_cards(app: &AppHandle) {
     let vis = app.state::<CardVis>();
     let visible = vis.0.load(Ordering::SeqCst);
@@ -992,6 +1040,8 @@ fn toggle_cards(app: &AppHandle) {
             }
         }
     }
+    // 原生自绘卡 + Dock（在子进程里画）也跟热键一起显隐
+    toggle_native_card_windows(visible);
     // Dock 跟着一起显隐（dock-plan §4：热键一按，卡片 + Dock 一起消失）
     if cfg.dock.enabled {
         if let Some(w) = app.get_webview_window(dock_label()) {
