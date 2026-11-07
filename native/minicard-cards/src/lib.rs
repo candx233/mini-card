@@ -7,6 +7,7 @@ pub mod dock;
 pub mod lunar;
 pub mod music;
 pub mod net;
+pub mod notify;
 pub mod perf;
 pub mod pomo;
 pub mod roll;
