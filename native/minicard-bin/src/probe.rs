@@ -50,14 +50,23 @@ pub fn notify_sheet(
         mk(1004, "微信", "WeChat!App", "文件传输助手", "周报模板.docx", 12 * 60_000, false),
         mk(1003, "QQ", "QQ!App", "设计组", "新卡片稿发群里了，看下", 28 * 60_000, false),
     ];
-    let snap = NotifySnapshot {
+    let mut snap = NotifySnapshot {
         access: NotifyAccess::Allowed,
         items,
         at_ms: now_ms,
     };
+    // D3/D5 取证：MC_NOTIFY_STATE=empty|auth|unavailable|disabled 画四态，默认 normal
+    let state = std::env::var("MC_NOTIFY_STATE").unwrap_or_default();
+    match state.as_str() {
+        "empty" => snap.items.clear(),
+        "auth" => snap.access = NotifyAccess::Denied,
+        "unavailable" => snap.access = NotifyAccess::Unavailable,
+        _ => {}
+    }
     let t = Tokens::notify(240.0, 180.0);
     if debug_layout {
-        let tree = notify::tree_hook(&t, Some(&snap), now_ms);
+        let snap_opt = if state == "disabled" { None } else { Some(&snap) };
+        let tree = notify::tree_hook(&t, snap_opt, now_ms);
         let mut m: &TextEngine = te;
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
         notify::dump_layout(&placed, 0);
@@ -66,7 +75,11 @@ pub fn notify_sheet(
             t.r, t.pad_t, t.pad_r, t.pad_b, t.pad_l, t.header_lh, t.group_gh, t.item_h, t.body_fs
         );
     }
-    notify::paint(g, te, pal, &t, Some(&snap), now_ms, None)
+    if state == "disabled" {
+        notify::paint(g, te, pal, &t, None, now_ms, None)
+    } else {
+        notify::paint(g, te, pal, &t, Some(&snap), now_ms, None)
+    }
 }
 
 pub fn shapes(g: &Gfx, te: &TextEngine, w: f32, h: f32) -> Result<()> {

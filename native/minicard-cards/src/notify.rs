@@ -905,8 +905,9 @@ pub fn tree_hook(t: &Tokens, snap: Option<&NotifySnapshot>, now_ms: u64) -> Node
 
 pub fn dump_layout(p: &Placed, depth: usize) {
     let pad = " ".repeat(depth * 2);
+    // 隐私：通知正文不进日志；这里只打长度，够对节点几何即可
     let role = if let Some(s) = p.text() {
-        format!("text {:?}", s.s)
+        format!("text len={}", s.s.chars().count())
     } else {
         "box".to_string()
     };

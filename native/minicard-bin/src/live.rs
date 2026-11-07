@@ -3804,4 +3804,25 @@ mod gfx_tests {
             let _ = DestroyWindow(hwnd);
         }
     }
+
+    /// D5：只有「总开关开 + 至少一张启用中的通知卡」才允许轮询通知。
+    #[test]
+    fn notify_wanted_requires_switch_and_enabled_card() {
+        let mut cfg = Config::default();
+        cfg.cards.clear();
+        cfg.settings.notify_card = true;
+        assert!(!notify_wanted(&cfg), "没有通知卡时不应轮询");
+
+        let mut card = config::CardInstance::default();
+        card.kind = CardKind::Notify;
+        card.enabled = true;
+        cfg.cards.push(card);
+        assert!(notify_wanted(&cfg));
+
+        cfg.cards[0].enabled = false;
+        assert!(!notify_wanted(&cfg), "卡片在桌面关掉时不应轮询");
+        cfg.cards[0].enabled = true;
+        cfg.settings.notify_card = false;
+        assert!(!notify_wanted(&cfg), "总开关关掉时不应轮询");
+    }
 }

@@ -781,7 +781,7 @@ impl Config {
 mod tests {
     use super::*;
 
-    fn kinds() -> [CardKind; 9] {
+    fn kinds() -> [CardKind; 10] {
         [
             CardKind::Performance,
             CardKind::Disks,
@@ -792,7 +792,19 @@ mod tests {
             CardKind::Music,
             CardKind::Calendar,
             CardKind::Todo,
+            CardKind::Notify,
         ]
+    }
+
+    /// 通知卡全局开关默认关（0.1.3 D5）：老 config 缺字段也不能把通知读起来。
+    #[test]
+    fn notify_card_defaults_off() {
+        let s = Settings::default();
+        assert!(!s.notify_card);
+        assert!(!s.notify_privacy_ack);
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.settings.notify_card);
+        assert!(!cfg.settings.notify_privacy_ack);
     }
 
     /// 固定尺寸合法：每张卡的格数在 1..8、尺寸在整格上，且 size_cells 与 default_size 一致
