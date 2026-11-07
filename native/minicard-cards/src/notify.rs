@@ -257,6 +257,9 @@ pub fn paint(
     let tree = tree(t, snap, state, &groups, now_ms);
     let mut m: &TextEngine = te;
     let placed = layout(&tree, (t.w, t.h), &mut m);
+    let hover_item = g
+        .hover
+        .and_then(|(mx, my)| hovered_item(&placed, mx, my));
 
     unsafe {
         g.begin()?;
@@ -298,7 +301,7 @@ pub fn paint(
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
-        paint_tree(g, te, pal, t, snap, &groups, &placed)?;
+        paint_tree(g, te, pal, t, snap, &groups, &placed, hover_item)?;
         g.pop_clip();
         g.end()?;
         Ok(())
@@ -500,6 +503,20 @@ fn tree(
                     Node::new(Dir::Row)
                         .id(iid + 2)
                         .style(|s| s.grow(1.0).size(Dim::Auto, Dim::Px(t.item_h))),
+                )
+                .child(
+                    Node::text(TextSpec {
+                        s: "×".into(),
+                        size: 0.625 * t.r,
+                        line_h: t.item_h,
+                        weight: 400,
+                        wrap: false,
+                        align: 2,
+                        tabular: false,
+                        spacing_em: 0.0,
+                    })
+                    .id(iid + 3)
+                    .style(move |s| s.size(Dim::Px(0.875 * t.r), Dim::Px(t.item_h))),
                 );
             group_col = group_col.child(row);
         }
@@ -518,6 +535,7 @@ fn paint_tree(
     snap: &NotifySnapshot,
     groups: &[VisibleGroup],
     pl: &Placed,
+    hover_item: Option<(usize, usize)>,
 ) -> Result<()> {
     // 组头：应用块 / 药丸
     if let Some(gidx) = group_of(pl.id) {
@@ -541,7 +559,7 @@ fn paint_tree(
         }
     }
 
-    // 条目：hover 底 / 未读点 / 文本行
+    // 条目：hover 底 / 未读点 / 文本行 / 删除
     if let Some((gidx, iidx)) = item_of(pl.id) {
         let vg = groups.get(gidx);
         let item = vg
@@ -550,12 +568,9 @@ fn paint_tree(
         let off = pl.id - id_item(gidx, iidx);
         match off {
             0 => {
-                if let Some((mx, my)) = g.hover {
-                    let r = pl.rect;
-                    if mx >= r.x && my >= r.y && mx < r.x + r.w && my < r.y + r.h {
-                        set_color(g, pal.fg_soft)?;
-                        fill_round(g, rect(pl), 0.375 * t.r)?;
-                    }
+                if hover_item == Some((gidx, iidx)) {
+                    set_color(g, pal.fg_soft)?;
+                    fill_round(g, rect(pl), 0.375 * t.r)?;
                 }
             }
             1 => {
@@ -568,6 +583,28 @@ fn paint_tree(
             2 => {
                 if let Some(item) = item {
                     paint_item_line(g, te, pal, t, pl, item)?;
+                }
+                return Ok(());
+            }
+            3 => {
+                // ×：只在悬停到这一行时出现（默认态保持 03 稿的干净观感）
+                if hover_item == Some((gidx, iidx)) {
+                    if let Some(spec) = pl.text() {
+                        draw_shadowed(
+                            g,
+                            spec,
+                            pl.rect.x,
+                            pl.rect.y,
+                            pl.rect.w,
+                            spec.line_h + 6.0,
+                            TextMode::Clip,
+                            pal.muted,
+                            pal.shadow,
+                            0.8335,
+                            0.833,
+                            te,
+                        )?;
+                    }
                 }
                 return Ok(());
             }
@@ -608,9 +645,27 @@ fn paint_tree(
     }
 
     for c in &pl.children {
-        paint_tree(g, te, pal, t, snap, groups, c)?;
+        paint_tree(g, te, pal, t, snap, groups, c, hover_item)?;
     }
     Ok(())
+}
+
+/// 鼠标落在哪一条的整行上（hover 底与 × 用同一份几何，避免各算各的漂移）。
+fn hovered_item(p: &Placed, x: f32, y: f32) -> Option<(usize, usize)> {
+    if let Some((g, i)) = item_of(p.id) {
+        if p.id == id_item(g, i) {
+            let r = p.rect;
+            if x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h {
+                return Some((g, i));
+            }
+        }
+    }
+    for c in &p.children {
+        if let Some(hit) = hovered_item(c, x, y) {
+            return Some(hit);
+        }
+    }
+    None
 }
 
 fn rect(pl: &Placed) -> D2D_RECT_F {
@@ -789,10 +844,11 @@ fn color(r: f32, g: f32, b: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a: 1.0 }
 }
 
-/// 命中（D4 用）：条目 / 授权引导。
+/// 命中（D4 用）：条目 / 删除 / 授权引导。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
     Item { id: u32, aumid: String },
+    Remove { id: u32 },
     Authorize,
 }
 
@@ -819,6 +875,9 @@ pub fn hit_at(
     let (g, i) = item_of(id)?;
     let item_idx = groups.get(g)?.items.get(i).copied()?;
     let item = snap.items.get(item_idx)?;
+    if id - id_item(g, i) == 3 {
+        return Some(Hit::Remove { id: item.id });
+    }
     Some(Hit::Item {
         id: item.id,
         aumid: item.aumid.clone(),
@@ -975,6 +1034,7 @@ mod tests {
         }
         let mut rows = 0;
         let mut groups = 0;
+        let mut removes = 0;
         let mut line_widths: Vec<f32> = Vec::new();
         walk(&pl, &mut |p: &Placed| {
             if let Some((g, i)) = item_of(p.id) {
@@ -995,6 +1055,8 @@ mod tests {
                         "正文行越界：{:?}",
                         p.rect
                     );
+                } else if p.id == id_item(g, i) + 3 {
+                    removes += 1;
                 }
             }
             if let Some(g) = group_of(p.id) {
@@ -1005,10 +1067,58 @@ mod tests {
         });
         assert_eq!(groups, 3);
         assert_eq!(rows, 4);
+        assert_eq!(removes, 4, "每条都要有删除命中区");
         assert_eq!(line_widths.len(), 4);
         assert!(
             line_widths.iter().all(|w| *w > 100.0),
             "正文行应撑满剩余宽度：{line_widths:?}"
+        );
+    }
+
+    #[test]
+    fn hit_maps_row_and_remove_x() {
+        let t = Tokens::notify(240.0, 180.0);
+        let snap = NotifySnapshot {
+            access: NotifyAccess::Allowed,
+            items: sample(),
+            at_ms: 1,
+        };
+        let node = tree_hook(&t, &snap, 8000);
+        let mut fake = Fake;
+        let pl = layout(&node, (t.w, t.h), &mut fake);
+
+        fn find(p: &Placed, id: u32) -> Option<minicard_draw::layout::Rect> {
+            if p.id == id {
+                return Some(p.rect);
+            }
+            for c in &p.children {
+                if let Some(r) = find(c, id) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+
+        let row = find(&pl, id_item(0, 0)).unwrap();
+        let remove = find(&pl, id_item(0, 0) + 3).unwrap();
+        let mut m1 = Fake;
+        assert_eq!(
+            hit_at(&mut m1, &t, &snap, row.x + 20.0, row.y + row.h / 2.0),
+            Some(Hit::Item {
+                id: 6,
+                aumid: "wechat".into()
+            })
+        );
+        let mut m2 = Fake;
+        assert_eq!(
+            hit_at(
+                &mut m2,
+                &t,
+                &snap,
+                remove.x + remove.w / 2.0,
+                remove.y + remove.h / 2.0
+            ),
+            Some(Hit::Remove { id: 6 })
         );
     }
 }

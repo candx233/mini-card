@@ -2656,6 +2656,38 @@ fn click(
                 });
             }
         }
+        State::Notify => {
+            let snap = notify_service().snapshot();
+            let tk = notify_card::Tokens::notify(win.w, win.h);
+            let mut m: &TextEngine = te;
+            if let Some(h) = notify_card::hit_at(&mut m, &tk, &snap, x, y) {
+                match h {
+                    notify_card::Hit::Item { id, aumid } => {
+                        notify_service().mark_read(id);
+                        // shell:AppsFolder\<AUMID> 打开/切回发送方；ShellExecuteW 会阻塞到进程起来，
+                        // 不能占九卡共用的消息循环。
+                        let target = format!("shell:AppsFolder\\{aumid}");
+                        if !aumid.trim().is_empty() {
+                            std::thread::spawn(move || {
+                                if let Err(e) = crate::appwin::launch(&target, "") {
+                                    minicard_shell::mlog!("通知打开发送方失败: {e}");
+                                }
+                            });
+                        }
+                    }
+                    notify_card::Hit::Remove { id } => notify_service().remove(id),
+                    notify_card::Hit::Authorize => {
+                        std::thread::spawn(|| {
+                            if let Err(e) =
+                                crate::appwin::launch("ms-settings:privacy-notifications", "")
+                            {
+                                minicard_shell::mlog!("打开通知设置失败: {e}");
+                            }
+                        });
+                    }
+                }
+            }
+        }
         _ => {}
     }
     // 立刻重绘一次（别等下一个节拍）
