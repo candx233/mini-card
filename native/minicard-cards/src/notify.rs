@@ -30,6 +30,8 @@ pub enum CardState {
     Empty,
     Unauthorized,
     Unavailable,
+    /// 全局开关关闭（settings.notify_card=false）：卡片保留，但不读通知
+    Disabled,
 }
 
 pub fn card_state(access: NotifyAccess, item_count: usize) -> CardState {
@@ -41,12 +43,20 @@ pub fn card_state(access: NotifyAccess, item_count: usize) -> CardState {
     }
 }
 
+fn display_state(snap: Option<&NotifySnapshot>) -> CardState {
+    match snap {
+        Some(s) => card_state(s.access, s.items.len()),
+        None => CardState::Disabled,
+    }
+}
+
 pub fn state_texts(state: CardState) -> (&'static str, &'static str) {
     match state {
         CardState::Normal => ("", ""),
         CardState::Empty => ("最近没有新通知", ""),
         CardState::Unauthorized => ("需要授权读取通知", "点此打开设置"),
         CardState::Unavailable => ("通知读取暂不可用", "稍后自动重试"),
+        CardState::Disabled => ("通知卡未启用", "在设置中开启"),
     }
 }
 
@@ -244,15 +254,14 @@ pub fn paint(
     te: &TextEngine,
     pal: &Palette,
     t: &Tokens,
-    snap: &NotifySnapshot,
+    snap: Option<&NotifySnapshot>,
     now_ms: u64,
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
 ) -> Result<()> {
-    let state = card_state(snap.access, snap.items.len());
-    let groups = if state == CardState::Normal {
-        group_items(&snap.items, MAX_GROUPS, MAX_ROWS)
-    } else {
-        Vec::new()
+    let state = display_state(snap);
+    let groups = match (state, snap) {
+        (CardState::Normal, Some(s)) => group_items(&s.items, MAX_GROUPS, MAX_ROWS),
+        _ => Vec::new(),
     };
     let tree = tree(t, snap, state, &groups, now_ms);
     let mut m: &TextEngine = te;
@@ -358,7 +367,7 @@ fn text_node_aligned(s: &str, size: f32, lh: f32, weight: u16, id: u32, align: u
 
 fn tree(
     t: &Tokens,
-    snap: &NotifySnapshot,
+    snap: Option<&NotifySnapshot>,
     state: CardState,
     groups: &[VisibleGroup],
     now_ms: u64,
@@ -381,7 +390,7 @@ fn tree(
         );
 
     let header = if state == CardState::Normal {
-        let unread = snap.unread_count();
+        let unread = snap.map(|s| s.unread_count()).unwrap_or(0);
         let text = if unread > 0 {
             format!("{unread} 条未读")
         } else {
@@ -532,7 +541,7 @@ fn paint_tree(
     te: &TextEngine,
     pal: &Palette,
     t: &Tokens,
-    snap: &NotifySnapshot,
+    snap: Option<&NotifySnapshot>,
     groups: &[VisibleGroup],
     pl: &Placed,
     hover_item: Option<(usize, usize)>,
@@ -564,7 +573,7 @@ fn paint_tree(
         let vg = groups.get(gidx);
         let item = vg
             .and_then(|vg| vg.items.get(iidx))
-            .and_then(|&idx| snap.items.get(idx));
+            .and_then(|&idx| snap.and_then(|s| s.items.get(idx)));
         let off = pl.id - id_item(gidx, iidx);
         match off {
             0 => {
@@ -855,10 +864,11 @@ pub enum Hit {
 pub fn hit_at(
     m: &mut dyn Measurer,
     t: &Tokens,
-    snap: &NotifySnapshot,
+    snap: Option<&NotifySnapshot>,
     x: f32,
     y: f32,
 ) -> Option<Hit> {
+    let snap = snap?;
     let state = card_state(snap.access, snap.items.len());
     let groups = if state == CardState::Normal {
         group_items(&snap.items, MAX_GROUPS, MAX_ROWS)
@@ -866,7 +876,7 @@ pub fn hit_at(
         Vec::new()
     };
     let now_ms = 0; // 命中与时间文案无关
-    let tr = tree(t, snap, state, &groups, now_ms);
+    let tr = tree(t, Some(snap), state, &groups, now_ms);
     let pl = layout(&tr, (t.w, t.h), m);
     let id = minicard_draw::layout::hit_id(&pl, x, y)?;
     if state == CardState::Unauthorized && (id == ID_STATE || id == ID_HINT) {
@@ -884,12 +894,11 @@ pub fn hit_at(
     })
 }
 
-pub fn tree_hook(t: &Tokens, snap: &NotifySnapshot, now_ms: u64) -> Node {
-    let state = card_state(snap.access, snap.items.len());
-    let groups = if state == CardState::Normal {
-        group_items(&snap.items, MAX_GROUPS, MAX_ROWS)
-    } else {
-        Vec::new()
+pub fn tree_hook(t: &Tokens, snap: Option<&NotifySnapshot>, now_ms: u64) -> Node {
+    let state = display_state(snap);
+    let groups = match (state, snap) {
+        (CardState::Normal, Some(s)) => group_items(&s.items, MAX_GROUPS, MAX_ROWS),
+        _ => Vec::new(),
     };
     tree(t, snap, state, &groups, now_ms)
 }
@@ -973,6 +982,8 @@ mod tests {
         assert_eq!(state_texts(CardState::Empty).0, "最近没有新通知");
         assert_eq!(state_texts(CardState::Unauthorized).0, "需要授权读取通知");
         assert_eq!(state_texts(CardState::Unavailable).0, "通知读取暂不可用");
+        assert_eq!(display_state(None), CardState::Disabled);
+        assert_eq!(state_texts(CardState::Disabled).0, "通知卡未启用");
     }
 
     #[test]
@@ -1020,7 +1031,7 @@ mod tests {
             items,
             at_ms: 1,
         };
-        let node = tree_hook(&t, &snap, 8000);
+        let node = tree_hook(&t, Some(&snap), 8000);
         let mut fake = Fake;
         let pl = layout(&node, (t.w, t.h), &mut fake);
         assert!((pl.rect.w - 240.0).abs() < 0.01);
@@ -1083,7 +1094,7 @@ mod tests {
             items: sample(),
             at_ms: 1,
         };
-        let node = tree_hook(&t, &snap, 8000);
+        let node = tree_hook(&t, Some(&snap), 8000);
         let mut fake = Fake;
         let pl = layout(&node, (t.w, t.h), &mut fake);
 
@@ -1103,7 +1114,7 @@ mod tests {
         let remove = find(&pl, id_item(0, 0) + 3).unwrap();
         let mut m1 = Fake;
         assert_eq!(
-            hit_at(&mut m1, &t, &snap, row.x + 20.0, row.y + row.h / 2.0),
+            hit_at(&mut m1, &t, Some(&snap), row.x + 20.0, row.y + row.h / 2.0),
             Some(Hit::Item {
                 id: 6,
                 aumid: "wechat".into()
@@ -1114,7 +1125,7 @@ mod tests {
             hit_at(
                 &mut m2,
                 &t,
-                &snap,
+                Some(&snap),
                 remove.x + remove.w / 2.0,
                 remove.y + remove.h / 2.0
             ),

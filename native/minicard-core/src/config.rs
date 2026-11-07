@@ -520,6 +520,13 @@ pub struct Settings {
     pub accent: [u8; 3],
     /// 设置页「软件更新 → 自动检查」：启动后自动查一次 GitHub Release
     pub update_auto: bool,
+    /// 通知卡总开关（0.1.3）：默认关；打开后通知卡才读 Windows 通知。
+    /// 关掉时绘制进程会停掉 NotifyService，卡面显示「通知卡未启用」。
+    #[serde(default)]
+    pub notify_card: bool,
+    /// 通知卡隐私说明已确认（一次性）；首次开启弹窗，确认后写盘，之后不再弹。
+    #[serde(default)]
+    pub notify_privacy_ack: bool,
     /// 已知可用版本（0.1.3 起落盘）：主窗「用时建、闲时销毁」，事件只在主窗活着时能收到 →
     /// 把「有新版」写进 config，主窗下次重建时再提示一次。None = 没有待更新。
     #[serde(default)]
@@ -559,6 +566,8 @@ impl Default for Settings {
             theme: Theme::Dark,
             accent: [76, 154, 255],
             update_auto: true,
+            notify_card: false,
+            notify_privacy_ack: false,
             pending_update: None,
             weather_city: String::new(),
             weather_lat: None,

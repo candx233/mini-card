@@ -60,6 +60,22 @@ fn unix_now_ms() -> i64 {
 /// 通知卡服务（进程内单例）：第一次画通知卡时才启动，避免没这张卡时也轮询通知。
 /// 0.1.3 D5 会在开关关闭时 `stop()` 并清空（届时改这里）。
 static NOTIFY_SERVICE: Mutex<Option<Arc<NotifyService>>> = Mutex::new(None);
+/// 通知卡总开关（config.settings.notify_card）；关闭时停掉服务、卡面画「未启用」。
+static NOTIFY_ON: AtomicBool = AtomicBool::new(false);
+
+fn notify_enabled() -> bool {
+    NOTIFY_ON.load(Ordering::Relaxed)
+}
+
+fn set_notify_enabled(on: bool) {
+    NOTIFY_ON.store(on, Ordering::Relaxed);
+    if !on {
+        if let Some(svc) = NOTIFY_SERVICE.lock().unwrap().take() {
+            svc.stop();
+            minicard_shell::mlog!("通知卡关闭：NotifyService 已停止");
+        }
+    }
+}
 
 fn notify_service() -> Arc<NotifyService> {
     let mut slot = NOTIFY_SERVICE.lock().unwrap();
@@ -67,6 +83,15 @@ fn notify_service() -> Arc<NotifyService> {
         *slot = Some(NotifyService::spawn());
     }
     slot.as_ref().unwrap().clone()
+}
+
+/// 是否真的需要读通知：总开关打开 + config 里至少有一张启用的通知卡。
+fn notify_wanted(cfg: &Config) -> bool {
+    cfg.settings.notify_card
+        && cfg
+            .cards
+            .iter()
+            .any(|c| c.kind == CardKind::Notify && c.enabled)
 }
 
 /// 从 config 恢复番茄钟（0.1.3 持久化）：run 态按绝对结束时刻补偿；end 已过 = 「本轮完成」。
@@ -326,7 +351,7 @@ struct DockWin {
 /// 区域，DWM 会把**整个合成内容**裁没（实测：静止态区域 (34,172)-(1033,235) 时整条不可见，
 /// 放开成 135 高反而能看见）。改用 `WM_NCHITTEST` 返回 `HTTRANSPARENT` —— 内容照常合成，
 /// 只有点击穿透；这也正是上方 172px 预留想要的语义。
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
 /// (hwnd, pinned)：原生卡的「固定位置」只在主界面写 config，wndproc 得有个
 /// 不读盘的查询表；建窗/热载时同步。
@@ -844,6 +869,8 @@ pub fn run(
     // 热载用：强调色/主题/玻璃厚度改完不必重启绘制进程
     let mut pal = pal_in;
     let mut blur = blur_in;
+    // 通知卡总开关：关着时即使 config 里有通知卡，也不启动轮询
+    set_notify_enabled(notify_wanted(&cfg));
     // 层级以 config 的 z_order 为准；`--live-topmost` 只是取证覆盖
     let z = if topmost {
         minicard_core::config::ZOrder::Top
@@ -1725,6 +1752,7 @@ pub fn run(
                 if now_m != cfg_mtime {
                     cfg_mtime = now_m;
                     let nc = Config::load();
+                    set_notify_enabled(notify_wanted(&nc));
                     SNAP_ON.store(nc.settings.snap_on_drag, std::sync::atomic::Ordering::Relaxed);
                     SNAP_GAP.store(
                         nc.settings.card_gap.round() as i32,
@@ -2327,14 +2355,18 @@ fn draw_one(
         }
         (State::Notify, _) => {
             // 服务每 500ms 轮询一次；卡片按自身 refresh 节拍读快照（默认 1s，够及时也不白烧）
-            let ns = notify_service().snapshot();
+            let ns = if notify_enabled() {
+                Some(notify_service().snapshot())
+            } else {
+                None
+            };
             let tk = notify_card::Tokens::notify(win.w, win.h);
             notify_card::paint(
                 gfx,
                 te,
                 pal,
                 &tk,
-                &ns,
+                ns.as_ref(),
                 unix_now_ms().max(0) as u64,
                 glass_pair,
             )?;
@@ -2657,10 +2689,13 @@ fn click(
             }
         }
         State::Notify => {
+            if !notify_enabled() {
+                return;
+            }
             let snap = notify_service().snapshot();
             let tk = notify_card::Tokens::notify(win.w, win.h);
             let mut m: &TextEngine = te;
-            if let Some(h) = notify_card::hit_at(&mut m, &tk, &snap, x, y) {
+            if let Some(h) = notify_card::hit_at(&mut m, &tk, Some(&snap), x, y) {
                 match h {
                     notify_card::Hit::Item { id, aumid } => {
                         notify_service().mark_read(id);

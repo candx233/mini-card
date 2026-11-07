@@ -57,7 +57,7 @@ pub fn notify_sheet(
     };
     let t = Tokens::notify(240.0, 180.0);
     if debug_layout {
-        let tree = notify::tree_hook(&t, &snap, now_ms);
+        let tree = notify::tree_hook(&t, Some(&snap), now_ms);
         let mut m: &TextEngine = te;
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
         notify::dump_layout(&placed, 0);
@@ -66,7 +66,7 @@ pub fn notify_sheet(
             t.r, t.pad_t, t.pad_r, t.pad_b, t.pad_l, t.header_lh, t.group_gh, t.item_h, t.body_fs
         );
     }
-    notify::paint(g, te, pal, &t, &snap, now_ms, None)
+    notify::paint(g, te, pal, &t, Some(&snap), now_ms, None)
 }
 
 pub fn shapes(g: &Gfx, te: &TextEngine, w: f32, h: f32) -> Result<()> {

@@ -2022,6 +2022,13 @@
   }
 
   function render(force) {
+    // 通知卡只做原生自绘（0.1.2 确立的回滚路径不支持新卡）：WebView 卡片窗口只显示说明
+    if (kind === 'Notify') {
+      curState = 'normal';
+      lastRenderAt = Date.now();
+      bodyEl.innerHTML = '<div class="empty">通知卡需要原生渲染<br><span style="font-size:.75em;opacity:.8">请保持默认卡片模式（native_cards=true）</span></div>';
+      return;
+    }
     var st = computeState();
     if (!force && st === curState && st !== 'boot') {
       // 状态没变时：normal 态跟随数据更新，error/empty 不动

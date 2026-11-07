@@ -538,7 +538,7 @@
         <div class="top">
           <div>
             <h1>卡片库</h1>
-            <div class="sub">九种卡片，点一下加到桌面</div>
+            <div class="sub">十种卡片，点一下加到桌面</div>
           </div>
           <input class="input" id="lib-search" type="search" placeholder="搜索卡片…" aria-label="搜索卡片" style="width:190px" />
         </div>
@@ -579,6 +579,10 @@
           <article class="tpl" id="tpl-todo" data-name="待办 todo 任务 清单 勾选 备忘">
             <div class="tpl-prev"></div>
             <div class="tpl-body"><div><h3>待办</h3><p>桌面清单，勾选即时生效</p></div><button class="add-btn">添加</button></div>
+          </article>
+          <article class="tpl" id="tpl-notify" data-name="通知 消息 提醒 微信 QQ 邮件 系统通知">
+            <div class="tpl-prev"></div>
+            <div class="tpl-body"><div><h3>通知</h3><p>系统通知按应用分组</p></div><button class="add-btn">添加</button></div>
           </article>
         </div>
         <div id="lib-empty">没有匹配的卡片</div>
@@ -748,6 +752,13 @@
 
         <div class="panel">
           <div class="sitem">
+            <div><h3>通知卡</h3><span class="meta">读取 Windows 通知中心，按应用分组显示在桌面；默认关闭</span></div>
+            <div class="sctl"><button class="switch" id="set-notify" role="switch" aria-checked="false" aria-label="启用通知卡"></button></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="sitem">
             <div><h3>天气城市</h3><span class="meta" id="wc-now">读取中…</span></div>
             <div class="sctl">
               <input class="input" id="wc-q" placeholder="搜索城市，如 绍兴" style="width:160px" />
@@ -811,6 +822,34 @@
     </div>
   </div>
 </div>
+<div class="modal" id="notify-privacy">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="np-title">
+    <div class="modal-scroll">
+      <div class="modal-head">
+        <div>
+          <h3 id="np-title">开启通知卡</h3>
+          <span class="meta">读取 Windows 通知中心</span>
+        </div>
+        <button class="icon-btn" id="np-close" aria-label="关闭隐私说明"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="pm-row" style="border-top:0;padding-top:6px">
+        <p class="snote" style="line-height:1.75;font-size:12.5px">
+          通知卡会读取 Windows 通知中心里<strong>所有应用</strong>的通知，用来在桌面按应用分组显示。
+        </p>
+        <ul style="margin:8px 0 0;padding-left:18px;line-height:1.85;font-size:12.5px;color:var(--muted)">
+          <li>读取范围：应用名、标题、正文、时间与发送方（含微信 / QQ / 邮件等）</li>
+          <li>保存方式：只在内存中展示，<strong>不落盘、不上传、不写日志</strong></li>
+          <li>随时关闭：设置 → 通知卡；关闭后立即停止读取</li>
+          <li>系统兼容：Windows 10 未实测；系统不允许时会显示「暂不可用」</li>
+        </ul>
+      </div>
+      <div class="pm-foot">
+        <button class="btn btn-secondary" id="np-cancel">取消</button>
+        <button class="btn btn-primary" id="np-ok">我已知晓，开启</button>
+      </div>
+    </div>
+  </div>
+</div>
 <script>
 (function () {
   var $  = function (s, r) { return (r || document).querySelector(s); };
@@ -851,7 +890,7 @@
   });
 
   /* 开关（通用兜底；自己接了逻辑的开关在 list 里排除，否则会被点两次 = 等于没点） */
-  var SW_OWN = ['hk-toggle', 'pm-enabled', 'set-autostart', 'upd-auto', 'dock-enable', 'dock-pin', 'dock-hide-icons', 'cx-on', 'cx-pin'];
+  var SW_OWN = ['hk-toggle', 'pm-enabled', 'set-autostart', 'upd-auto', 'dock-enable', 'dock-pin', 'dock-hide-icons', 'cx-on', 'cx-pin', 'set-notify'];
   $$('.switch').forEach(function (sw) {
     if (SW_OWN.indexOf(sw.id) >= 0) return;
     sw.addEventListener('click', function () {
@@ -968,7 +1007,10 @@
     // 音乐 = SMTC 推送（1s 一条），无「刷新间隔」档；日历/待办无轮询，rate 仅用于展示
     Music:       { name: '音乐',     tpl: 'tpl-music',   size: [240, 120], refresh_ms: 1000 },
     Calendar:    { name: '日历',     tpl: 'tpl-calendar',size: [240, 180], refresh_ms: 60000 },
-    Todo:        { name: '待办',     tpl: 'tpl-todo',    size: [240, 120], refresh_ms: 60000 }
+    Todo:        { name: '待办',     tpl: 'tpl-todo',    size: [240, 120], refresh_ms: 60000 },
+    // 通知卡（0.1.3）：原生自绘；读取 Windows 通知中心，默认关闭（设置里开启）
+    Notify:      { name: '通知',     tpl: 'tpl-notify',  size: [240, 180], refresh_ms: 1000,
+                   rates: [[500,'0.5 秒'],[1000,'1 秒'],[2000,'2 秒']] }
   };
 
   /* 尺寸已按卡片类型定死（2026-10-02 用户要求）：每张卡一个尺寸（见上面 KINDS[].size），
@@ -985,7 +1027,8 @@
     Performance: '每秒读一次本机传感器', Disks: '每 5 秒读一次各盘占用',
     Clock: '按系统时间走，不轮询', Weather: '每 30 分钟拉一次天气',
     NetRate: '每秒统计一次上下行', Pomodoro: '本地计时，不走网络',
-    Music: '跟随系统媒体会话', Calendar: '每分钟对齐一次日期', Todo: '本地保存，勾选即生效'
+    Music: '跟随系统媒体会话', Calendar: '每分钟对齐一次日期', Todo: '本地保存，勾选即生效',
+    Notify: '每 0.5 秒读一次通知中心'
   };
 
   function deckCards() { return (CFG && CFG.cards) || []; }
@@ -1482,7 +1525,10 @@
         if (has) {
           CFG.cards = CFG.cards.filter(function (c) { return c.kind !== kind; });
           toast('已从桌面移除');
-        } else {
+          save(); renderDesk(); hydrateLib();
+          return;
+        }
+        function addKind() {
           var n = CFG.cards.length;
           CFG.cards.push({
             id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('c-' + Date.now()),
@@ -1492,8 +1538,11 @@
             refresh_ms: k.refresh_ms
           });
           toast('已添加到桌面');
+          save(); renderDesk(); hydrateLib();
         }
-        save(); renderDesk(); hydrateLib();
+        // 通知卡：首次添加 = 首次开启，先过隐私说明；取消则不加卡
+        if (kind === 'Notify') window.__ensureNotifyEnabled(addKind);
+        else addKind();
       });
     });
   }
@@ -1941,6 +1990,68 @@
               + (i.can_update ? '，可到「设置 → 软件更新」下载' : ''));
       });
     } catch (e) { /* 忽略 */ }
+  }
+
+  /* 通知卡：默认关；首次开启弹隐私说明（一次性确认落盘）；卡片库「添加」也走同一入口。 */
+  function bindNotifySettings() {
+    var sw = $('#set-notify');
+    var modal = $('#notify-privacy');
+    var pending = null;
+    function paint() {
+      setSwitch(sw, !!(CFG.settings && CFG.settings.notify_card));
+    }
+    function close() {
+      if (modal) modal.classList.remove('open');
+      pending = null;
+    }
+    function openPrivacy(cb) {
+      pending = cb;
+      if (modal) modal.classList.add('open');
+    }
+    function confirm() {
+      var cb = pending;
+      CFG.settings.notify_privacy_ack = true;
+      CFG.settings.notify_card = true;
+      save();
+      paint();
+      close();
+      toast('通知卡已开启');
+      if (cb) cb();
+    }
+    function enable(cb) {
+      if (CFG.settings.notify_card) { if (cb) cb(); return; }
+      if (CFG.settings.notify_privacy_ack) {
+        CFG.settings.notify_card = true;
+        save();
+        paint();
+        toast('通知卡已开启');
+        if (cb) cb();
+      } else {
+        openPrivacy(cb);
+      }
+    }
+    if (sw) {
+      paint();
+      sw.addEventListener('click', function () {
+        if (sw.classList.contains('on')) {
+          CFG.settings.notify_card = false;
+          save();
+          paint();
+          toast('通知卡已关闭，卡片会显示未启用');
+        } else {
+          enable(null);
+        }
+      });
+    }
+    if (modal) {
+      var closeBtn = $('#np-close'), cancel = $('#np-cancel'), ok = $('#np-ok');
+      if (closeBtn) closeBtn.addEventListener('click', close);
+      if (cancel) cancel.addEventListener('click', close);
+      modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+      if (ok) ok.addEventListener('click', confirm);
+    }
+    window.__paintNotifySwitch = paint;
+    window.__ensureNotifyEnabled = enable;
   }
 
   /* 标题栏三键 → Rust。三键同一套：点完主动 blur（不然键盘点过的键会留 focus 框，
@@ -2539,7 +2650,7 @@
     // 位置滑条/Dock 轨道的量程：所有显示器的逻辑包围盒（主屏单独给 Dock 用）
     try { DESK = await invoke('desk_geometry'); } catch (e) { DESK = null; }
     renderDesk(); hydrateLib(); bindLib(); bindSettings(); bindTitlebar(); buildPreviews(); bindSheet(); bindDeskPanel(); bindTheme();
-    bindWeather(); bindHotkey(); bindUpdate();
+    bindWeather(); bindHotkey(); bindUpdate(); bindNotifySettings();
     // 版本号只显示在这一处（左侧栏底部）：从 package_info 取，发版只改 tauri.conf.json
     invoke('app_version').then(function (v) {
       var el = $('#rver');
