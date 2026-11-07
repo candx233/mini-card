@@ -884,7 +884,17 @@ pub fn run(
     {
         use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
         use windows::Win32::System::Threading::CreateMutexW;
-        let name: Vec<u16> = "MiniCardNativeLiveSingleInstance".encode_utf16().collect();
+        // 取证/沙箱实例可用 MC_LIVE_INSTANCE=<后缀> 起第二份，不动用户正在跑的 live；
+        // 生产不设该变量 → 名字与以前完全一致。
+        let mut instance = "MiniCardNativeLiveSingleInstance".to_owned();
+        if let Ok(suffix) = std::env::var("MC_LIVE_INSTANCE") {
+            let suffix = suffix.trim();
+            if !suffix.is_empty() {
+                instance.push('-');
+                instance.push_str(suffix);
+            }
+        }
+        let name: Vec<u16> = instance.encode_utf16().chain(std::iter::once(0)).collect();
         let h = unsafe { CreateMutexW(None, true, windows::core::PCWSTR(name.as_ptr())) };
         match h {
             Ok(m) => {

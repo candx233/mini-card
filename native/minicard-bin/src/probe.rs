@@ -82,6 +82,44 @@ pub fn notify_sheet(
     }
 }
 
+/// D7 真数据冒烟：起 NotifyService 读一次 Windows 通知中心，按卡面同一套 paint 出图。
+/// 只打印 access/条数/布局，不打印正文；用于确认「数据层 → 卡面」整链路不崩。
+pub fn notify_live_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::notify::{self, Tokens};
+    use minicard_core::notify::NotifyService;
+
+    let svc = NotifyService::spawn();
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let snap = svc.snapshot();
+    let groups = notify::group_items(
+        &snap.items,
+        notify::MAX_GROUPS,
+        notify::MAX_ROWS,
+    );
+    minicard_shell::mlog!(
+        "notify-live: access={:?} items={} unread={} groups={} group_rows={:?} at={}",
+        snap.access,
+        snap.items.len(),
+        snap.unread_count(),
+        groups.len(),
+        groups.iter().map(|g| g.items.len()).collect::<Vec<_>>(),
+        snap.at_ms
+    );
+    let t = Tokens::notify(240.0, 180.0);
+    if debug_layout {
+        let tree = notify::tree_hook(&t, Some(&snap), 0);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        notify::dump_layout(&placed, 0);
+    }
+    notify::paint(g, te, pal, &t, Some(&snap), 0, None)
+}
+
 pub fn shapes(g: &Gfx, te: &TextEngine, w: f32, h: f32) -> Result<()> {
     unsafe {
         g.begin()?;
