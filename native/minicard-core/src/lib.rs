@@ -9,11 +9,13 @@
 //!   · `data`    —— CPU/内存/磁盘/网络/GPU 采样（sysinfo + PDH）
 //!   · `weather` —— 天气抓取与文案映射；`refresh_local` 只取数不广播
 //!   · `media`   —— SMTC 音乐会话；`Sampler::tick()` 只出 payload，广播由外壳做
+//!   · `notify`  —— 系统通知读取（0.1.3 通知卡）：500ms 轮询 + 启动快照去重 + 内存 ring buffer
 //!   · `util`    —— base64 等小工具
 
 pub mod config;
 pub mod data;
 pub mod media;
+pub mod notify;
 pub mod util;
 pub mod weather;
 
