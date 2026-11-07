@@ -13,10 +13,13 @@ sysinfo = "0.39.6"
 ureq = "3.4.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Performance"] }
 windows = { version = "0.62.2", default-features = false, features = [
+  "ApplicationModel",
   "Foundation",
   "Foundation_Collections",
   "Media_Control",
   "Storage_Streams",
+  "UI_Notifications_Management",
   "Win32_System_Com",
   "Win32_System_Ole",
+  "Win32_System_WinRT",
 ] }
