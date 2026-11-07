@@ -18,6 +18,8 @@ pub enum CardKind {
     Music,
     Calendar,
     Todo,
+    /// 系统通知流卡（0.1.3）：读 Windows 通知中心，按应用分组展示
+    Notify,
 }
 
 impl CardKind {
@@ -32,6 +34,7 @@ impl CardKind {
             CardKind::Music => "音乐",
             CardKind::Calendar => "日历",
             CardKind::Todo => "待办",
+            CardKind::Notify => "通知",
         }
     }
 
@@ -49,6 +52,7 @@ impl CardKind {
             CardKind::Music       => [4, 2],
             CardKind::Calendar    => [4, 3],
             CardKind::Todo        => [4, 2],
+            CardKind::Notify      => [4, 3],
         }
     }
 

@@ -300,7 +300,7 @@ impl App {
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
-                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar" || name == "dock" || name == "cal-flip" || name == "menu" || name == "menu-hover"
+                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar" || name == "dock" || name == "cal-flip" || name == "menu" || name == "menu-hover" || name == "notify"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -332,6 +332,12 @@ impl App {
                         self.glass_bmp.as_ref().map(|b| (b, self.glass_rect)),
                     ),
                     "disks" => probe::disks_sheet(
+                        &self.gfx,
+                        &self.te,
+                        &self.pal,
+                        self.debug_layout,
+                    ),
+                    "notify" => probe::notify_sheet(
                         &self.gfx,
                         &self.te,
                         &self.pal,
@@ -562,6 +568,7 @@ fn main() -> Result<()> {
             Some("weather") => live::radius_of(minicard_core::config::CardKind::Weather, args.w, args.h),
             Some("music") => live::radius_of(minicard_core::config::CardKind::Music, args.w, args.h),
             Some("calendar") => live::radius_of(minicard_core::config::CardKind::Calendar, args.w, args.h),
+            Some("notify") => live::radius_of(minicard_core::config::CardKind::Notify, args.w, args.h),
             Some("dock") => minicard_cards::dock::RADIUS,
             _ => tokens.radius,
         };

@@ -19,6 +19,56 @@ use minicard_shell::gfx::Gfx;
 
 const WHITE: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
 
+/// 第八张测试图：通知卡（240×180，03 按应用分组；写死一组假数据）。
+/// 透明底出图用于逐像素对照；真机玻璃截图由 live 路径验证。
+pub fn notify_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    debug_layout: bool,
+) -> Result<()> {
+    use minicard_cards::notify::{self, Tokens};
+    use minicard_core::notify::{NotifyAccess, NotifyItem, NotifySnapshot};
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let mk = |id: u32, app: &str, aumid: &str, title: &str, body: &str, ago_ms: u64, unread: bool| NotifyItem {
+        id,
+        app: app.into(),
+        aumid: aumid.into(),
+        title: title.into(),
+        body: body.into(),
+        created_ms: now_ms.saturating_sub(ago_ms),
+        unread,
+    };
+    // 与设计稿同一组假数据：3 个应用、4 条（微信 2 / 邮件 1 / QQ 1），2 条未读
+    let items = vec![
+        mk(1006, "微信", "WeChat!App", "妈妈", "晚上回来吃饭吗？", 30_000, true),
+        mk(1005, "邮件", "Outlook!App", "GitHub", "[mini-card] build #482 通过", 3 * 60_000, true),
+        mk(1004, "微信", "WeChat!App", "文件传输助手", "周报模板.docx", 12 * 60_000, false),
+        mk(1003, "QQ", "QQ!App", "设计组", "新卡片稿发群里了，看下", 28 * 60_000, false),
+    ];
+    let snap = NotifySnapshot {
+        access: NotifyAccess::Allowed,
+        items,
+        at_ms: now_ms,
+    };
+    let t = Tokens::notify(240.0, 180.0);
+    if debug_layout {
+        let tree = notify::tree_hook(&t, &snap, now_ms);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
+        notify::dump_layout(&placed, 0);
+        minicard_shell::mlog!(
+            "tokens: r={:.2} pad={:.2}/{:.2}/{:.2}/{:.2} header={:.2} group_gh={:.2} item_h={:.2} body_fs={:.2}",
+            t.r, t.pad_t, t.pad_r, t.pad_b, t.pad_l, t.header_lh, t.group_gh, t.item_h, t.body_fs
+        );
+    }
+    notify::paint(g, te, pal, &t, &snap, now_ms, None)
+}
+
 pub fn shapes(g: &Gfx, te: &TextEngine, w: f32, h: f32) -> Result<()> {
     unsafe {
         g.begin()?;

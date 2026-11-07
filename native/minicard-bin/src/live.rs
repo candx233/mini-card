@@ -26,9 +26,10 @@ use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use minicard_cards::{calendar, clock, disks, lunar, music, net, perf, pomo, todo, weather};
+use minicard_cards::{calendar, clock, disks, lunar, music, net, notify as notify_card, perf, pomo, todo, weather};
 use minicard_core::config::{self, CardKind, Config, TodoItem};
 use minicard_core::data::{self, SharedSnap};
+use minicard_core::notify::NotifyService;
 use minicard_core::{media, weather as wx};
 use minicard_draw::color::Palette;
 use minicard_draw::glass;
@@ -54,6 +55,18 @@ fn unix_now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 通知卡服务（进程内单例）：第一次画通知卡时才启动，避免没这张卡时也轮询通知。
+/// 0.1.3 D5 会在开关关闭时 `stop()` 并清空（届时改这里）。
+static NOTIFY_SERVICE: Mutex<Option<Arc<NotifyService>>> = Mutex::new(None);
+
+fn notify_service() -> Arc<NotifyService> {
+    let mut slot = NOTIFY_SERVICE.lock().unwrap();
+    if slot.is_none() {
+        *slot = Some(NotifyService::spawn());
+    }
+    slot.as_ref().unwrap().clone()
 }
 
 /// 从 config 恢复番茄钟（0.1.3 持久化）：run 态按绝对结束时刻补偿；end 已过 = 「本轮完成」。
@@ -375,6 +388,8 @@ enum State {
     Net(net::NetState),
     Pomo(pomo::Pomo),
     Todo(Vec<todo::Item>),
+    /// 通知卡（0.1.3）：数据在 `NotifyService` 全局服务里，绘制时读快照。
+    Notify,
     /// `seen_at` = 上一帧画上去的 `WeatherSnap.at`。快照换了一版就立刻重绘：
     /// 天气卡的 refresh_ms 被钳到 60s，光等节拍最多要 60s 才看到新天气。
     Weather { seen_at: i64 },
@@ -519,6 +534,7 @@ pub fn radius_of(kind: CardKind, w: f32, h: f32) -> f32 {
         CardKind::Weather => weather::Tokens::weather(w, h).radius,
         CardKind::Music => music::Tokens::music(w, h).radius,
         CardKind::Calendar => calendar::Tokens::cal(w, h).radius,
+        CardKind::Notify => notify_card::Tokens::notify(w, h).radius,
     }
 }
 
@@ -1031,6 +1047,7 @@ pub fn run(
                     let (y, m, d, _, _, _) = now_parts();
                     State::Calendar(calendar_of(y, m, d), 0, d)
                 }
+                CardKind::Notify => State::Notify,
             };
             // Desktop 档：插到 Progman/WorkerW 锚点正上方（被普通窗口压住 = 与真卡同层）
             if matches!(z, minicard_core::config::ZOrder::Desktop) {
@@ -2307,6 +2324,21 @@ fn draw_one(
             let tk = todo::Tokens::todo(win.w, win.h);
             todo::paint(gfx, te, pal, &tk, items, now, glass_pair)?;
             todo::animating(items, now)
+        }
+        (State::Notify, _) => {
+            // 服务每 500ms 轮询一次；卡片按自身 refresh 节拍读快照（默认 1s，够及时也不白烧）
+            let ns = notify_service().snapshot();
+            let tk = notify_card::Tokens::notify(win.w, win.h);
+            notify_card::paint(
+                gfx,
+                te,
+                pal,
+                &tk,
+                &ns,
+                unix_now_ms().max(0) as u64,
+                glass_pair,
+            )?;
+            false
         }
         (State::Weather { seen_at }, _) => {
             let ws = wshared.read().unwrap().clone();

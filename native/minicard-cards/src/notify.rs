@@ -533,8 +533,8 @@ fn paint_tree(
                 return Ok(());
             }
             3 => {
-                // 药丸底
-                set_color(g, pal.badge_bg)?;
+                // 药丸底：比 fg 7% 的 badge_bg 再亮一档，240×180 上才看得出是个计数
+                set_color(g, pal.track12)?;
                 fill_round(g, rect(pl), pl.rect.h / 2.0)?;
             }
             _ => {}
