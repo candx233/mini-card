@@ -52,7 +52,7 @@ impl CardKind {
             CardKind::Music       => [4, 2],
             CardKind::Calendar    => [4, 3],
             CardKind::Todo        => [4, 2],
-            CardKind::Notify      => [4, 4],
+            CardKind::Notify      => [4, 5],
         }
     }
 
@@ -658,8 +658,8 @@ fn default_two() -> u32 {
 pub const SIZE_VERSION: u32 = 4;
 /// Dock 原生自绘转正迁移版本（0.1.3：把老 config 里显式写死的 `native=false` 迁到 true）
 pub const DOCK_NATIVE_VERSION: u32 = 1;
-/// 通知卡双行骨架尺寸迁移版本（0.1.3：旧 240×180 → 240×240，只做一次）
-pub const NOTIFY_SIZE_VERSION: u32 = 1;
+/// 通知卡双行骨架尺寸迁移版本（0.1.3：旧 240×180/240×240 → 240×300，只做一次）
+pub const NOTIFY_SIZE_VERSION: u32 = 2;
 
 /// 主窗默认尺寸。界面字号整档上调（正文 13→14px）时，外壳/控件/间距一起放大一档，
 /// 窗口也跟着长 —— 928×628 → 992×672（+6.9%，与字号同比例）。
@@ -771,8 +771,9 @@ impl Config {
         if cfg.notify_size_version < NOTIFY_SIZE_VERSION {
             for card in cfg.cards.iter_mut() {
                 if card.kind == CardKind::Notify
-                    && (card.size[0] - 240.0).abs() < 0.5
-                    && (card.size[1] - 180.0).abs() < 0.5
+                    && ((card.size[0] - 240.0).abs() < 0.5)
+                    && ((card.size[1] - 180.0).abs() < 0.5
+                        || (card.size[1] - 240.0).abs() < 0.5)
                 {
                     card.size = CardKind::Notify.default_size();
                 }

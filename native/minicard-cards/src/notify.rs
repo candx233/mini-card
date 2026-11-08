@@ -119,42 +119,42 @@ impl Tokens {
             h,
             r,
             radius: r,
-            pad_t: 0.75 * r,
+            pad_t: 0.8125 * r,
             pad_l: 0.8125 * r,
-            pad_b: 0.625 * r,
+            pad_b: 0.6875 * r,
             pad_r: 0.8125 * r,
-            header_fs: 0.78125 * r,
-            header_lh: 0.9375 * r,
-            count_fs: 0.59375 * r,
-            count_lh: 0.75 * r,
+            header_fs: 0.90625 * r,
+            header_lh: 1.0625 * r,
+            count_fs: 0.65625 * r,
+            count_lh: 0.8125 * r,
             head_gap: 0.25 * r,
-            group_gh: 1.25 * r,
-            group_gap: 0.375 * r,
+            group_gh: 1.5 * r,
+            group_gap: 0.4375 * r,
             app_gap: 0.375 * r,
-            app_fs: 0.75 * r,
-            app_lh: 0.9375 * r,
-            badge_fs: 0.5625 * r,
+            app_fs: 0.8125 * r,
+            app_lh: 1.0 * r,
+            badge_fs: 0.59375 * r,
             badge_lh: 0.75 * r,
-            badge_h: 0.75 * r,
+            badge_h: 0.8125 * r,
             badge_pad: 0.3125 * r,
-            time_fs: 0.5625 * r,
-            time_lh: 0.75 * r,
-            title_fs: 0.71875 * r,
-            title_lh: 0.875 * r,
-            item_h: 1.75 * r,
+            time_fs: 0.625 * r,
+            time_lh: 0.8125 * r,
+            title_fs: 0.84375 * r,
+            title_lh: 1.03125 * r,
+            item_h: 2.375 * r,
             item_gap: 0.1875 * r,
-            item_indent: 1.375 * r,
-            dot: 0.25 * r,
-            body_fs: 0.65625 * r,
-            body_lh: 0.8125 * r,
-            tile: 1.125 * r,
-            tile_radius: 0.3125 * r,
-            tile_fs: 0.53125 * r,
-            state_fs: 0.75 * r,
-            state_lh: 1.0 * r,
-            hint_fs: 0.625 * r,
-            hint_lh: 0.875 * r,
-            state_gap: 0.25 * r,
+            item_indent: 1.5 * r,
+            dot: 0.28125 * r,
+            body_fs: 0.75 * r,
+            body_lh: 0.9375 * r,
+            tile: 1.25 * r,
+            tile_radius: 0.375 * r,
+            tile_fs: 0.5625 * r,
+            state_fs: 0.8125 * r,
+            state_lh: 1.125 * r,
+            hint_fs: 0.6875 * r,
+            hint_lh: 0.9375 * r,
+            state_gap: 0.3125 * r,
         }
     }
 }
@@ -1306,8 +1306,8 @@ mod tests {
 
     #[test]
     fn capacity_scales_with_height() {
-        assert_eq!(capacity(&Tokens::notify(240.0, 240.0)), (3, 4));
-        assert_eq!(capacity(&Tokens::notify(240.0, 180.0)), (2, 3));
+        assert_eq!(capacity(&Tokens::notify(240.0, 300.0)), (3, 4));
+        assert_eq!(capacity(&Tokens::notify(240.0, 240.0)), (2, 3));
         // 更矮的卡 k 会按高度缩小（字号同步变小），因此仍能放 2 组；只约束不越界
         let (g, r) = capacity(&Tokens::notify(240.0, 120.0));
         assert!(g >= 1 && r >= 2, "240×120 至少 1 组 2 行：{:?}", (g, r));
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[test]
     fn tree_fits_card_and_draws_four_rows() {
-        let t = Tokens::notify(240.0, 240.0);
+        let t = Tokens::notify(240.0, 300.0);
         let mut items = sample();
         items.truncate(6);
         let snap = NotifySnapshot {
@@ -1327,7 +1327,7 @@ mod tests {
         let mut fake = Fake;
         let pl = layout(&node, (t.w, t.h), &mut fake);
         assert!((pl.rect.w - 240.0).abs() < 0.01);
-        assert!((pl.rect.h - 240.0).abs() < 0.01);
+        assert!((pl.rect.h - 300.0).abs() < 0.01);
 
         fn walk(p: &Placed, f: &mut dyn FnMut(&Placed)) {
             f(p);
@@ -1347,7 +1347,7 @@ mod tests {
                         p.rect.x >= 0.0
                             && p.rect.y >= 0.0
                             && p.rect.x + p.rect.w <= 240.01
-                            && p.rect.y + p.rect.h <= 240.01,
+                            && p.rect.y + p.rect.h <= 300.01,
                         "条目行越界：{:?}",
                         p.rect
                     );
@@ -1380,7 +1380,7 @@ mod tests {
 
     #[test]
     fn hit_maps_row_and_remove_x() {
-        let t = Tokens::notify(240.0, 240.0);
+        let t = Tokens::notify(240.0, 300.0);
         let snap = NotifySnapshot {
             access: NotifyAccess::Allowed,
             items: sample(),
@@ -1427,7 +1427,7 @@ mod tests {
 
     #[test]
     fn scroll_pages_groups_and_clear_hits() {
-        let t = Tokens::notify(240.0, 240.0);
+        let t = Tokens::notify(240.0, 300.0);
         let mut items = Vec::new();
         for i in 0..5u32 {
             items.push(item(
