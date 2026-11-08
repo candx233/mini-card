@@ -755,6 +755,20 @@
             <div><h3>通知卡</h3><span class="meta">读取 Windows 通知中心，按应用分组显示在桌面；默认关闭</span></div>
             <div class="sctl"><button class="switch" id="set-notify" role="switch" aria-checked="false" aria-label="启用通知卡"></button></div>
           </div>
+          <div class="sitem">
+            <div><h3>显示正文</h3><span class="meta">关闭后每条只留标题，卡片更紧凑</span></div>
+            <div class="sctl"><button class="switch" id="set-notify-body" role="switch" aria-checked="true" aria-label="通知显示正文"></button></div>
+          </div>
+          <div class="sitem">
+            <div><h3>每个应用最多</h3><span class="meta">超出的用鼠标滚轮翻下一组</span></div>
+            <div class="sctl">
+              <div class="opts" data-group="notify-perapp">
+                <button class="opt" data-val="1">1 条</button>
+                <button class="opt sel" data-val="2">2 条</button>
+                <button class="opt" data-val="3">3 条</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="panel">
@@ -890,7 +904,7 @@
   });
 
   /* 开关（通用兜底；自己接了逻辑的开关在 list 里排除，否则会被点两次 = 等于没点） */
-  var SW_OWN = ['hk-toggle', 'pm-enabled', 'set-autostart', 'upd-auto', 'dock-enable', 'dock-pin', 'dock-hide-icons', 'cx-on', 'cx-pin', 'set-notify'];
+  var SW_OWN = ['hk-toggle', 'pm-enabled', 'set-autostart', 'upd-auto', 'dock-enable', 'dock-pin', 'dock-hide-icons', 'cx-on', 'cx-pin', 'set-notify', 'set-notify-body'];
   $$('.switch').forEach(function (sw) {
     if (SW_OWN.indexOf(sw.id) >= 0) return;
     sw.addEventListener('click', function () {
@@ -2049,6 +2063,33 @@
       if (cancel) cancel.addEventListener('click', close);
       modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
       if (ok) ok.addEventListener('click', confirm);
+    }
+    var bodySw = $('#set-notify-body');
+    function paintBody() {
+      setSwitch(bodySw, CFG.settings.notify_show_body !== false);
+    }
+    if (bodySw) {
+      paintBody();
+      bodySw.addEventListener('click', function () {
+        CFG.settings.notify_show_body = !(CFG.settings.notify_show_body !== false);
+        save();
+        paintBody();
+      });
+    }
+    var perGroup = document.querySelector('.opts[data-group="notify-perapp"]');
+    function paintPerApp() {
+      var v = String(CFG.settings.notify_max_per_app || 2);
+      $$('.opt', perGroup).forEach(function (b) { b.classList.toggle('sel', b.dataset.val === v); });
+    }
+    if (perGroup) {
+      paintPerApp();
+      perGroup.addEventListener('click', function (e) {
+        var b = e.target.closest('.opt');
+        if (!b) return;
+        CFG.settings.notify_max_per_app = parseInt(b.dataset.val, 10) || 2;
+        save();
+        paintPerApp();
+      });
     }
     window.__paintNotifySwitch = paint;
     window.__ensureNotifyEnabled = enable;

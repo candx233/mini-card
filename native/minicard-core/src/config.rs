@@ -527,6 +527,12 @@ pub struct Settings {
     /// 通知卡隐私说明已确认（一次性）；首次开启弹窗，确认后写盘，之后不再弹。
     #[serde(default)]
     pub notify_privacy_ack: bool,
+    /// 通知卡：条目第二行是否显示正文（默认显示；关掉后只留标题）
+    #[serde(default = "default_true")]
+    pub notify_show_body: bool,
+    /// 通知卡：每个应用最多显示几条（1–3，默认 2）
+    #[serde(default = "default_two")]
+    pub notify_max_per_app: u32,
     /// 已知可用版本（0.1.3 起落盘）：主窗「用时建、闲时销毁」，事件只在主窗活着时能收到 →
     /// 把「有新版」写进 config，主窗下次重建时再提示一次。None = 没有待更新。
     #[serde(default)]
@@ -568,6 +574,8 @@ impl Default for Settings {
             update_auto: true,
             notify_card: false,
             notify_privacy_ack: false,
+            notify_show_body: true,
+            notify_max_per_app: 2,
             pending_update: None,
             weather_city: String::new(),
             weather_lat: None,
@@ -639,6 +647,11 @@ fn notify_size_version_legacy() -> u32 {
 /// `Dock.native` 的 serde 默认值（字段整个缺失时 = true；0.1.3 起原生 Dock 是默认路径）
 fn default_true() -> bool {
     true
+}
+
+/// 通知卡每应用条数的 serde 默认值
+fn default_two() -> u32 {
+    2
 }
 
 /// 当前尺寸迁移版本

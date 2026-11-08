@@ -31,6 +31,36 @@ pub fn cache_path(path: &str) -> PathBuf {
     icons_dir().join(format!("{}.png", fnv1a_hex(&normalize(path))))
 }
 
+/// 通知卡按 AUMID 缓存图标（与 Dock 的文件路径缓存分开，避免 `aumid:` 和 C:\ 撞键）。
+pub fn aumid_cache_path(aumid: &str) -> PathBuf {
+    // v2：早期缓存可能把 shell 的「通用文件图标」也存了，换前缀让旧缓存自然失效
+    icons_dir().join(format!("aumid2-{}.png", fnv1a_hex(&aumid.to_lowercase())))
+}
+
+/// 确保有 AUMID 对应的应用图标；返回可加载的 PNG 路径。
+/// 走 `shell:AppsFolder\<AUMID>` + `IShellItemImageFactory`，同时覆盖打包应用和 Win32 Start AppID。
+pub fn ensure_aumid(aumid: &str) -> Option<PathBuf> {
+    let aumid = aumid.trim();
+    if aumid.is_empty() {
+        return None;
+    }
+    let out = aumid_cache_path(aumid);
+    if let Some(px) = png_side(&out) {
+        if px >= 96 && out.metadata().map(|m| m.len() > 1024).unwrap_or(false) {
+            return Some(out);
+        }
+    }
+    match extract_aumid(aumid, &out) {
+        Ok(()) => Some(out),
+        Err(e) => {
+            if e != "通用文件图标" {
+                minicard_shell::mlog!("AUMID 图标提取失败（{aumid}）：{e}");
+            }
+            None
+        }
+    }
+}
+
 /// 目标边长（逻辑 48px 图标 × 2 倍屏也够；运行时还会再降到 96 画）
 pub const TARGET: u32 = 256;
 
@@ -75,8 +105,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// 而真带 256 帧的应用（例如 DeepSeek Harness）也会被取成 32 —— 实测同一个 exe
 /// 32 档放大到 256 的清晰度只有真 256 的 43%。`PrivateExtractIconsW` 让系统自己挑帧，
 /// 要 256 有 256、没有就退到能给的最高档，不会自作主张选低档。
-fn extract(path: &str, out: &Path) -> Result<(), String> {
-    use windows::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW;
+fn extract(path: &str, out: &Path) -> Result<(), String> {    use windows::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW;
     if let Some(d) = out.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
@@ -116,6 +145,121 @@ fn extract(path: &str, out: &Path) -> Result<(), String> {
         }
         save_png(out, size, size, &buf)
     }
+}
+
+/// AUMID → shell 图标：`shell:AppsFolder\<AUMID>` 对打包应用和 Win32 Start AppID 都有效。
+fn extract_aumid(aumid: &str, out: &Path) -> Result<(), String> {
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP};
+    use windows::Win32::UI::Shell::{
+        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+    };
+
+    if let Some(d) = out.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+        );
+        let shell_path = format!("shell:AppsFolder\\{aumid}");
+        let w = wide(&shell_path);
+        let factory: IShellItemImageFactory =
+            SHCreateItemFromParsingName(windows::core::PCWSTR(w.as_ptr()), None)
+                .map_err(|e| format!("SHCreateItemFromParsingName: {e}"))?;
+        let flags = windows::Win32::UI::Shell::SIIGBF(
+            SIIGBF_ICONONLY.0 | SIIGBF_BIGGERSIZEOK.0,
+        );
+        let hbmp: HBITMAP = factory
+            .GetImage(
+                SIZE {
+                    cx: TARGET as i32,
+                    cy: TARGET as i32,
+                },
+                flags,
+            )
+            .map_err(|e| format!("GetImage: {e}"))?;
+        let (w, h, buf) = hbmp_to_bgra(hbmp);
+        let _ = DeleteObject(hbmp.into());
+        if w == 0 || h == 0 || buf.is_empty() {
+            return Err("AUMID 图标位图取不到像素".into());
+        }
+        if looks_generic(&buf) {
+            return Err("通用文件图标".into());
+        }
+        save_png(out, w, h, &buf)
+    }
+}
+
+/// shell 对没注册图标的 AppID 会返回一张白纸/空文档；这种图不如首字母块，直接拒绝。
+fn looks_generic(bgra: &[u8]) -> bool {
+    let mut n = 0u64;
+    let mut sat = 0u64;
+    let mut lum = 0u64;
+    for px in bgra.chunks_exact(4) {
+        if px[3] < 128 {
+            continue;
+        }
+        let (b, g, r) = (px[0] as u32, px[1] as u32, px[2] as u32);
+        let mx = b.max(g).max(r);
+        let mn = b.min(g).min(r);
+        sat += (mx - mn) as u64;
+        lum += ((r * 299 + g * 587 + b * 114) / 1000) as u64;
+        n += 1;
+    }
+    n > 0 && sat / n < 18 && lum / n > 170
+}
+
+/// HBITMAP → (宽, 高, 预乘 BGRA)。`IShellItemImageFactory` 给的是 32bpp 位图。
+unsafe fn hbmp_to_bgra(hbmp: windows::Win32::Graphics::Gdi::HBITMAP) -> (u32, u32, Vec<u8>) {
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPV5HEADER,
+        BI_BITFIELDS, DIB_RGB_COLORS,
+    };
+
+    let mut bm = BITMAP::default();
+    if GetObjectW(
+        hbmp.into(),
+        std::mem::size_of::<BITMAP>() as i32,
+        Some(&mut bm as *mut _ as *mut std::ffi::c_void),
+    ) == 0
+    {
+        return (0, 0, Vec::new());
+    }
+    let w = bm.bmWidth.max(0) as u32;
+    let h = bm.bmHeight.max(0) as u32;
+    if w == 0 || h == 0 {
+        return (0, 0, Vec::new());
+    }
+    let mut bmi = BITMAPV5HEADER::default();
+    bmi.bV5Size = std::mem::size_of::<BITMAPV5HEADER>() as u32;
+    bmi.bV5Width = w as i32;
+    bmi.bV5Height = -(h as i32);
+    bmi.bV5Planes = 1;
+    bmi.bV5BitCount = 32;
+    bmi.bV5Compression = BI_BITFIELDS;
+    bmi.bV5RedMask = 0x00FF_0000;
+    bmi.bV5GreenMask = 0x0000_FF00;
+    bmi.bV5BlueMask = 0x0000_00FF;
+    bmi.bV5AlphaMask = 0xFF00_0000;
+
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let hdc = CreateCompatibleDC(None);
+    let got = GetDIBits(
+        hdc,
+        hbmp,
+        0,
+        h,
+        Some(buf.as_mut_ptr() as *mut std::ffi::c_void),
+        &mut bmi as *mut _ as *mut BITMAPINFO,
+        DIB_RGB_COLORS,
+    );
+    let _ = DeleteDC(hdc);
+    if got == 0 {
+        return (0, 0, Vec::new());
+    }
+    (w, h, buf)
 }
 
 /// HICON → (边长, 预乘 BGRA)
@@ -254,5 +398,24 @@ mod probe_tests {
         let px = png_side(&out).expect("不是 PNG");
         let _ = std::fs::remove_file(&out);
         assert!(px >= 128, "快捷方式只取到 {px}px");
+    }
+
+    /// 通知卡图标：从 AUMID 走 shell:AppsFolder；至少一个内置应用/QQ 能取到
+    #[test]
+    fn aumid取到图标() {
+        let mut ok = 0;
+        for aumid in [
+            "Microsoft.Paint_8wekyb3d8bbwe!App",
+            "QQ",
+            "Microsoft.MicrosoftEdge.Stable_8wekyb3d8bbwe!App",
+        ] {
+            if let Some(p) = ensure_aumid(aumid) {
+                let px = png_side(&p).expect("不是 PNG");
+                eprintln!("AUMID {aumid} → {}px", px);
+                assert!(px >= 64, "{aumid} 图标只有 {px}px");
+                ok += 1;
+            }
+        }
+        assert!(ok >= 1, "Paint/QQ/Edge 都取不到 AUMID 图标");
     }
 }

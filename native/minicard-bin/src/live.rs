@@ -7,7 +7,8 @@
 //! （D2D 设备上下文是窗口绑定的）。绘制层的笔刷/描边/位图缓存键都带上下文身份，
 //! 所以共享 TextEngine 不会串。
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, Result};
@@ -29,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use minicard_cards::{calendar, clock, disks, lunar, music, net, notify as notify_card, perf, pomo, todo, weather};
 use minicard_core::config::{self, CardKind, Config, TodoItem};
 use minicard_core::data::{self, SharedSnap};
-use minicard_core::notify::NotifyService;
+use minicard_core::notify::{NotifyService, NotifySnapshot};
 use minicard_core::{media, weather as wx};
 use minicard_draw::color::Palette;
 use minicard_draw::glass;
@@ -83,6 +84,43 @@ fn notify_service() -> Arc<NotifyService> {
         *slot = Some(NotifyService::spawn());
     }
     slot.as_ref().unwrap().clone()
+}
+
+/// 通知卡应用图标：CPU 侧缓存「AUMID → 96px 预乘图」，每帧只负责建 D2D 位图。
+static NOTIFY_ICON_IMGS: OnceLock<Mutex<HashMap<String, Option<minicard_draw::image::Image>>>> =
+    OnceLock::new();
+
+/// 当前快照里可见应用的真图标。取不到（或 shell 只给通用文件图标）→ 不放进 map，
+/// 卡面自动回退首字母色块。
+pub(crate) fn notify_icon_map(
+    gfx: &Gfx,
+    snap: &NotifySnapshot,
+) -> HashMap<String, ID2D1Bitmap1> {
+    let cache = NOTIFY_ICON_IMGS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut out = HashMap::new();
+    for it in &snap.items {
+        if it.aumid.trim().is_empty() || out.contains_key(&it.aumid) {
+            continue;
+        }
+        let img = {
+            let mut m = cache.lock().unwrap();
+            if let Some(v) = m.get(&it.aumid) {
+                v.clone()
+            } else {
+                let v = crate::icon::ensure_aumid(&it.aumid)
+                    .and_then(|p| minicard_draw::image::decode_file(&p).ok())
+                    .map(|img| minicard_draw::image::downscale(&img, 96));
+                m.insert(it.aumid.clone(), v.clone());
+                v
+            }
+        };
+        if let Some(img) = img {
+            if let Ok(bmp) = minicard_draw::image::bitmap(gfx, &img) {
+                out.insert(it.aumid.clone(), bmp);
+            }
+        }
+    }
+    out
 }
 
 /// 是否真的需要读通知：总开关打开 + config 里至少有一张启用的通知卡。
@@ -154,6 +192,8 @@ fn save_pomo(p: &pomo::Pomo) {
 /// 窗口线程只往里塞事件，动作在主循环里做（这样能正常借用 wins/cfg，不用满地 static mut）
 enum UiEvent {
     Click { hwnd: isize, x: i32, y: i32 },
+    /// 鼠标滚轮：通知卡翻组用（delta > 0 向上）
+    Wheel { hwnd: isize, delta: i32 },
     DragEnd { hwnd: isize },
     /// Dock 图标点击（窗内逻辑坐标）
     DockClick { x: f32, y: f32 },
@@ -414,7 +454,11 @@ enum State {
     Pomo(pomo::Pomo),
     Todo(Vec<todo::Item>),
     /// 通知卡（0.1.3）：数据在 `NotifyService` 全局服务里，绘制时读快照。
-    Notify,
+    Notify {
+        scroll: usize,
+        show_body: bool,
+        per_app: usize,
+    },
     /// `seen_at` = 上一帧画上去的 `WeatherSnap.at`。快照换了一版就立刻重绘：
     /// 天气卡的 refresh_ms 被钳到 60s，光等节拍最多要 60s 才看到新天气。
     Weather { seen_at: i64 },
@@ -1084,7 +1128,11 @@ pub fn run(
                     let (y, m, d, _, _, _) = now_parts();
                     State::Calendar(calendar_of(y, m, d), 0, d)
                 }
-                CardKind::Notify => State::Notify,
+                CardKind::Notify => State::Notify {
+                    scroll: 0,
+                    show_body: cfg.settings.notify_show_body,
+                    per_app: cfg.settings.notify_max_per_app.clamp(1, 3) as usize,
+                },
             };
             // Desktop 档：插到 Progman/WorkerW 锚点正上方（被普通窗口压住 = 与真卡同层）
             if matches!(z, minicard_core::config::ZOrder::Desktop) {
@@ -1302,6 +1350,32 @@ pub fn run(
                     }
                     UiEvent::Click { hwnd, x, y } => {
                         click(&mut wins, &mut cfg, &te, &pal, HWND(hwnd as *mut _), x, y);
+                    }
+                    UiEvent::Wheel { hwnd, delta } => {
+                        let Some(win) = wins.iter_mut().find(|w| w.hwnd.0 as isize == hwnd) else {
+                            continue;
+                        };
+                        if let State::Notify {
+                            scroll,
+                            show_body,
+                            per_app,
+                        } = &mut win.state
+                        {
+                            let tk = notify_card::Tokens::notify(win.w, win.h);
+                            let snap = notify_service().snapshot();
+                            let opts = notify_card::Options {
+                                show_body: *show_body,
+                                per_app: *per_app,
+                            };
+                            let max =
+                                notify_card::max_scroll_opts(&tk, Some(&snap), opts);
+                            if delta > 0 {
+                                *scroll = scroll.saturating_sub(1);
+                            } else if delta < 0 {
+                                *scroll = (*scroll + 1).min(max);
+                            }
+                            win.next_draw = Instant::now();
+                        }
                     }
                     UiEvent::DockClick { x, y } => {
                         let snap = DOCK_SNAP.lock().unwrap().clone();
@@ -1837,6 +1911,14 @@ pub fn run(
                             match &mut win.state {
                                 State::Perf { show_gpu, .. } => *show_gpu = card.show_gpu,
                                 State::Disks { warn90 } => *warn90 = card.warn90,
+                                State::Notify {
+                                    show_body,
+                                    per_app,
+                                    ..
+                                } => {
+                                    *show_body = nc.settings.notify_show_body;
+                                    *per_app = nc.settings.notify_max_per_app.clamp(1, 3) as usize;
+                                }
                                 _ => {}
                             }
                         }
@@ -2363,7 +2445,7 @@ fn draw_one(
             todo::paint(gfx, te, pal, &tk, items, now, glass_pair)?;
             todo::animating(items, now)
         }
-        (State::Notify, _) => {
+        (State::Notify { scroll, show_body, per_app }, _) => {
             // 服务每 500ms 轮询一次；卡片按自身 refresh 节拍读快照（默认 1s，够及时也不白烧）
             let ns = if notify_enabled() {
                 Some(notify_service().snapshot())
@@ -2371,12 +2453,23 @@ fn draw_one(
                 None
             };
             let tk = notify_card::Tokens::notify(win.w, win.h);
+            let icons = ns
+                .as_ref()
+                .map(|s| notify_icon_map(gfx, s))
+                .unwrap_or_default();
+            let opts = notify_card::Options {
+                show_body: *show_body,
+                per_app: *per_app,
+            };
             notify_card::paint(
                 gfx,
                 te,
                 pal,
                 &tk,
                 ns.as_ref(),
+                &icons,
+                opts,
+                *scroll,
                 unix_now_ms().max(0) as u64,
                 glass_pair,
             )?;
@@ -2698,14 +2791,20 @@ fn click(
                 });
             }
         }
-        State::Notify => {
+        State::Notify { scroll, show_body, per_app } => {
             if !notify_enabled() {
                 return;
             }
             let snap = notify_service().snapshot();
             let tk = notify_card::Tokens::notify(win.w, win.h);
+            let opts = notify_card::Options {
+                show_body: *show_body,
+                per_app: *per_app,
+            };
             let mut m: &TextEngine = te;
-            if let Some(h) = notify_card::hit_at(&mut m, &tk, Some(&snap), x, y) {
+            if let Some(h) =
+                notify_card::hit_at_with_scroll_opts(&mut m, &tk, Some(&snap), *scroll, opts, x, y)
+            {
                 match h {
                     notify_card::Hit::Item { id, aumid } => {
                         notify_service().mark_read(id);
@@ -2721,6 +2820,15 @@ fn click(
                         }
                     }
                     notify_card::Hit::Remove { id } => notify_service().remove(id),
+                    notify_card::Hit::ClearAll => {
+                        // Windows 没有可靠的 ClearNotifications（0x80070490）→ 逐条 Remove
+                        let svc = notify_service();
+                        for it in &snap.items {
+                            svc.remove(it.id);
+                        }
+                        *scroll = 0;
+                        minicard_shell::mlog!("通知清除：{} 条", snap.items.len());
+                    }
                     notify_card::Hit::Authorize => {
                         std::thread::spawn(|| {
                             if let Err(e) =
@@ -3124,6 +3232,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 return LRESULT(HTCLIENT as isize);
             }
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
+            let _ = EVENTS.lock().unwrap().push(UiEvent::Wheel {
+                hwnd: hwnd.0 as isize,
+                delta,
+            });
+            LRESULT(0)
         }
         WM_LBUTTONDOWN => {
             // Dock 窗不拖整条（D3 再做），按下直接吞掉，抬手时才判断点了哪个图标

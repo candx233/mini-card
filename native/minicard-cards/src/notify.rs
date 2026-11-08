@@ -21,9 +21,12 @@ use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_INTERPOLATION_MODE_LINEAR};
 
-/// 卡面最多显示组数 / 条目数（与 03 稿一致：3 组、4 条；组内最多 2 条）。
+/// 卡面最多显示组数 / 条目数（一屏；240×240 = 3/4）。滚动时按组翻页。
 pub const MAX_GROUPS: usize = 3;
 pub const MAX_ROWS: usize = 4;
+/// 滚动数据上限：先按应用分组，再按屏裁；超过 12 个应用/24 条时只保留前 12 组。
+const ALL_GROUPS: usize = 12;
+const ALL_ROWS: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardState {
@@ -155,6 +158,22 @@ impl Tokens {
     }
 }
 
+/// 通知卡绘制选项（来自 settings；probe/单测用默认）。
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub show_body: bool,
+    pub per_app: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            show_body: true,
+            per_app: 2,
+        }
+    }
+}
+
 /// 一组可见应用（供绘制/命中复用）。
 #[derive(Clone, Debug)]
 pub struct VisibleGroup {
@@ -168,11 +187,21 @@ pub struct VisibleGroup {
     pub items: Vec<usize>,
 }
 
-/// 按应用分组 + 可见配额：先每组 1 条，再把剩余配额轮流加给前几组（组内最多 2 条）。
+/// 按应用分组 + 可见配额：先每组 1 条，再把剩余配额轮流加给前几组（组内最多 `per_app` 条）。
 pub fn group_items(items: &[NotifyItem], max_groups: usize, max_rows: usize) -> Vec<VisibleGroup> {
+    group_items_limit(items, max_groups, max_rows, 2)
+}
+
+pub fn group_items_limit(
+    items: &[NotifyItem],
+    max_groups: usize,
+    max_rows: usize,
+    per_app: usize,
+) -> Vec<VisibleGroup> {
     if max_groups == 0 || max_rows == 0 {
         return Vec::new();
     }
+    let per_app = per_app.clamp(1, 3);
 
     struct Acc {
         app: String,
@@ -229,7 +258,7 @@ pub fn group_items(items: &[NotifyItem], max_groups: usize, max_rows: usize) -> 
             if budget == 0 {
                 break;
             }
-            if take[g] < all[g].items.len().min(2) {
+            if take[g] < all[g].items.len().min(per_app) {
                 take[g] += 1;
                 budget -= 1;
                 progressed = true;
@@ -283,22 +312,92 @@ pub fn capacity(t: &Tokens) -> (usize, usize) {
     (1, 1)
 }
 
+/// 滚动的「一屏」：先按应用分组全量（最多 ALL_GROUPS 组），再按 `scroll`（组偏移）取一屏。
+/// 返回 (本屏组, 实际 scroll, 最大 scroll)。
+fn view_groups(
+    t: &Tokens,
+    snap: &NotifySnapshot,
+    scroll: usize,
+    opts: Options,
+) -> (Vec<VisibleGroup>, usize, usize) {
+    let (max_groups, max_rows) = capacity(t);
+    let all = group_items_limit(&snap.items, ALL_GROUPS, ALL_ROWS, opts.per_app);
+    let per_app = opts.per_app.clamp(1, 3);
+    let max_scroll = all.len().saturating_sub(max_groups);
+    let scroll = scroll.min(max_scroll);
+    let mut view: Vec<VisibleGroup> = all
+        .into_iter()
+        .skip(scroll)
+        .take(max_groups)
+        .collect();
+
+    // 一屏行预算：先每组 1 条，再轮流补到 per_app 条
+    let mut budget = max_rows;
+    let mut take = vec![0usize; view.len()];
+    for slot in take.iter_mut() {
+        if budget == 0 {
+            break;
+        }
+        *slot = 1;
+        budget -= 1;
+    }
+    while budget > 0 && !view.is_empty() {
+        let mut progressed = false;
+        for (i, vg) in view.iter().enumerate() {
+            if budget == 0 {
+                break;
+            }
+            if take[i] < vg.items.len().min(per_app) {
+                take[i] += 1;
+                budget -= 1;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    for (vg, n) in view.iter_mut().zip(take) {
+        vg.items.truncate(n);
+    }
+    (view, scroll, max_scroll)
+}
+
+/// 当前快照在给定尺寸下最多能滚几组（0 = 不滚）。
+pub fn max_scroll(t: &Tokens, snap: Option<&NotifySnapshot>) -> usize {
+    max_scroll_opts(t, snap, Options::default())
+}
+
+pub fn max_scroll_opts(t: &Tokens, snap: Option<&NotifySnapshot>, opts: Options) -> usize {
+    let Some(snap) = snap else { return 0 };
+    if card_state(snap.access, snap.items.len()) != CardState::Normal {
+        return 0;
+    }
+    let all = group_items_limit(&snap.items, ALL_GROUPS, ALL_ROWS, opts.per_app);
+    all.len().saturating_sub(capacity(t).0)
+}
+
 pub fn paint(
     g: &Gfx,
     te: &TextEngine,
     pal: &Palette,
     t: &Tokens,
     snap: Option<&NotifySnapshot>,
+    icons: &HashMap<String, ID2D1Bitmap1>,
+    opts: Options,
+    scroll: usize,
     now_ms: u64,
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
 ) -> Result<()> {
     let state = display_state(snap);
-    let (max_groups, max_rows) = capacity(t);
-    let groups = match (state, snap) {
-        (CardState::Normal, Some(s)) => group_items(&s.items, max_groups, max_rows),
-        _ => Vec::new(),
+    let (groups, page, pages) = match (state, snap) {
+        (CardState::Normal, Some(s)) => {
+            let (v, scroll, max_scroll) = view_groups(t, s, scroll, opts);
+            (v, scroll, max_scroll)
+        }
+        _ => (Vec::new(), 0, 0),
     };
-    let tree = tree(t, snap, state, &groups, now_ms);
+    let tree = tree(t, snap, state, &groups, page, pages, now_ms);
     let mut m: &TextEngine = te;
     let placed = layout(&tree, (t.w, t.h), &mut m);
     let hover_item = g
@@ -345,7 +444,7 @@ pub fn paint(
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
-        paint_tree(g, te, pal, t, snap, &groups, &placed, hover_item)?;
+        paint_tree(g, te, pal, t, snap, icons, opts, &groups, &placed, hover_item)?;
         g.pop_clip();
         g.end()?;
         Ok(())
@@ -359,6 +458,7 @@ const ID_HEADER: u32 = 9001;
 const ID_COUNT: u32 = 9002;
 const ID_STATE: u32 = 9003;
 const ID_HINT: u32 = 9004;
+const ID_CLEAR: u32 = 9005;
 
 fn id_group(g: usize) -> u32 {
     9100 + g as u32 * 10
@@ -405,6 +505,8 @@ fn tree(
     snap: Option<&NotifySnapshot>,
     state: CardState,
     groups: &[VisibleGroup],
+    page: usize,
+    max_scroll: usize,
     now_ms: u64,
 ) -> Node {
     let root = Node::new(Dir::Column).style(move |s| {
@@ -418,6 +520,7 @@ fn tree(
         .style(move |s| {
             s.size(Dim::Pct(1.0), Dim::Px(t.header_lh))
                 .align(Align::Center)
+                .gap(0.25 * t.r)
         })
         .child(
             text_node("通知", t.header_fs, t.header_lh, 600, ID_HEADER)
@@ -428,18 +531,23 @@ fn tree(
         let total = snap.map(|s| s.items.len()).unwrap_or(0);
         let unread = snap.map(|s| s.unread_count()).unwrap_or(0);
         // 「全部已读」不是 Windows 的真实状态（启动基线也会把旧通知标已读）→ 没有新通知时显示总数
-        let text = if unread > 0 {
+        let mut text = if unread > 0 {
             format!("{unread} 条未读")
         } else {
             format!("共 {total} 条")
         };
-        header.child(text_node(
-            &text,
-            t.count_fs,
-            t.count_lh,
-            400,
-            ID_COUNT,
-        ))
+        if max_scroll > 0 {
+            text.push_str(&format!(" · {}/{}", page + 1, max_scroll + 1));
+        }
+        header
+            .child(text_node(
+                &text,
+                t.count_fs,
+                t.count_lh,
+                400,
+                ID_COUNT,
+            ))
+            .child(text_node("清除", t.count_fs, t.count_lh, 400, ID_CLEAR))
     } else {
         header
     };
@@ -577,6 +685,8 @@ fn paint_tree(
     pal: &Palette,
     t: &Tokens,
     snap: Option<&NotifySnapshot>,
+    icons: &HashMap<String, ID2D1Bitmap1>,
+    opts: Options,
     groups: &[VisibleGroup],
     pl: &Placed,
     hover_item: Option<(usize, usize)>,
@@ -590,7 +700,7 @@ fn paint_tree(
             }
             1 => {
                 if let Some(vg) = vg {
-                    paint_app_tile(g, te, pal, t, pl, vg)?;
+                    paint_app_tile(g, te, pal, t, pl, vg, icons.get(&vg.aumid))?;
                 }
                 return Ok(());
             }
@@ -626,7 +736,7 @@ fn paint_tree(
             }
             2 => {
                 if let Some(item) = item {
-                    paint_item_content(g, te, pal, t, pl, item)?;
+                    paint_item_content(g, te, pal, t, pl, item, opts.show_body)?;
                 }
                 return Ok(());
             }
@@ -658,7 +768,7 @@ fn paint_tree(
 
     if let Some(spec) = pl.text() {
         let color = match pl.id {
-            ID_COUNT | ID_HINT => pal.muted,
+            ID_COUNT | ID_HINT | ID_CLEAR => pal.muted,
             _ => {
                 if let Some(gidx) = group_of(pl.id) {
                     if pl.id - id_group(gidx) >= 4 {
@@ -689,7 +799,7 @@ fn paint_tree(
     }
 
     for c in &pl.children {
-        paint_tree(g, te, pal, t, snap, groups, c, hover_item)?;
+        paint_tree(g, te, pal, t, snap, icons, opts, groups, c, hover_item)?;
     }
     Ok(())
 }
@@ -728,8 +838,25 @@ fn paint_app_tile(
     t: &Tokens,
     pl: &Placed,
     vg: &VisibleGroup,
+    icon: Option<&ID2D1Bitmap1>,
 ) -> Result<()> {
     let r = rect(pl);
+    if let Some(bmp) = icon {
+        // 真图标：裁成圆角块，避免把方图标生硬压在卡面上
+        g.push_clip_round(r, t.tile_radius)?;
+        unsafe {
+            g.d2d.DrawBitmap(
+                bmp,
+                Some(&r),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
+        }
+        g.pop_clip_round();
+        return Ok(());
+    }
     set_color(g, app_color(&vg.app))?;
     fill_round(g, r, t.tile_radius)?;
     let letter: String = vg.app.chars().next().map(|c| c.to_string()).unwrap_or_default();
@@ -830,6 +957,7 @@ fn paint_item_content(
     t: &Tokens,
     pl: &Placed,
     item: &NotifyItem,
+    show_body: bool,
 ) -> Result<()> {
     let title = item_title(item);
     let body = item_body(item);
@@ -860,6 +988,9 @@ fn paint_item_content(
         0.833,
         te,
     )?;
+    if !show_body {
+        return Ok(());
+    }
 
     let body_spec = TextSpec {
         s: body,
@@ -921,6 +1052,8 @@ fn color(r: f32, g: f32, b: f32) -> D2D1_COLOR_F {
 pub enum Hit {
     Item { id: u32, aumid: String },
     Remove { id: u32 },
+    /// 抬头「清除」：清空 Windows 通知中心里本卡看得到的通知
+    ClearAll,
     Authorize,
 }
 
@@ -931,18 +1064,43 @@ pub fn hit_at(
     x: f32,
     y: f32,
 ) -> Option<Hit> {
+    hit_at_with_scroll(m, t, snap, 0, x, y)
+}
+
+/// 带滚动偏移的命中；live 用这个，`hit_at` 保留给单测/0 页调用。
+pub fn hit_at_with_scroll(
+    m: &mut dyn Measurer,
+    t: &Tokens,
+    snap: Option<&NotifySnapshot>,
+    scroll: usize,
+    x: f32,
+    y: f32,
+) -> Option<Hit> {
+    hit_at_with_scroll_opts(m, t, snap, scroll, Options::default(), x, y)
+}
+
+pub fn hit_at_with_scroll_opts(
+    m: &mut dyn Measurer,
+    t: &Tokens,
+    snap: Option<&NotifySnapshot>,
+    scroll: usize,
+    opts: Options,
+    x: f32,
+    y: f32,
+) -> Option<Hit> {
     let snap = snap?;
-    let (max_groups, max_rows) = capacity(t);
     let state = card_state(snap.access, snap.items.len());
-    let groups = if state == CardState::Normal {
-        group_items(&snap.items, max_groups, max_rows)
+    let (groups, page, max_scroll) = if state == CardState::Normal {
+        view_groups(t, snap, scroll, opts)
     } else {
-        Vec::new()
+        (Vec::new(), 0, 0)
     };
-    let now_ms = 0; // 命中与时间文案无关
-    let tr = tree(t, Some(snap), state, &groups, now_ms);
+    let tr = tree(t, Some(snap), state, &groups, page, max_scroll, 0);
     let pl = layout(&tr, (t.w, t.h), m);
     let id = minicard_draw::layout::hit_id(&pl, x, y)?;
+    if state == CardState::Normal && id == ID_CLEAR {
+        return Some(Hit::ClearAll);
+    }
     if state == CardState::Unauthorized && (id == ID_STATE || id == ID_HINT) {
         return Some(Hit::Authorize);
     }
@@ -959,13 +1117,31 @@ pub fn hit_at(
 }
 
 pub fn tree_hook(t: &Tokens, snap: Option<&NotifySnapshot>, now_ms: u64) -> Node {
+    tree_hook_scroll(t, snap, 0, now_ms)
+}
+
+pub fn tree_hook_scroll(
+    t: &Tokens,
+    snap: Option<&NotifySnapshot>,
+    scroll: usize,
+    now_ms: u64,
+) -> Node {
+    tree_hook_scroll_opts(t, snap, scroll, Options::default(), now_ms)
+}
+
+pub fn tree_hook_scroll_opts(
+    t: &Tokens,
+    snap: Option<&NotifySnapshot>,
+    scroll: usize,
+    opts: Options,
+    now_ms: u64,
+) -> Node {
     let state = display_state(snap);
-    let (max_groups, max_rows) = capacity(t);
-    let groups = match (state, snap) {
-        (CardState::Normal, Some(s)) => group_items(&s.items, max_groups, max_rows),
-        _ => Vec::new(),
+    let (groups, page, max_scroll) = match (state, snap) {
+        (CardState::Normal, Some(s)) => view_groups(t, s, scroll, opts),
+        _ => (Vec::new(), 0, 0),
     };
-    tree(t, snap, state, &groups, now_ms)
+    tree(t, snap, state, &groups, page, max_scroll, now_ms)
 }
 
 pub fn dump_layout(p: &Placed, depth: usize) {
@@ -1088,6 +1264,16 @@ mod tests {
     }
 
     #[test]
+    fn per_app_limit_from_settings() {
+        let one = group_items_limit(&sample(), 3, 8, 1);
+        assert!(one.iter().all(|g| g.items.len() == 1));
+        let two = group_items_limit(&sample(), 3, 8, 2);
+        assert_eq!(two[0].items.len(), 2);
+        let three = group_items_limit(&sample(), 3, 8, 3);
+        assert_eq!(three[0].items.len(), 3, "第一组有 3 条时应能放到 3");
+    }
+
+    #[test]
     fn capacity_scales_with_height() {
         assert_eq!(capacity(&Tokens::notify(240.0, 240.0)), (3, 4));
         assert_eq!(capacity(&Tokens::notify(240.0, 180.0)), (2, 3));
@@ -1205,6 +1391,61 @@ mod tests {
                 remove.y + remove.h / 2.0
             ),
             Some(Hit::Remove { id: 6 })
+        );
+    }
+
+    #[test]
+    fn scroll_pages_groups_and_clear_hits() {
+        let t = Tokens::notify(240.0, 240.0);
+        let mut items = Vec::new();
+        for i in 0..5u32 {
+            items.push(item(
+                100 + i,
+                &format!("应用{i}"),
+                &format!("app{i}"),
+                10_000 - i as u64 * 100,
+                false,
+            ));
+        }
+        let snap = NotifySnapshot {
+            access: NotifyAccess::Allowed,
+            items,
+            at_ms: 1,
+        };
+        let (v0, page0, max0) = view_groups(&t, &snap, 0, Options::default());
+        assert_eq!((v0.len(), page0, max0), (3, 0, 2));
+        let (v2, page2, _) = view_groups(&t, &snap, 2, Options::default());
+        assert_eq!((v2.len(), page2), (3, 2));
+        assert_eq!(v2[0].app, "应用2");
+
+        let node = tree_hook_scroll(&t, Some(&snap), 2, 0);
+        let mut fake = Fake;
+        let pl = layout(&node, (t.w, t.h), &mut fake);
+
+        fn find(p: &Placed, id: u32) -> Option<minicard_draw::layout::Rect> {
+            if p.id == id {
+                return Some(p.rect);
+            }
+            for c in &p.children {
+                if let Some(r) = find(c, id) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+
+        let clear = find(&pl, ID_CLEAR).expect("抬头清除按钮");
+        let mut m = Fake;
+        assert_eq!(
+            hit_at_with_scroll(
+                &mut m,
+                &t,
+                Some(&snap),
+                2,
+                clear.x + clear.w / 2.0,
+                clear.y + clear.h / 2.0
+            ),
+            Some(Hit::ClearAll)
         );
     }
 }

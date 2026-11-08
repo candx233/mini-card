@@ -45,13 +45,42 @@ pub fn notify_sheet(
         created_ms: now_ms.saturating_sub(ago_ms),
         unread,
     };
-    // 与设计稿同一组假数据：3 个应用、4 条（微信 2 / 邮件 1 / QQ 1），2 条未读
-    let items = vec![
-        mk(1006, "微信", "WeChat!App", "妈妈", "晚上回来吃饭吗？", 30_000, true),
-        mk(1005, "邮件", "Outlook!App", "GitHub", "[mini-card] build #482 通过", 3 * 60_000, true),
-        mk(1004, "微信", "WeChat!App", "文件传输助手", "周报模板.docx", 12 * 60_000, false),
-        mk(1003, "QQ", "QQ!App", "设计组", "新卡片稿发群里了，看下", 28 * 60_000, false),
+    // 与设计稿同一组假数据，应用换成带真实图标的（画图 2 / 计算器 1 / QQ 1），文案仍是假的
+    let mut items = vec![
+        mk(1006, "画图", "Microsoft.Paint_8wekyb3d8bbwe!App", "新画布已保存", "未命名.png · 1080×1080", 30_000, true),
+        mk(1005, "计算器", "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "计算历史已同步", "上次结果 1,024", 3 * 60_000, true),
+        mk(1004, "画图", "Microsoft.Paint_8wekyb3d8bbwe!App", "图层已合并", "海报.psd · 12 个图层", 12 * 60_000, false),
+        mk(1003, "QQ", "QQ", "设计组", "新卡片稿发群里了，看下", 28 * 60_000, false),
     ];
+    // N3 取证：MC_NOTIFY_MANY=1 造 6 个应用、每应用 2 条，用来看分页/滚轮
+    if std::env::var("MC_NOTIFY_MANY").is_ok() {
+        items.clear();
+        let apps = [
+            ("画图", "Microsoft.Paint_8wekyb3d8bbwe!App"),
+            ("计算器", "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
+            ("QQ", "QQ"),
+            ("记事本", "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"),
+            ("截图工具", "Microsoft.ScreenSketch_8wekyb3d8bbwe!App"),
+            ("文件资源管理器", "Microsoft.Windows.Explorer"),
+        ];
+        for (gi, (app, aumid)) in apps.iter().enumerate() {
+            for j in 0..2u32 {
+                items.push(mk(
+                    2000 + gi as u32 * 10 + j,
+                    app,
+                    aumid,
+                    &format!("{app} 通知 {}", j + 1),
+                    "这是一条用于分页取证的假正文，长度足够触发省略号",
+                    (gi as u64 * 10 + j as u64) * 60_000,
+                    j == 0,
+                ));
+            }
+        }
+    }
+    let scroll: usize = std::env::var("MC_NOTIFY_SCROLL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let mut snap = NotifySnapshot {
         access: NotifyAccess::Allowed,
         items,
@@ -66,9 +95,10 @@ pub fn notify_sheet(
         _ => {}
     }
     let t = Tokens::notify(w, h);
+    let opts = notify::Options::default();
     if debug_layout {
         let snap_opt = if state == "disabled" { None } else { Some(&snap) };
-        let tree = notify::tree_hook(&t, snap_opt, now_ms);
+        let tree = notify::tree_hook_scroll_opts(&t, snap_opt, scroll, opts, now_ms);
         let mut m: &TextEngine = te;
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
         notify::dump_layout(&placed, 0);
@@ -78,9 +108,11 @@ pub fn notify_sheet(
         );
     }
     if state == "disabled" {
-        notify::paint(g, te, pal, &t, None, now_ms, None)
+        let icons = std::collections::HashMap::new();
+        notify::paint(g, te, pal, &t, None, &icons, opts, 0, now_ms, None)
     } else {
-        notify::paint(g, te, pal, &t, Some(&snap), now_ms, None)
+        let icons = crate::live::notify_icon_map(g, &snap);
+        notify::paint(g, te, pal, &t, Some(&snap), &icons, opts, scroll, now_ms, None)
     }
 }
 
@@ -121,7 +153,8 @@ pub fn notify_live_sheet(
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
         notify::dump_layout(&placed, 0);
     }
-    notify::paint(g, te, pal, &t, Some(&snap), 0, None)
+    let icons = crate::live::notify_icon_map(g, &snap);
+    notify::paint(g, te, pal, &t, Some(&snap), &icons, minicard_cards::notify::Options::default(), 0, 0, None)
 }
 
 pub fn shapes(g: &Gfx, te: &TextEngine, w: f32, h: f32) -> Result<()> {
