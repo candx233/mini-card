@@ -23,7 +23,7 @@ use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_INTERPOLATION_MODE_L
 
 /// 卡面最多显示组数 / 条目数（一屏；240×240 = 3/4）。滚动时按组翻页。
 pub const MAX_GROUPS: usize = 3;
-pub const MAX_ROWS: usize = 4;
+pub const MAX_ROWS: usize = 8;
 /// 滚动数据上限：先按应用分组，再按屏裁；超过 12 个应用/24 条时只保留前 12 组。
 const ALL_GROUPS: usize = 12;
 const ALL_ROWS: usize = 24;
@@ -111,7 +111,8 @@ pub struct Tokens {
 impl Tokens {
     pub fn notify(w: f32, h: f32) -> Self {
         // BASE = 240×180；同样例 16px 圆角，k=1 时字号/间距与 03 稿逐项对齐。
-        let k = (w / 240.0).min(h / 180.0).clamp(0.4, 2.5);
+        // BASE = 240×180；大卡不放大字号（避免 300×300 反而只剩 2 组），多出来的空间用来放行
+        let k = (w / 240.0).min(h / 180.0).clamp(0.4, 1.0);
         let r = 16.0 * k;
         Self {
             w,
@@ -163,6 +164,8 @@ impl Tokens {
 pub struct Options {
     pub show_body: bool,
     pub per_app: usize,
+    /// 抬头「清除」已点过一次，等待 3 秒内再点确认
+    pub clear_armed: bool,
 }
 
 impl Default for Options {
@@ -170,6 +173,7 @@ impl Default for Options {
         Self {
             show_body: true,
             per_app: 2,
+            clear_armed: false,
         }
     }
 }
@@ -397,7 +401,7 @@ pub fn paint(
         }
         _ => (Vec::new(), 0, 0),
     };
-    let tree = tree(t, snap, state, &groups, page, pages, now_ms);
+    let tree = tree(t, snap, state, &groups, page, pages, opts, now_ms);
     let mut m: &TextEngine = te;
     let placed = layout(&tree, (t.w, t.h), &mut m);
     let hover_item = g
@@ -507,6 +511,7 @@ fn tree(
     groups: &[VisibleGroup],
     page: usize,
     max_scroll: usize,
+    opts: Options,
     now_ms: u64,
 ) -> Node {
     let root = Node::new(Dir::Column).style(move |s| {
@@ -547,7 +552,13 @@ fn tree(
                 400,
                 ID_COUNT,
             ))
-            .child(text_node("清除", t.count_fs, t.count_lh, 400, ID_CLEAR))
+            .child(text_node(
+                if opts.clear_armed { "确认" } else { "清除" },
+                t.count_fs,
+                t.count_lh,
+                400,
+                ID_CLEAR,
+            ))
     } else {
         header
     };
@@ -753,7 +764,7 @@ fn paint_tree(
                             spec.line_h + 6.0,
                             TextMode::Clip,
                             pal.muted,
-                            pal.shadow,
+                            text_shadow(pal),
                             0.8335,
                             0.833,
                             te,
@@ -768,7 +779,14 @@ fn paint_tree(
 
     if let Some(spec) = pl.text() {
         let color = match pl.id {
-            ID_COUNT | ID_HINT | ID_CLEAR => pal.muted,
+            ID_COUNT | ID_HINT => pal.muted,
+            ID_CLEAR => {
+                if opts.clear_armed {
+                    pal.accent
+                } else {
+                    pal.muted
+                }
+            }
             _ => {
                 if let Some(gidx) = group_of(pl.id) {
                     if pl.id - id_group(gidx) >= 4 {
@@ -791,7 +809,7 @@ fn paint_tree(
             spec.line_h + 6.0,
             mode,
             color,
-            pal.shadow,
+            text_shadow(pal),
             0.8335,
             0.833,
             te,
@@ -887,8 +905,7 @@ fn paint_app_tile(
             b: 1.0,
             a: 1.0,
         },
-        _pal.shadow,
-        0.5,
+        text_shadow(_pal),        0.5,
         0.5,
         te,
     )?;
@@ -983,7 +1000,7 @@ fn paint_item_content(
         t.title_lh + 4.0,
         TextMode::Ellipsis,
         pal.fg,
-        pal.shadow,
+        text_shadow(pal),
         0.8335,
         0.833,
         te,
@@ -1011,7 +1028,7 @@ fn paint_item_content(
         t.body_lh + 4.0,
         TextMode::Ellipsis,
         pal.muted,
-        pal.shadow,
+        text_shadow(pal),
         0.8335,
         0.833,
         te,
@@ -1045,6 +1062,20 @@ fn app_color(app: &str) -> D2D1_COLOR_F {
 
 fn color(r: f32, g: f32, b: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a: 1.0 }
+}
+
+/// 深色主题用白/黑阴影压住壁纸；亮色主题是深色字，再叠白影只会糊，直接关掉。
+fn text_shadow(pal: &Palette) -> D2D1_COLOR_F {
+    if pal.fg.r > 0.5 {
+        pal.shadow
+    } else {
+        D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }
+    }
 }
 
 /// 命中（D4 用）：条目 / 删除 / 授权引导。
@@ -1095,7 +1126,7 @@ pub fn hit_at_with_scroll_opts(
     } else {
         (Vec::new(), 0, 0)
     };
-    let tr = tree(t, Some(snap), state, &groups, page, max_scroll, 0);
+    let tr = tree(t, Some(snap), state, &groups, page, max_scroll, opts, 0);
     let pl = layout(&tr, (t.w, t.h), m);
     let id = minicard_draw::layout::hit_id(&pl, x, y)?;
     if state == CardState::Normal && id == ID_CLEAR {
@@ -1141,7 +1172,7 @@ pub fn tree_hook_scroll_opts(
         (CardState::Normal, Some(s)) => view_groups(t, s, scroll, opts),
         _ => (Vec::new(), 0, 0),
     };
-    tree(t, snap, state, &groups, page, max_scroll, now_ms)
+    tree(t, snap, state, &groups, page, max_scroll, opts, now_ms)
 }
 
 pub fn dump_layout(p: &Placed, depth: usize) {
@@ -1230,7 +1261,7 @@ mod tests {
 
     #[test]
     fn groups_merge_by_app_and_distribute_rows() {
-        let groups = group_items(&sample(), MAX_GROUPS, MAX_ROWS);
+        let groups = group_items(&sample(), 3, 4);
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[0].app, "微信");
         assert_eq!(groups[0].total, 3);
@@ -1241,7 +1272,7 @@ mod tests {
         assert_eq!(groups[2].items.len(), 1);
         assert_eq!(
             groups.iter().map(|g| g.items.len()).sum::<usize>(),
-            MAX_ROWS
+            4
         );
     }
 

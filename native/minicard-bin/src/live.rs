@@ -458,6 +458,8 @@ enum State {
         scroll: usize,
         show_body: bool,
         per_app: usize,
+        /// 抬头「清除」第一次点击后的确认截止时刻（3 秒内再点才真清）
+        clear_armed: Option<Instant>,
     },
     /// `seen_at` = 上一帧画上去的 `WeatherSnap.at`。快照换了一版就立刻重绘：
     /// 天气卡的 refresh_ms 被钳到 60s，光等节拍最多要 60s 才看到新天气。
@@ -1132,6 +1134,7 @@ pub fn run(
                     scroll: 0,
                     show_body: cfg.settings.notify_show_body,
                     per_app: cfg.settings.notify_max_per_app.clamp(1, 3) as usize,
+                    clear_armed: None,
                 },
             };
             // Desktop 档：插到 Progman/WorkerW 锚点正上方（被普通窗口压住 = 与真卡同层）
@@ -1359,6 +1362,7 @@ pub fn run(
                             scroll,
                             show_body,
                             per_app,
+                            ..
                         } = &mut win.state
                         {
                             let tk = notify_card::Tokens::notify(win.w, win.h);
@@ -1366,6 +1370,7 @@ pub fn run(
                             let opts = notify_card::Options {
                                 show_body: *show_body,
                                 per_app: *per_app,
+                                clear_armed: false,
                             };
                             let max =
                                 notify_card::max_scroll_opts(&tk, Some(&snap), opts);
@@ -2445,7 +2450,7 @@ fn draw_one(
             todo::paint(gfx, te, pal, &tk, items, now, glass_pair)?;
             todo::animating(items, now)
         }
-        (State::Notify { scroll, show_body, per_app }, _) => {
+        (State::Notify { scroll, show_body, per_app, clear_armed }, _) => {
             // 服务每 500ms 轮询一次；卡片按自身 refresh 节拍读快照（默认 1s，够及时也不白烧）
             let ns = if notify_enabled() {
                 Some(notify_service().snapshot())
@@ -2457,9 +2462,13 @@ fn draw_one(
                 .as_ref()
                 .map(|s| notify_icon_map(gfx, s))
                 .unwrap_or_default();
+            if clear_armed.is_some_and(|t| t.elapsed() >= Duration::from_secs(3)) {
+                *clear_armed = None;
+            }
             let opts = notify_card::Options {
                 show_body: *show_body,
                 per_app: *per_app,
+                clear_armed: clear_armed.is_some(),
             };
             notify_card::paint(
                 gfx,
@@ -2791,7 +2800,12 @@ fn click(
                 });
             }
         }
-        State::Notify { scroll, show_body, per_app } => {
+        State::Notify {
+            scroll,
+            show_body,
+            per_app,
+            clear_armed,
+        } => {
             if !notify_enabled() {
                 return;
             }
@@ -2800,6 +2814,7 @@ fn click(
             let opts = notify_card::Options {
                 show_body: *show_body,
                 per_app: *per_app,
+                clear_armed: clear_armed.is_some(),
             };
             let mut m: &TextEngine = te;
             if let Some(h) =
@@ -2821,13 +2836,22 @@ fn click(
                     }
                     notify_card::Hit::Remove { id } => notify_service().remove(id),
                     notify_card::Hit::ClearAll => {
-                        // Windows 没有可靠的 ClearNotifications（0x80070490）→ 逐条 Remove
-                        let svc = notify_service();
-                        for it in &snap.items {
-                            svc.remove(it.id);
+                        let armed = clear_armed
+                            .is_some_and(|t| t.elapsed() < Duration::from_secs(3));
+                        if armed {
+                            // Windows 没有可靠的 ClearNotifications（0x80070490）→ 逐条 Remove
+                            let svc = notify_service();
+                            for it in &snap.items {
+                                svc.remove(it.id);
+                            }
+                            *clear_armed = None;
+                            *scroll = 0;
+                            minicard_shell::mlog!("通知清除：{} 条", snap.items.len());
+                        } else {
+                            // 第一次点击先挂确认，3 秒内再点才真清
+                            *clear_armed = Some(Instant::now());
+                            minicard_shell::mlog!("通知清除：等待确认");
                         }
-                        *scroll = 0;
-                        minicard_shell::mlog!("通知清除：{} 条", snap.items.len());
                     }
                     notify_card::Hit::Authorize => {
                         std::thread::spawn(|| {
