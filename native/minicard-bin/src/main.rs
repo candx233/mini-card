@@ -342,12 +342,16 @@ impl App {
                         &self.te,
                         &self.pal,
                         self.debug_layout,
+                        self.tokens.w,
+                        self.tokens.h,
                     ),
                     "notify-live" => probe::notify_live_sheet(
                         &self.gfx,
                         &self.te,
                         &self.pal,
                         self.debug_layout,
+                        self.tokens.w,
+                        self.tokens.h,
                     ),
                     "motion" => probe::motion(
                         &self.gfx,

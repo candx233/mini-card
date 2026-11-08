@@ -52,7 +52,7 @@ impl CardKind {
             CardKind::Music       => [4, 2],
             CardKind::Calendar    => [4, 3],
             CardKind::Todo        => [4, 2],
-            CardKind::Notify      => [4, 3],
+            CardKind::Notify      => [4, 4],
         }
     }
 
@@ -611,6 +611,9 @@ pub struct Config {
     /// 0.1.2 的 config 里 `native` 被显式写成 false，靠 serde 默认补不到 → 单独记一位。
     #[serde(default = "dock_native_version_legacy")]
     pub dock_native_version: u32,
+    /// 通知卡双行骨架尺寸迁移（< NOTIFY_SIZE_VERSION 时把旧的 240×180 升到 240×240，只做一次）。
+    #[serde(default = "notify_size_version_legacy")]
+    pub notify_size_version: u32,
 }
 
 /// 老 config 缺 `size_version` 时按 0 处理（= 需要迁移一次）
@@ -628,6 +631,11 @@ fn dock_native_version_legacy() -> u32 {
     0
 }
 
+/// 老 config 缺 `notify_size_version` 时按 0 处理（= 需要迁移一次）
+fn notify_size_version_legacy() -> u32 {
+    0
+}
+
 /// `Dock.native` 的 serde 默认值（字段整个缺失时 = true；0.1.3 起原生 Dock 是默认路径）
 fn default_true() -> bool {
     true
@@ -635,9 +643,10 @@ fn default_true() -> bool {
 
 /// 当前尺寸迁移版本
 pub const SIZE_VERSION: u32 = 4;
-
 /// Dock 原生自绘转正迁移版本（0.1.3：把老 config 里显式写死的 `native=false` 迁到 true）
 pub const DOCK_NATIVE_VERSION: u32 = 1;
+/// 通知卡双行骨架尺寸迁移版本（0.1.3：旧 240×180 → 240×240，只做一次）
+pub const NOTIFY_SIZE_VERSION: u32 = 1;
 
 /// 主窗默认尺寸。界面字号整档上调（正文 13→14px）时，外壳/控件/间距一起放大一档，
 /// 窗口也跟着长 —— 928×628 → 992×672（+6.9%，与字号同比例）。
@@ -689,6 +698,7 @@ impl Default for Config {
             size_version: SIZE_VERSION,
             ui_version: UI_VERSION,
             dock_native_version: DOCK_NATIVE_VERSION,
+            notify_size_version: NOTIFY_SIZE_VERSION,
         }
     }
 }
@@ -742,6 +752,19 @@ impl Config {
         // Dock 原生自绘转正（只做一次）：0.1.2 的 config 把 `dock.native` 显式写成了 false，
         // serde 默认补不到 → 用版本位迁一次；迁完之后用户手改 false 仍会被尊重（回退口）。
         if cfg.migrate_dock_native() {
+            let _ = cfg.save();
+        }
+        // 通知卡双行骨架（0.1.3）：旧 4×3（240×180）装不下双行条目 → 一次性升到 4×4（240×240）
+        if cfg.notify_size_version < NOTIFY_SIZE_VERSION {
+            for card in cfg.cards.iter_mut() {
+                if card.kind == CardKind::Notify
+                    && (card.size[0] - 240.0).abs() < 0.5
+                    && (card.size[1] - 180.0).abs() < 0.5
+                {
+                    card.size = CardKind::Notify.default_size();
+                }
+            }
+            cfg.notify_size_version = NOTIFY_SIZE_VERSION;
             let _ = cfg.save();
         }
         cfg

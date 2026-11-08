@@ -1,12 +1,13 @@
-//! 通知卡（0.1.3 · 03「按应用分组」样式）—— 240×180，D2D 自绘。
+//! 通知卡（0.1.3 · 03「按应用分组」样式）—— 默认 240×240（4×4），D2D 自绘。
 //!
 //! 数据来自 `minicard_core::notify`（D2），这里只负责「怎么画」：
-//! - 四态：正常（按应用分组，最多 3 组 / 4 条）/ 空（最近没有新通知）/ 未授权 / 不可用；
-//! - 组头：16px 应用块 + 应用名 + 总数药丸 + 相对时间；组内 1–2 条，发送者 500 + 正文 muted；
-//! - 未读：条目前 4px accent 圆点；抬头右侧「N 条未读」；
-//! - 点击命中留给 D4：`hit_at` 返回条目 id / AUMID / 授权引导。
+//! - 四态：正常（按应用分组，240×240 最多 3 组 / 4 条；240×180 自动降为 2 组 / 3 条）/ 空 / 未授权 / 不可用；
+//! - 组头：18px 应用块 + 应用名 + 总数药丸 + 相对时间；
+//! - 条目：双行（标题 600 fg / 正文 muted），各自单行省略；超出容量暂不滚动（N3）；
+//! - 未读：条目前 4px accent 圆点；抬头右侧「N 条未读 / 共 N 条」；
+//! - 点击命中：`hit_at` 返回条目 id / AUMID / 删除 / 授权引导。
 //!
-//! 尺寸口径：BASE = 240×180（k = 1），字号与间距全部按 r=16 的倍数写，便于同系列卡统一。
+//! 尺寸口径：BASE = 240×180（k = 1）算字号；双行骨架按 240×240 排版，240×180 自动减容量。
 
 use std::collections::HashMap;
 
@@ -85,6 +86,9 @@ pub struct Tokens {
     pub badge_pad: f32,
     pub time_fs: f32,
     pub time_lh: f32,
+    /// 双行条目：标题行 / 正文行 / 整行高度
+    pub title_fs: f32,
+    pub title_lh: f32,
     pub item_h: f32,
     pub item_gap: f32,
     pub item_indent: f32,
@@ -120,26 +124,28 @@ impl Tokens {
             count_fs: 0.59375 * r,
             count_lh: 0.75 * r,
             head_gap: 0.25 * r,
-            group_gh: 1.0 * r,
-            group_gap: 0.4375 * r,
+            group_gh: 1.25 * r,
+            group_gap: 0.375 * r,
             app_gap: 0.375 * r,
-            app_fs: 0.71875 * r,
-            app_lh: 0.875 * r,
-            badge_fs: 0.53125 * r,
-            badge_lh: 0.6875 * r,
+            app_fs: 0.75 * r,
+            app_lh: 0.9375 * r,
+            badge_fs: 0.5625 * r,
+            badge_lh: 0.75 * r,
             badge_h: 0.75 * r,
             badge_pad: 0.3125 * r,
             time_fs: 0.5625 * r,
             time_lh: 0.75 * r,
-            item_h: 0.875 * r,
+            title_fs: 0.71875 * r,
+            title_lh: 0.875 * r,
+            item_h: 1.75 * r,
             item_gap: 0.1875 * r,
             item_indent: 1.375 * r,
             dot: 0.25 * r,
             body_fs: 0.65625 * r,
-            body_lh: 0.875 * r,
-            tile: 1.0 * r,
+            body_lh: 0.8125 * r,
+            tile: 1.125 * r,
             tile_radius: 0.3125 * r,
-            tile_fs: 0.5 * r,
+            tile_fs: 0.53125 * r,
             state_fs: 0.75 * r,
             state_lh: 1.0 * r,
             hint_fs: 0.625 * r,
@@ -249,6 +255,34 @@ pub fn group_items(items: &[NotifyItem], max_groups: usize, max_rows: usize) -> 
         .collect()
 }
 
+/// 按卡高算「能放几组 / 几条」：双行骨架下 240×240 恰好 3 组 [2,1,1]，240×180 降为 2 组 [2,1]。
+/// 组数 ≥ 行数，避免 `group_items` 先每组 1 条时出现空组。
+pub fn capacity(t: &Tokens) -> (usize, usize) {
+    let avail = t.h - t.pad_t - t.pad_b - t.header_lh - t.head_gap;
+    for groups in (1..=MAX_GROUPS).rev() {
+        for rows in (groups..=MAX_ROWS).rev() {
+            let mut counts = vec![0usize; groups];
+            for i in 0..rows {
+                counts[i % groups] += 1;
+            }
+            let height: f32 = counts
+                .iter()
+                .map(|&n| {
+                    t.group_gh
+                        + t.item_gap
+                        + n as f32 * t.item_h
+                        + (n.saturating_sub(1)) as f32 * t.item_gap
+                })
+                .sum::<f32>()
+                + (groups.saturating_sub(1)) as f32 * t.group_gap;
+            if height <= avail + 0.01 {
+                return (groups, rows);
+            }
+        }
+    }
+    (1, 1)
+}
+
 pub fn paint(
     g: &Gfx,
     te: &TextEngine,
@@ -259,8 +293,9 @@ pub fn paint(
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
 ) -> Result<()> {
     let state = display_state(snap);
+    let (max_groups, max_rows) = capacity(t);
     let groups = match (state, snap) {
-        (CardState::Normal, Some(s)) => group_items(&s.items, MAX_GROUPS, MAX_ROWS),
+        (CardState::Normal, Some(s)) => group_items(&s.items, max_groups, max_rows),
         _ => Vec::new(),
     };
     let tree = tree(t, snap, state, &groups, now_ms);
@@ -390,11 +425,13 @@ fn tree(
         );
 
     let header = if state == CardState::Normal {
+        let total = snap.map(|s| s.items.len()).unwrap_or(0);
         let unread = snap.map(|s| s.unread_count()).unwrap_or(0);
+        // 「全部已读」不是 Windows 的真实状态（启动基线也会把旧通知标已读）→ 没有新通知时显示总数
         let text = if unread > 0 {
             format!("{unread} 条未读")
         } else {
-            "全部已读".to_owned()
+            format!("共 {total} 条")
         };
         header.child(text_node(
             &text,
@@ -436,11 +473,9 @@ fn tree(
         s.grow(1.0)
             .basis(0.0)
             .align(Align::Stretch)
-            .justify(if groups.len() >= 2 {
-                Justify::Between
-            } else {
-                Justify::Start
-            })
+            // 骨架：固定间距从顶排列；不再用 space-between 把 2 组撑成上下两张卡
+            .justify(Justify::Start)
+            .gap(t.group_gap)
     });
 
     for (g, vg) in groups.iter().enumerate() {
@@ -591,7 +626,7 @@ fn paint_tree(
             }
             2 => {
                 if let Some(item) = item {
-                    paint_item_line(g, te, pal, t, pl, item)?;
+                    paint_item_content(g, te, pal, t, pl, item)?;
                 }
                 return Ok(());
             }
@@ -733,7 +768,62 @@ fn paint_app_tile(
     Ok(())
 }
 
-fn paint_item_line(
+fn clean_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.chars() {
+        if matches!(
+            ch,
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{200e}' | '\u{200f}' | '\u{2060}' | '\u{feff}'
+        ) {
+            continue;
+        }
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
+    }
+    out.trim().to_owned()
+}
+
+/// 标题里的 `<noreply@example.com>` 会吃掉整行；主体保留，邮箱段直接删掉。
+fn strip_email(s: &str) -> String {
+    if let Some(lt) = s.find('<') {
+        if let Some(gt) = s[lt..].find('>') {
+            let inside = &s[lt..lt + gt];
+            if inside.contains('@') {
+                return s[..lt].trim_end().to_owned();
+            }
+        }
+    }
+    s.to_owned()
+}
+
+fn item_title(item: &NotifyItem) -> String {
+    let t = strip_email(&clean_text(&item.title));
+    if t.is_empty() {
+        clean_text(&item.app)
+    } else {
+        t
+    }
+}
+
+fn item_body(item: &NotifyItem) -> String {
+    let b = clean_text(&item.body);
+    if b.is_empty() {
+        format!("来自 {}", clean_text(&item.app))
+    } else {
+        b
+    }
+}
+
+/// 双行条目：标题（600 fg）+ 正文（400 muted），各自单行省略。
+fn paint_item_content(
     g: &Gfx,
     te: &TextEngine,
     pal: &Palette,
@@ -741,87 +831,60 @@ fn paint_item_line(
     pl: &Placed,
     item: &NotifyItem,
 ) -> Result<()> {
-    let sender = if item.title.trim().is_empty() {
-        item.app.as_str()
-    } else {
-        item.title.as_str()
-    };
-    let full = if item.body.trim().is_empty() {
-        sender.to_owned()
-    } else {
-        format!("{sender} · {}", item.body)
-    };
+    let title = item_title(item);
+    let body = item_body(item);
+    let x = pl.rect.x;
+    let w = pl.rect.w;
 
-    let line_w = pl.rect.w;
-    let spec = TextSpec {
-        s: sender.to_owned(),
-        size: t.body_fs,
-        line_h: t.body_lh,
-        weight: 500,
+    let title_spec = TextSpec {
+        s: title,
+        size: t.title_fs,
+        line_h: t.title_lh,
+        weight: 600,
         wrap: false,
         align: 0,
         tabular: false,
         spacing_em: 0.0,
     };
-    let (sender_w, _) = te.measure(&spec, 0.0);
-    // 发送者大致占一半以内且正文还有空间时，分两段画：发送者 fg、正文 muted。
-    if !item.body.trim().is_empty() && sender_w < line_w * 0.62 && line_w - sender_w > 18.0 {
-        draw_shadowed(
-            g,
-            &spec,
-            pl.rect.x,
-            pl.rect.y,
-            sender_w + 1.0,
-            t.body_lh + 6.0,
-            TextMode::Clip,
-            pal.fg,
-            pal.shadow,
-            0.8335,
-            0.833,
-            te,
-        )?;
-        let rest = TextSpec {
-            s: format!(" · {}", item.body),
-            size: t.body_fs,
-            line_h: t.body_lh,
-            weight: 400,
-            ..spec
-        };
-        draw_shadowed(
-            g,
-            &rest,
-            pl.rect.x + sender_w,
-            pl.rect.y,
-            (line_w - sender_w).max(1.0),
-            t.body_lh + 6.0,
-            TextMode::Ellipsis,
-            pal.muted,
-            pal.shadow,
-            0.8335,
-            0.833,
-            te,
-        )?;
-    } else {
-        let rest = TextSpec {
-            s: full,
-            weight: 400,
-            ..spec
-        };
-        draw_shadowed(
-            g,
-            &rest,
-            pl.rect.x,
-            pl.rect.y,
-            line_w,
-            t.body_lh + 6.0,
-            TextMode::Ellipsis,
-            pal.muted,
-            pal.shadow,
-            0.8335,
-            0.833,
-            te,
-        )?;
-    }
+    draw_shadowed(
+        g,
+        &title_spec,
+        x,
+        pl.rect.y + 0.5,
+        w,
+        t.title_lh + 4.0,
+        TextMode::Ellipsis,
+        pal.fg,
+        pal.shadow,
+        0.8335,
+        0.833,
+        te,
+    )?;
+
+    let body_spec = TextSpec {
+        s: body,
+        size: t.body_fs,
+        line_h: t.body_lh,
+        weight: 400,
+        wrap: false,
+        align: 0,
+        tabular: false,
+        spacing_em: 0.0,
+    };
+    draw_shadowed(
+        g,
+        &body_spec,
+        x,
+        pl.rect.y + t.title_lh + 0.5,
+        w,
+        t.body_lh + 4.0,
+        TextMode::Ellipsis,
+        pal.muted,
+        pal.shadow,
+        0.8335,
+        0.833,
+        te,
+    )?;
     Ok(())
 }
 
@@ -869,9 +932,10 @@ pub fn hit_at(
     y: f32,
 ) -> Option<Hit> {
     let snap = snap?;
+    let (max_groups, max_rows) = capacity(t);
     let state = card_state(snap.access, snap.items.len());
     let groups = if state == CardState::Normal {
-        group_items(&snap.items, MAX_GROUPS, MAX_ROWS)
+        group_items(&snap.items, max_groups, max_rows)
     } else {
         Vec::new()
     };
@@ -896,8 +960,9 @@ pub fn hit_at(
 
 pub fn tree_hook(t: &Tokens, snap: Option<&NotifySnapshot>, now_ms: u64) -> Node {
     let state = display_state(snap);
+    let (max_groups, max_rows) = capacity(t);
     let groups = match (state, snap) {
-        (CardState::Normal, Some(s)) => group_items(&s.items, MAX_GROUPS, MAX_ROWS),
+        (CardState::Normal, Some(s)) => group_items(&s.items, max_groups, max_rows),
         _ => Vec::new(),
     };
     tree(t, snap, state, &groups, now_ms)
@@ -1023,8 +1088,17 @@ mod tests {
     }
 
     #[test]
+    fn capacity_scales_with_height() {
+        assert_eq!(capacity(&Tokens::notify(240.0, 240.0)), (3, 4));
+        assert_eq!(capacity(&Tokens::notify(240.0, 180.0)), (2, 3));
+        // 更矮的卡 k 会按高度缩小（字号同步变小），因此仍能放 2 组；只约束不越界
+        let (g, r) = capacity(&Tokens::notify(240.0, 120.0));
+        assert!(g >= 1 && r >= 2, "240×120 至少 1 组 2 行：{:?}", (g, r));
+    }
+
+    #[test]
     fn tree_fits_card_and_draws_four_rows() {
-        let t = Tokens::notify(240.0, 180.0);
+        let t = Tokens::notify(240.0, 240.0);
         let mut items = sample();
         items.truncate(6);
         let snap = NotifySnapshot {
@@ -1036,7 +1110,7 @@ mod tests {
         let mut fake = Fake;
         let pl = layout(&node, (t.w, t.h), &mut fake);
         assert!((pl.rect.w - 240.0).abs() < 0.01);
-        assert!((pl.rect.h - 180.0).abs() < 0.01);
+        assert!((pl.rect.h - 240.0).abs() < 0.01);
 
         fn walk(p: &Placed, f: &mut dyn FnMut(&Placed)) {
             f(p);
@@ -1056,7 +1130,7 @@ mod tests {
                         p.rect.x >= 0.0
                             && p.rect.y >= 0.0
                             && p.rect.x + p.rect.w <= 240.01
-                            && p.rect.y + p.rect.h <= 180.01,
+                            && p.rect.y + p.rect.h <= 240.01,
                         "条目行越界：{:?}",
                         p.rect
                     );
@@ -1089,7 +1163,7 @@ mod tests {
 
     #[test]
     fn hit_maps_row_and_remove_x() {
-        let t = Tokens::notify(240.0, 180.0);
+        let t = Tokens::notify(240.0, 240.0);
         let snap = NotifySnapshot {
             access: NotifyAccess::Allowed,
             items: sample(),

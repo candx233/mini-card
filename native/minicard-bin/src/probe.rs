@@ -26,6 +26,8 @@ pub fn notify_sheet(
     te: &TextEngine,
     pal: &minicard_draw::color::Palette,
     debug_layout: bool,
+    w: f32,
+    h: f32,
 ) -> Result<()> {
     use minicard_cards::notify::{self, Tokens};
     use minicard_core::notify::{NotifyAccess, NotifyItem, NotifySnapshot};
@@ -63,7 +65,7 @@ pub fn notify_sheet(
         "unavailable" => snap.access = NotifyAccess::Unavailable,
         _ => {}
     }
-    let t = Tokens::notify(240.0, 180.0);
+    let t = Tokens::notify(w, h);
     if debug_layout {
         let snap_opt = if state == "disabled" { None } else { Some(&snap) };
         let tree = notify::tree_hook(&t, snap_opt, now_ms);
@@ -89,6 +91,8 @@ pub fn notify_live_sheet(
     te: &TextEngine,
     pal: &minicard_draw::color::Palette,
     debug_layout: bool,
+    w: f32,
+    h: f32,
 ) -> Result<()> {
     use minicard_cards::notify::{self, Tokens};
     use minicard_core::notify::NotifyService;
@@ -110,7 +114,7 @@ pub fn notify_live_sheet(
         groups.iter().map(|g| g.items.len()).collect::<Vec<_>>(),
         snap.at_ms
     );
-    let t = Tokens::notify(240.0, 180.0);
+    let t = Tokens::notify(w, h);
     if debug_layout {
         let tree = notify::tree_hook(&t, Some(&snap), 0);
         let mut m: &TextEngine = te;
