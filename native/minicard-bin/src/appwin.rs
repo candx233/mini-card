@@ -7,14 +7,14 @@
 
 use std::collections::HashSet;
 
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, ShowWindow,
-    SW_MINIMIZE, SW_RESTORE,
+    EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, SW_MINIMIZE, SW_RESTORE,
 };
 
 fn base(p: &str) -> &str {
@@ -161,6 +161,87 @@ pub fn running_set() -> HashSet<String> {
 #[allow(dead_code)]
 pub fn is_running(item_path: &str) -> bool {
     item_running(&match_key(item_path), &running_set())
+}
+
+/// 通知等场景：按应用名/AUMID 找到**已在运行**的窗口（含最小化到托盘的窗口）并切到前台。
+/// 返回 false 表示没找到，调用方再走 ShellExecute。
+pub fn activate_app(app: &str, aumid: &str) -> bool {
+    fn push(keys: &mut Vec<String>, s: &str) {
+        let k = s.trim().to_lowercase();
+        if k.chars().count() >= 2 && !keys.iter().any(|x| x == &k) {
+            keys.push(k);
+        }
+    }
+    let mut keys: Vec<String> = Vec::new();
+    push(&mut keys, app);
+    push(&mut keys, &app.replace(' ', ""));
+    if let Some((pkg, appid)) = aumid.split_once('!') {
+        push(&mut keys, appid);
+        push(&mut keys, pkg.split('_').next().unwrap_or(pkg));
+    } else {
+        push(&mut keys, aumid);
+    }
+    let a = app.to_lowercase();
+    for (needle, exe) in [
+        ("qq", "qq"),
+        ("微信", "wechat"),
+        ("wechat", "wechat"),
+        ("邮件", "outlook"),
+        ("mail", "outlook"),
+        ("outlook", "outlook"),
+        ("edge", "msedge"),
+        ("浏览器", "msedge"),
+        ("画图", "mspaint"),
+        ("paint", "mspaint"),
+        ("记事本", "notepad"),
+        ("notepad", "notepad"),
+        ("计算器", "calculator"),
+        ("calculator", "calculator"),
+        ("截图", "snippingtool"),
+        ("snipping", "snippingtool"),
+        ("终端", "windowsterminal"),
+        ("terminal", "windowsterminal"),
+    ] {
+        if a.contains(needle) {
+            push(&mut keys, exe);
+        }
+    }
+    let wins = visible_windows();
+    let mut best: Option<(isize, i64)> = None;
+    for (h, exe) in wins {
+        let stem = base(&exe).trim_end_matches(".exe").to_string();
+        let hit = keys.iter().any(|k| {
+            if k.len() < 2 {
+                return false;
+            }
+            stem == *k
+                || (k.len() >= 4 && stem.contains(k.as_str()))
+                || (stem.len() >= 4 && k.contains(stem.as_str()))
+        });
+        if !hit {
+            continue;
+        }
+        let hwnd = HWND(h as *mut _);
+        let mut title = [0u16; 256];
+        let n = unsafe { GetWindowTextW(hwnd, &mut title) } as usize;
+        let iconic = unsafe { IsIconic(hwnd).as_bool() };
+        let mut r = RECT::default();
+        let _ = unsafe { GetWindowRect(hwnd, &mut r) };
+        let area = ((r.right - r.left).max(0) as i64) * ((r.bottom - r.top).max(0) as i64);
+        let score = i64::from(n > 0) * 1_000_000_000
+            + i64::from(!iconic) * 100_000_000
+            + area;
+        if best.map_or(true, |(_, s)| score > s) {
+            best = Some((h, score));
+        }
+    }
+    let Some((h, _)) = best else { return false };
+    unsafe {
+        let hwnd = HWND(h as *mut _);
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    true
 }
 
 /// 点图标：**已在跑就切到前台**（没有前台窗口时先 restore），否则 ShellExecute 启动。
@@ -365,5 +446,13 @@ mod tests {
         assert!(item_running("c:\\program files\\wechat\\wechat.exe", &set));
         assert!(!item_running("c:\\other\\wechat.exe", &set));
         assert!(!item_running("", &set));
+    }
+
+    /// 真机手测：QQ 最小化在托盘时，点通知应把已有窗口拉起来而不是再开一个。
+    /// 默认 ignore（会改变前台窗口）。
+    #[test]
+    #[ignore = "会真的把 QQ 拉到前台"]
+    fn qq已有窗口激活() {
+        assert!(activate_app("QQ", "QQ"), "没找到运行中的 QQ 窗口");
     }
 }

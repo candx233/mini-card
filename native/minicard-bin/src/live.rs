@@ -2823,16 +2823,25 @@ fn click(
                 match h {
                     notify_card::Hit::Item { id, aumid } => {
                         notify_service().mark_read(id);
-                        // shell:AppsFolder\<AUMID> 打开/切回发送方；ShellExecuteW 会阻塞到进程起来，
-                        // 不能占九卡共用的消息循环。
-                        let target = format!("shell:AppsFolder\\{aumid}");
-                        if !aumid.trim().is_empty() {
-                            std::thread::spawn(move || {
+                        // 先按应用名/AUMID 切回**已在运行**的窗口（QQ 最小化到托盘也能拉起来）；
+                        // 找不到才 ShellExecute 启动，避免点通知又开第二个 QQ。
+                        let app = snap
+                            .items
+                            .iter()
+                            .find(|it| it.id == id)
+                            .map(|it| it.app.clone())
+                            .unwrap_or_default();
+                        std::thread::spawn(move || {
+                            if crate::appwin::activate_app(&app, &aumid) {
+                                return;
+                            }
+                            let target = format!("shell:AppsFolder\\{aumid}");
+                            if !aumid.trim().is_empty() {
                                 if let Err(e) = crate::appwin::launch(&target, "") {
                                     minicard_shell::mlog!("通知打开发送方失败: {e}");
                                 }
-                            });
-                        }
+                            }
+                        });
                     }
                     notify_card::Hit::Remove { id } => notify_service().remove(id),
                     notify_card::Hit::ClearAll => {
