@@ -484,8 +484,21 @@
   .cal-page { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.25rem; will-change: transform, opacity; }
   .cal-head { display: flex; align-items: center; justify-content: space-between; gap: 0.375rem; }
   /* 标题与「今日节日」同占左半边：有节日显示、没有就是空 span —— 不新增行高，
-     240×180 的卡里 6 行月份已经把纵向余量吃光（.cal-grid 是 1fr 行）。 */
-  .cal-lead { display: flex; align-items: baseline; gap: 0.4375rem; min-width: 0; }
+     240×180 的卡里 6 行月份已经把纵向余量吃光（.cal-grid 是 1fr 行）。
+     2026-11-09：头部翻月改「上下滚动」（像时钟数字滚轮）→ .cal-lead 兼作裁剪带：
+     新字在 .cal-lead-line 里滚入、旧字克隆成 .cal-lead-old 滚出，200ms 同拍。 */
+  .cal-lead { position: relative; overflow: hidden; display: flex; min-width: 0; }
+  .cal-lead-line { display: flex; align-items: baseline; gap: 0.4375rem; min-width: 0; }
+  .cal-lead-old { position: absolute; left: 0; top: 0; display: flex; align-items: baseline; gap: 0.4375rem; }
+  .cal-lead-old .cal-title, .cal-lead-old .cal-holiday { flex: none; }
+  @keyframes calRollInUp { from { transform: translateY(1.3rem); } to { transform: translateY(0); } }
+  @keyframes calRollOutUp { from { transform: translateY(0); } to { transform: translateY(-1.3rem); } }
+  @keyframes calRollInDown { from { transform: translateY(-1.3rem); } to { transform: translateY(0); } }
+  @keyframes calRollOutDown { from { transform: translateY(0); } to { transform: translateY(1.3rem); } }
+  .cal-lead.roll-up > .cal-lead-line { animation: calRollInUp var(--dur-normal) var(--ease-out) both; }
+  .cal-lead.roll-up > .cal-lead-old { animation: calRollOutUp var(--dur-normal) var(--ease-out) both; }
+  .cal-lead.roll-down > .cal-lead-line { animation: calRollInDown var(--dur-normal) var(--ease-out) both; }
+  .cal-lead.roll-down > .cal-lead-old { animation: calRollOutDown var(--dur-normal) var(--ease-out) both; }
   .cal-title { font-size: 1rem; font-weight: 600; letter-spacing: 0.01em; line-height: 1.3; white-space: nowrap; }
   .cal-holiday {
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1716,7 +1729,8 @@
     '5-1': '劳动节', '5-4': '青年节', '6-1': '儿童节', '7-1': '建党节', '8-1': '建军节',
     '9-10': '教师节', '10-1': '国庆节', '12-24': '平安夜', '12-25': '圣诞节' };
   var FEST_LUNAR = { '1-1': '春节', '1-15': '元宵节', '2-2': '龙抬头', '5-5': '端午节',
-    '7-7': '七夕节', '8-15': '中秋节', '9-9': '重阳节', '12-8': '腊八节', '12-23': '小年' };
+    '7-7': '七夕节', '7-15': '中元节', '8-15': '中秋节', '9-9': '重阳节',
+    '10-1': '寒衣节', '10-15': '下元节', '12-8': '腊八节', '12-23': '小年' };
   // 位次节日：母亲节 = 5 月第 2 个周日、父亲节 = 6 月第 3 个周日、感恩节 = 11 月第 4 个周四
   function nthWeekday(y, mo, wd, n) {
     return 1 + ((wd - new Date(y, mo - 1, 1).getDay() + 7) % 7) + (n - 1) * 7;
@@ -1775,14 +1789,15 @@
     calNav(btn.dataset.act);
   }
 
-  /* 翻月动效：新页从「翻页方向」滑入 + 淡入（200ms ease-out；克制档：位移 16px、无回弹）。
+  /* 翻月动效：新页从「翻页方向」滑入 + 淡入（320ms ease-out；2026-11-09 用户拍板：
+     放慢、位移 64px，左/右方向要一眼看出来；无回弹）。
      ⚠️ 今日蓝块是 SVG 覆盖层、几何由 syncCalChip 按布局盒写死（亚像素对位）——所以动画
      **只作用在 .cal-page（星期行 + 日号 + 块）**上：块和数字在同一个坐标系里一起动，逐帧仍然贴合；
      千万别去补间 rect 的 x/y（那正是当初块位置不准的根源）。
-     ⚠️ 标题与 ‹ › 按钮在 .cal-head 里，**不参与翻月动画**（2026-10-24 用户要求）：
-     按钮只保留自己的点按动效（.cal-navbtn.tap）。
+     ⚠️ 标题与 ‹ › 按钮在 .cal-head 里，**不参与翻月动画**：标题/节日走自己的「上下滚动」
+     （calRollLead，200ms 滚轮）；按钮只保留点按动效（.cal-navbtn.tap）。
      用 rAF 驱动而不是 CSS keyframes：卡面重建不会留下「从 0 重放」的动画（本项目动效铁律）。 */
-  var CAL_FLIP_MS = 200, CAL_FLIP_DX = 16;
+  var CAL_FLIP_MS = 320, CAL_FLIP_DX = 64, CAL_FLIP_A0 = 0.35;
   function calFlip(dir) {
     if (!dir) return;
     var el = bodyEl.querySelector('.cal-page');
@@ -1791,14 +1806,14 @@
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     if (calAnim) { cancelAnimationFrame(calAnim); calAnim = 0; }
     var from = dir > 0 ? CAL_FLIP_DX : -CAL_FLIP_DX;
-    el.style.opacity = '0.2';
+    el.style.opacity = String(CAL_FLIP_A0);
     el.style.translate = from.toFixed(2) + 'px 0';
     var t0 = 0;
     function step(now) {
       if (!t0) t0 = now;
       var u = Math.min(1, (now - t0) / CAL_FLIP_MS);
       var e = 1 - Math.pow(1 - u, 4);                        // easeOutQuart ≈ --ease-out（同时钟滚动）
-      el.style.opacity = (0.2 + 0.8 * e).toFixed(3);
+      el.style.opacity = (CAL_FLIP_A0 + (1 - CAL_FLIP_A0) * e).toFixed(3);
       el.style.translate = (from * (1 - e)).toFixed(2) + 'px 0';
       if (u < 1) { calAnim = requestAnimationFrame(step); return; }
       // 收尾写数值、不摘属性（摘属性会在动画尾巴上触发一次样式重算，见 Dock 动效的教训）
@@ -1808,6 +1823,27 @@
       syncCalChip();                                          // 防御：收尾再对一次块位置
     }
     calAnim = requestAnimationFrame(step);
+  }
+  /* 头部上下滚动（2026-11-09 用户拍板，像时钟数字滚轮）：旧标题/节日克隆一份从原位滚出，
+     新字（已在 DOM 里）从反方向滚入，200ms 同拍。方向：下月旧字往上、新字从下；上月反过来。
+     DOM 大改会重放 CSS 动画，所以旧字克隆只活一个动画周期、结束后摘掉。 */
+  function calRollLead(body, oldTitle, oldHoliday, dir) {
+    var lead = body.querySelector('.cal-lead');
+    if (!lead) return;
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    var old = document.createElement('span');
+    old.className = 'cal-lead-old';
+    old.setAttribute('aria-hidden', 'true');
+    old.innerHTML = '<span class="cal-title">' + esc(oldTitle) + '</span>' +
+                    '<span class="cal-holiday">' + esc(oldHoliday) + '</span>';
+    lead.appendChild(old);
+    lead.classList.remove('roll-up', 'roll-down');
+    void lead.offsetWidth;                                    // 强制 reflow，让重播从 0 开始
+    lead.classList.add(dir > 0 ? 'roll-up' : 'roll-down');
+    setTimeout(function () {
+      old.remove();
+      lead.classList.remove('roll-up', 'roll-down');
+    }, 240);
   }
   // 日期页（星期行 + 日号 + 今日块画布）；翻月时只换这一段
   function calPageHtml(y, m, now) {
@@ -1843,10 +1879,16 @@
     var y = calY || now.getFullYear();
     var m = calY ? calM : now.getMonth();
     var tt = y + '年' + (m + 1) + '月';
-    if (title.textContent !== tt) title.textContent = tt;      // 条件写入：没变别动文本节点
     var holi = body.querySelector('.cal-holiday');
     var label = calHoliday(y, m, now);
-    if (holi && holi.textContent !== label) holi.textContent = label;
+    // 换字前先留旧值：头部要像滚轮一样滚出旧字（2026-11-09 拍板）
+    var oldTitle = title.textContent;
+    var oldHoliday = holi ? holi.textContent : '';
+    var titleChanged = title.textContent !== tt;
+    var holidayChanged = !!(holi && holi.textContent !== label);
+    if (titleChanged) title.textContent = tt;                  // 条件写入：没变别动文本节点
+    if (holidayChanged) holi.textContent = label;
+    if (titleChanged || holidayChanged) calRollLead(body, oldTitle, oldHoliday, calFlipDir || 1);
     page.innerHTML = calPageHtml(y, m, now);
     syncCalChip();
     return true;
@@ -1864,10 +1906,10 @@
   // 标题行：左 = 年/月 + 今日节日（有就显示、没有就空着），右 = ‹ ›
   function calHeadHtml(y, m, now) {
     var holi = calHoliday(y, m, now);
-    return '<div class="cal-head"><span class="cal-lead">' +
+    return '<div class="cal-head"><span class="cal-lead"><span class="cal-lead-line">' +
         '<span class="cal-title">' + y + '年' + (m + 1) + '月</span>' +
         '<span class="cal-holiday">' + esc(holi) + '</span>' +
-      '</span><span class="cal-nav">' +
+      '</span></span><span class="cal-nav">' +
           '<button type="button" class="cal-navbtn" data-act="prev" aria-label="上个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></svg></button>' +
           '<button type="button" class="cal-navbtn" data-act="next" aria-label="下个月"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 6l6 6-6 6"/></svg></button>' +
         '</span></div>';

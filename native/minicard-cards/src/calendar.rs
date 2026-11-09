@@ -24,10 +24,15 @@ pub struct Cell {
     pub today: bool,
 }
 
-/// 翻月/点按动效的时长（与 `card.html` 的 `CAL_FLIP_MS` 一致）
-pub const FLIP_MS: f32 = 200.0;
-/// 翻月位移（CSS 的 `CAL_FLIP_DX`）
-pub const FLIP_DX: f32 = 16.0;
+/// 翻月页进场时长（2026-11-09 用户要求「慢一点、方向要明显」：200→320ms = 仓库 slow 档）
+pub const FLIP_MS: f32 = 320.0;
+/// 翻月位移（CSS 的 `CAL_FLIP_DX`；16→64px，约卡宽 27%，左/右方向一眼能看出来）
+pub const FLIP_DX: f32 = 64.0;
+/// 翻月页淡入起点（0.2→0.35：位移过程中也看得见新页，不然只有「闪」没有「滑」）
+pub const FLIP_ALPHA0: f32 = 0.35;
+/// 头部（标题 + 节日）上下滚动时长：与时钟数字滚动同一条曲线（easeOutQuart / 300ms），
+/// 「像上下滚动数字的那种」——旧字滚出、新字滚入。
+pub const ROLL_MS: f32 = 300.0;
 
 #[derive(Clone, Debug)]
 pub struct Calendar {
@@ -41,16 +46,33 @@ pub struct Calendar {
     /// 导航按钮按压动画（−1 ‹ / +1 ›）
     pub tap_side: i32,
     pub tap_t0: Option<std::time::Instant>,
+    /// 头部上下滚动：方向 + 起点 + 旧标题/节日（跨天刷新不滚，翻月才滚）
+    pub roll_dir: i32,
+    pub roll_t0: Option<std::time::Instant>,
+    pub roll_prev_title: String,
+    pub roll_prev_holiday: String,
 }
 
 impl Calendar {
-    /// 翻月进场：新的一页从 `dir*(+16px)` 滑到位，同时 0.2 → 1 淡入
+    /// 翻月进场：新的一页从 `dir*(+64px)` 滑到位，同时 0.35 → 1 淡入（320ms）
     pub fn flip(&mut self, dir: i32) {
         if dir == 0 {
             return;
         }
         self.flip_dir = dir;
         self.flip_t0 = Some(std::time::Instant::now());
+    }
+
+    /// 头部上下滚动：旧标题/节日沿 `dir` 的垂直方向滚出，新字从反方向滚入（200ms）。
+    /// `dir > 0`（下月，页从右滑入）→ 旧字向上、新字从下；`dir < 0` 反过来。
+    pub fn roll_header(&mut self, prev_title: String, prev_holiday: String, dir: i32) {
+        if dir == 0 {
+            return;
+        }
+        self.roll_dir = dir;
+        self.roll_prev_title = prev_title;
+        self.roll_prev_holiday = prev_holiday;
+        self.roll_t0 = Some(std::time::Instant::now());
     }
 
     /// 按钮按压：0.86 → 1.06 → 1（200ms）
@@ -68,7 +90,27 @@ impl Calendar {
         let u = (ms / FLIP_MS).clamp(0.0, 1.0);
         let e = 1.0 - (1.0 - u).powi(4); // easeOutQuart，与 JS 同一曲线
         let from = if self.flip_dir > 0 { FLIP_DX } else { -FLIP_DX };
-        (from * (1.0 - e), 0.2 + 0.8 * e, u < 1.0)
+        (from * (1.0 - e), FLIP_ALPHA0 + (1.0 - FLIP_ALPHA0) * e, u < 1.0)
+    }
+
+    /// 头部滚动的这一刻：(旧字 dy, 新字 dy, 是否还在跑)。`band_h` = 头部文字带高度。
+    /// 两个 dy 之和恒为 0：同一条「滚轮」，旧字滚出多少、新字就滚入多少。
+    pub fn roll_amount(
+        &self,
+        now: std::time::Instant,
+        band_h: f32,
+    ) -> (f32, f32, bool) {
+        let Some(t0) = self.roll_t0 else {
+            return (0.0, 0.0, false);
+        };
+        let u = (now.duration_since(t0).as_secs_f32() * 1000.0 / ROLL_MS).clamp(0.0, 1.0);
+        let e = 1.0 - (1.0 - u).powi(4);
+        let (old_dy, new_dy) = if self.roll_dir > 0 {
+            (-band_h * e, band_h * (1.0 - e))
+        } else {
+            (band_h * e, -band_h * (1.0 - e))
+        };
+        (old_dy, new_dy, u < 1.0)
     }
 
     /// 按钮按压缩放系数（不在动画里返回 1.0）
@@ -88,10 +130,15 @@ impl Calendar {
         }
     }
 
-    /// 还有动效在跑？主循环据此保持 60fps
+    /// 还有动效在跑？主循环据此保持每显示帧重绘
     pub fn animating(&self, now: std::time::Instant) -> bool {
         if let Some(t0) = self.flip_t0 {
             if now.duration_since(t0).as_secs_f32() * 1000.0 < FLIP_MS {
+                return true;
+            }
+        }
+        if let Some(t0) = self.roll_t0 {
+            if now.duration_since(t0).as_secs_f32() * 1000.0 < ROLL_MS {
                 return true;
             }
         }
@@ -156,6 +203,10 @@ impl Calendar {
             flip_t0: None,
             tap_side: 0,
             tap_t0: None,
+            roll_dir: 0,
+            roll_t0: None,
+            roll_prev_title: String::new(),
+            roll_prev_holiday: String::new(),
         }
     }
 }
@@ -189,6 +240,10 @@ fn fest_solar(m: u32, d: u32) -> Option<&'static str> {
 }
 
 /// 农历节日（口径同 `card.html:FEST_LUNAR`）
+///
+/// 增补口径（0.1.3）：中元节 / 寒衣节 / 下元节是传统祭祀三节，此前表里没有，
+/// 2026-11-09（农历十月初一）寒衣节当天卡面空白就是这个缺口。
+/// 注意：清明 / 冬至属**节气**（公历日期每年浮动），不在本表；见 `holiday()` 注释。
 fn fest_lunar(m: u32, d: u32) -> Option<&'static str> {
     Some(match (m, d) {
         (1, 1) => "春节",
@@ -196,8 +251,11 @@ fn fest_lunar(m: u32, d: u32) -> Option<&'static str> {
         (2, 2) => "龙抬头",
         (5, 5) => "端午节",
         (7, 7) => "七夕节",
+        (7, 15) => "中元节",
         (8, 15) => "中秋节",
         (9, 9) => "重阳节",
+        (10, 1) => "寒衣节",
+        (10, 15) => "下元节",
         (12, 8) => "腊八节",
         (12, 23) => "小年",
         _ => return None,
@@ -210,8 +268,11 @@ fn nth_weekday(y: i32, m: u32, wd: u32, n: u32) -> u32 {
     1 + ((wd + 7 - first) % 7) + (n - 1) * 7
 }
 
-/// 当天节日 / 节气标签（空串 = 没有）。顺序与 `card.html:holidayOf` 一致：
+/// 当天节日标签（空串 = 没有）。顺序与 `card.html:holidayOf` 一致：
 /// 明天正月初一 → 除夕；农历节日；位次节日；公历节日。
+///
+/// 尚未收录**节气**（清明 / 冬至 / 立春…）——节气日期逐年浮动，需要一套太阳黄经算法，
+/// 不是查表能对的；待做，别用固定公历日期近似（会在多数年份差一天）。
 pub fn holiday(y: i32, m: u32, d: u32) -> String {
     use crate::lunar::solar_to_lunar;
     // 除夕：明天是农历正月初一
@@ -362,11 +423,18 @@ pub fn paint(
             (t.radius - 0.5).max(0.0),
             1.0,
         )?;
-        // 翻月：页（星期行 + 网格）从 dir·16px 滑到位、0.2 → 1 淡入；头（标题/节日/‹›）不动
+        // 翻月：页（星期行 + 网格）从 dir·64px 滑到位、0.35 → 1 淡入（320ms）；
+        // 头部：标题/节日走「上下滚动」（旧字滚出、新字滚入，200ms）；
+        // 两者共用同一 t0（点击时同时起跑），但各自动各自的层，互不叠加变换。
         let now = std::time::Instant::now();
-        let (dx, alpha, _) = c.flip_state(now);
-        if dx.abs() > 0.01 || alpha < 0.999 {
-            paint_tree(g, te, pal, t, c, &placed, Some(false), now)?;
+        let (dx, alpha, flipping) = c.flip_state(now);
+        let (old_dy, new_dy, rolling) = c.roll_amount(now, t.title_lh);
+
+        // ① 除「翻月页」和「头部标题/节日」之外的一切（‹›、hover、卡内其余）
+        paint_tree(g, te, pal, t, c, &placed, Part::Chrome, now)?;
+
+        // ② 翻月页：横向位移 + 淡入；静止时直接画
+        if flipping {
             let mut old = windows_numerics::Matrix3x2::default();
             g.d2d.GetTransform(&mut old);
             let m = windows_numerics::Matrix3x2 {
@@ -379,25 +447,201 @@ pub fn paint(
             } * old;
             g.d2d.SetTransform(&m);
             g.push_opacity(alpha)?;
-            paint_tree(g, te, pal, t, c, &placed, Some(true), now)?;
+            paint_tree(g, te, pal, t, c, &placed, Part::Page, now)?;
             g.pop_opacity();
             g.d2d.SetTransform(&old);
         } else {
-            paint_tree(g, te, pal, t, c, &placed, None, now)?;
+            paint_tree(g, te, pal, t, c, &placed, Part::Page, now)?;
         }
+
+        // ③ 头部标题/节日：滚动时两代文字同时画（裁在头部文字带里）
+        draw_header_text(g, te, pal, t, c, &placed, new_dy, old_dy, rolling)?;
         g.pop_clip();
         g.end()?;
         Ok(())
     }
 }
 
+/// `paint_tree` 的分层：翻月页与头部文字要分开做变换，别的元素保持静止
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// 除「翻月页」「头部标题/节日」之外的所有内容
+    Chrome,
+    /// 只画翻月页（星期行 + 日期网格 + 今日块）
+    Page,
+}
+
+fn skip_part(part: Part, id: u32) -> bool {
+    match part {
+        Part::Chrome => is_page_id(id) || id == 9501 || id == 9502,
+        Part::Page => !is_page_id(id),
+    }
+}
+
+/// 从布局树里找某个 id 的节点（头部标题/节日、导航按钮定位用）
+fn find_placed(p: &Placed, id: u32) -> Option<&Placed> {
+    if p.id == id {
+        return Some(p);
+    }
+    p.children.iter().find_map(|c| find_placed(c, id))
+}
+
+/// 头部两代文字的绘制（新字 + 滚动中的旧字），带文字阴影；滚动时裁在头部文字带内。
+#[allow(clippy::too_many_arguments)]
+fn draw_header_text(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &Palette,
+    t: &Tokens,
+    c: &Calendar,
+    placed: &Placed,
+    new_dy: f32,
+    old_dy: f32,
+    rolling: bool,
+) -> Result<()> {
+    let Some(title) = find_placed(placed, 9501) else {
+        return Ok(());
+    };
+    let holiday = find_placed(placed, 9502);
+    // 右边界：导航按钮左侧（用布局真值，别拿卡片宽硬算）
+    let right = find_placed(placed, 9510)
+        .map(|n| n.rect.x - t.head_gap)
+        .unwrap_or(t.w - t.pad_h);
+    let clip = D2D_RECT_F {
+        left: title.rect.x,
+        top: title.rect.y,
+        right: right.max(title.rect.x + 1.0),
+        bottom: title.rect.y + t.title_lh,
+    };
+    if rolling {
+        g.push_clip_round(clip, 0.0)?;
+    }
+    // 旧字先画：它正在往上/往下滚出
+    if rolling && !c.roll_prev_title.is_empty() {
+        let spec = text_spec(&c.roll_prev_title, t.title_fs, t.title_lh, 600, 0);
+        draw_card_text(
+            g,
+            te,
+            pal,
+            &spec,
+            title.rect.x,
+            title.rect.y + old_dy,
+            (clip.right - clip.left).max(1.0),
+            pal.fg,
+            false,
+        )?;
+    }
+    if rolling && !c.roll_prev_holiday.is_empty() {
+        if let Some(h) = holiday {
+            let spec = text_spec(&c.roll_prev_holiday, t.holiday_fs, t.holiday_lh, 500, 0);
+            draw_card_text(
+                g,
+                te,
+                pal,
+                &spec,
+                h.rect.x,
+                h.rect.y + old_dy,
+                (clip.right - h.rect.x).max(1.0),
+                pal.accent_mix,
+                false,
+            )?;
+        }
+    }
+    // 新字：从反方向滚入
+    if let Some(spec) = title.text() {
+        draw_card_text(
+            g,
+            te,
+            pal,
+            spec,
+            title.rect.x,
+            title.rect.y + new_dy,
+            (clip.right - clip.left).max(1.0),
+            pal.fg,
+            false,
+        )?;
+    }
+    if let Some(h) = holiday {
+        if let Some(spec) = h.text() {
+            draw_card_text(
+                g,
+                te,
+                pal,
+                spec,
+                h.rect.x,
+                h.rect.y + new_dy,
+                (clip.right - h.rect.x).max(1.0),
+                pal.accent_mix,
+                false,
+            )?;
+        }
+    }
+    if rolling {
+        g.pop_clip_round();
+    }
+    Ok(())
+}
+
+/// 卡片文字的统一绘制（布局 + 阴影 + 灰阶加粗实验），`x/y` 是**行盒左上角**。
+/// 返回值之外不改任何状态：调用方负责颜色/透明度层。
+#[allow(clippy::too_many_arguments)]
+fn draw_card_text(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &Palette,
+    spec: &TextSpec,
+    x: f32,
+    y: f32,
+    w: f32,
+    color: D2D1_COLOR_F,
+    other: bool,
+) -> Result<()> {
+    let lay = te.layout_spec(spec, w, spec.line_h + 6.0, TextMode::Clip)?;
+    let mut sh = TextShadow::CARD.with_color(pal.shadow);
+    if other {
+        sh.color.a *= 0.32;
+    }
+    draw_shadow_taps(g, &lay, x + g.text_dx, y + g.text_dy, &sh)?;
+    // 阴影会把笔刷改成影色 —— 正文必须在自己画之前重新上色，否则整卡文字都是「影色」
+    set_color(g, color)?;
+    unsafe {
+        g.d2d.DrawTextLayout(
+            Vector2 {
+                X: x + g.text_dx,
+                Y: y + g.text_dy,
+            },
+            &lay,
+            &g.brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        // 笔画加粗实验：Chromium 的 AA 会做 stem darkening（同一覆盖率下更暗），
+        // D2D 是纯覆盖率。用两个亚像素偏移的低透明度副本把边缘补厚。
+        let (off, a) = (g.embolden_off, g.embolden_a);
+        if off > 0.0 && a > 0.0 {
+            for (ox, oy) in [(-off, 0.0), (off, 0.0)] {
+                set_color(g, D2D1_COLOR_F { a, ..color })?;
+                g.d2d.DrawTextLayout(
+                    Vector2 {
+                        X: x + g.text_dx + ox,
+                        Y: y + g.text_dy + oy,
+                    },
+                    &lay,
+                    &g.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+            set_color(g, color)?;
+        }
+    }
+    Ok(())
+}
+
 fn text_node(s: &str, size: f32, lh: f32, weight: u16) -> Node {
     text_node_aligned(s, size, lh, weight, 0)
 }
 
-/// `align`: 0 左 / 1 右 / 2 居中（走 DWrite 的文本对齐，盒子有多宽就按多宽居中）
-fn text_node_aligned(s: &str, size: f32, lh: f32, weight: u16, align: u8) -> Node {
-    Node::text(TextSpec {
+fn text_spec(s: &str, size: f32, lh: f32, weight: u16, align: u8) -> TextSpec {
+    TextSpec {
         s: s.to_string(),
         size,
         line_h: lh,
@@ -406,7 +650,12 @@ fn text_node_aligned(s: &str, size: f32, lh: f32, weight: u16, align: u8) -> Nod
         align,
         tabular: true,
         spacing_em: 0.0,
-    })
+    }
+}
+
+/// `align`: 0 左 / 1 右 / 2 居中（走 DWrite 的文本对齐，盒子有多宽就按多宽居中）
+fn text_node_aligned(s: &str, size: f32, lh: f32, weight: u16, align: u8) -> Node {
+    Node::text(text_spec(s, size, lh, weight, align))
 }
 
 fn tree(t: &Tokens, c: &Calendar) -> Node {
@@ -553,15 +802,10 @@ fn paint_tree(
     t: &Tokens,
     c: &Calendar,
     pl: &Placed,
-    only: Option<bool>,
+    part: Part,
     now: std::time::Instant,
 ) -> Result<()> {
-    // only = Some(true) 只画页、Some(false) 只画头、None 全画
-    let skip_self = match only {
-        Some(true) => !is_page_id(pl.id),
-        Some(false) => is_page_id(pl.id),
-        None => false,
-    };
+    let skip_self = skip_part(part, pl.id);
     // 导航按钮：1px 描边吸附 + 居中箭头
     if !skip_self && (pl.id == 9510 || pl.id == 9511) {
         let px = pl.rect.x.round();
@@ -653,8 +897,6 @@ fn paint_tree(
         } else {
             color
         };
-        // 宽度必须**恰好**等于盒子：多给 2px 在居中时会把文字推右 1px（实测 dx 趋势揭示的）
-        let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, TextMode::Clip)?;
         // 今日数字要在 22 高的块里居中（普通格是 17.5 的行盒，直接画即可）
         // 横向居中由 `align=2` 完成；这里**只**补纵向（22 高的块里居中 17.5 的行盒）。
         // 曾经这里又加了一次 `(w - tw)/2` —— 双重居中，把「31」推到蓝块外 ~5px。
@@ -663,55 +905,20 @@ fn paint_tree(
         } else {
             0.0
         };
-        let dx = 0.0;
-        // `.card { text-shadow: 0 .833px 1.667px var(--tshadow) }`：标题 / 节日 / 星期 / 日期
-        // 全部同吃这一条。跨月格是 `.cal-d.other { opacity: .32 }`（整元素不透明度），
-        // 投影也得跟着淡下去 —— 只给正文乘 alpha、影保持满黑，跨月格会冒出一圈深灰边。
-        let mut sh = TextShadow::CARD.with_color(pal.shadow);
-        if other {
-            sh.color.a *= 0.32;
-        }
-        draw_shadow_taps(
+        draw_card_text(
             g,
-            &lay,
-            pl.rect.x + dx + g.text_dx,
-            pl.rect.y + dy + g.text_dy,
-            &sh,
+            te,
+            pal,
+            spec,
+            pl.rect.x,
+            pl.rect.y + dy,
+            pl.rect.w,
+            color,
+            other,
         )?;
-        // 阴影会把笔刷改成影色 —— 正文必须在自己画之前重新上色，否则整卡文字都是「影色」
-        set_color(g, color)?;
-        unsafe {
-            g.d2d.DrawTextLayout(
-                Vector2 {
-                    X: pl.rect.x + dx + g.text_dx,
-                    Y: pl.rect.y + dy + g.text_dy,
-                },
-                &lay,
-                &g.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-            // 笔画加粗实验：Chromium 的 AA 会做 stem darkening（同一覆盖率下更暗），
-            // D2D 是纯覆盖率。用两个亚像素偏移的低透明度副本把边缘补厚。
-            let (off, a) = (g.embolden_off, g.embolden_a);
-            if off > 0.0 && a > 0.0 {
-                for (ox, oy) in [(-off, 0.0), (off, 0.0)] {
-                    set_color(g, D2D1_COLOR_F { a, ..color })?;
-                    g.d2d.DrawTextLayout(
-                        Vector2 {
-                            X: pl.rect.x + dx + ox,
-                            Y: pl.rect.y + dy + oy,
-                        },
-                        &lay,
-                        &g.brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    );
-                }
-                set_color(g, color)?;
-            }
-        }
     }
     for ch in &pl.children {
-        paint_tree(g, te, pal, t, c, ch, only, now)?;
+        paint_tree(g, te, pal, t, c, ch, part, now)?;
     }
     Ok(())
 }
@@ -775,6 +982,54 @@ mod tests {
         assert_eq!(c.cells[2].day, 30);
         assert_eq!(c.cells[34].day, 1, "末尾是 11 月 1 日");
     }
+
+    /// 2026-11-09 用户拍板：翻月要「慢一点、左右方向明显」，头部改「上下滚动」
+    #[test]
+    fn 翻月与头部滚动的拍板参数() {
+        assert_eq!(FLIP_MS, 320.0, "翻月 320ms（原 200）");
+        assert_eq!(FLIP_DX, 64.0, "翻月位移 64px（原 16）");
+        assert!((FLIP_ALPHA0 - 0.35).abs() < 1e-6, "淡入起点 0.35（原 0.2）");
+        assert_eq!(ROLL_MS, 300.0, "头部滚动 300ms（与时钟数字同一曲线）");
+    }
+
+    /// 头部滚动：旧字/新字始终相隔一个文字带（同一条滚轮、中间无空隙）、方向正确、200ms 收尾归位。
+    #[test]
+    fn 头部滚动像滚轮且收尾归位() {
+        use std::time::{Duration, Instant};
+        let mut c = Calendar::build(2026, 11, 0, 30, 9);
+        let band = 20.8f32;
+        let now = Instant::now();
+        // dir > 0（下月）：旧字向上滚出、新字从下方滚入
+        c.roll_header("2026年10月".into(), String::new(), 1);
+        c.roll_t0 = Some(now);
+        let (old0, new0, running0) = c.roll_amount(now, band);
+        assert!(running0);
+        assert!(old0.abs() < 1e-4, "起点旧字在原位");
+        assert!((new0 - band).abs() < 1e-4, "起点新字在下方一整带");
+        let mid = now + Duration::from_millis(100);
+        let (old1, new1, running1) = c.roll_amount(mid, band);
+        assert!(running1, "100ms 时还在跑");
+        assert!(old1 < 0.0 && new1 > 0.0, "下月：旧上、新下");
+        assert!(
+            (new1 - old1 - band).abs() < 1e-3,
+            "两代文字始终相隔一个带：{new1} - {old1}"
+        );
+        let end = now + Duration::from_millis(ROLL_MS as u64);
+        let (old2, new2, running2) = c.roll_amount(end, band);
+        assert!(!running2, "{ROLL_MS}ms 收尾");
+        assert!((old2 + band).abs() < 1e-4, "旧字整带滚出");
+        assert!(new2.abs() < 1e-4, "新字归位");
+        // dir < 0（上月）镜像
+        c.roll_header("2026年12月".into(), String::new(), -1);
+        c.roll_t0 = Some(now);
+        let (old3, new3, _) = c.roll_amount(mid, band);
+        assert!(old3 > 0.0 && new3 < 0.0, "上月：旧下、新上");
+        assert!((new3 - old3 + band).abs() < 1e-3);
+        // animating 的窗口：滚动期间 true、到点 false
+        c.roll_t0 = Some(now);
+        assert!(c.animating(now + Duration::from_millis(50)));
+        assert!(!c.animating(end));
+    }
 }
 
 /// 某月的天数（含闰年）——`build` 补相邻月份格子用。
@@ -814,6 +1069,19 @@ mod holiday_tests {
         assert_eq!(holiday(2026, 3, 3), "元宵节");
         // 中秋 = 八月十五 = 9/25
         assert_eq!(holiday(2026, 9, 25), "中秋节");
+    }
+
+    /// 用户报障回归：2026-11-09 是农历十月初一（寒衣节），以前表里没有 → 卡面空白。
+    /// 用农历年表反查得到的三个固定农历祭日都必须是这个口径。
+    #[test]
+    fn 传统祭祀节日寒衣_中元_下元() {
+        assert_eq!(holiday(2026, 11, 9), "寒衣节", "农历十月初一");
+        assert_eq!(holiday(2026, 11, 8), "", "前一天（九月三十）不该有节日");
+        assert_eq!(holiday(2026, 11, 10), "", "后一天（十月初二）不该有节日");
+        assert_eq!(holiday(2026, 8, 27), "中元节", "农历七月十五");
+        assert_eq!(holiday(2026, 11, 23), "下元节", "农历十月十五");
+        // 闰月不过节：2033 闰十一月，闰月里的同名日子不能当节日（与 holidayOf 同口径）
+        assert_eq!(holiday(2033, 12, 22), "");
     }
 
     #[test]

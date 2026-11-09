@@ -9,6 +9,7 @@
 mod anim;
 mod guide;
 mod appwin;
+mod display;
 mod drop;
 mod icon;
 mod menu;

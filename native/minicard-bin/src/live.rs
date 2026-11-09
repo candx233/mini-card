@@ -38,6 +38,8 @@ use minicard_draw::paint::{fill_round, set_color, stroke_round};
 use minicard_draw::text::TextEngine;
 use minicard_shell::gfx::Gfx;
 
+use crate::display::{advance_deadline, DisplayTiming};
+
 /// 超采样倍率（环境变量控制，默认 1 = 现有行为）：`MC_SS=2` 时卡片/Dock 按 2× 像素渲染、
 /// DComp 0.5 缩放显示 —— 文字边缘多 4 倍采样。取证/对照阶段由脚本设，稳定后再改默认。
 /// 超采样倍率：默认 **2×**（0.1.3 起，文字边缘更软/台阶更少；release 实测 9 卡
@@ -328,10 +330,14 @@ struct CardWin {
     /// 玻璃位图（按卡片位置裁壁纸）—— 先留空，等玻璃层接线
     #[allow(dead_code)]
     glass: Option<(ID2D1Bitmap1, D2D_RECT_F)>,
-    /// 下次重绘时刻：有动画 16.7ms，静置按卡片自己的 refresh_ms
+    /// 下次重绘时刻（绝对 deadline：动画期按显示帧整步推进，静置按 refresh_ms）
     next_draw: Instant,
     /// 静置节拍（config 的 refresh_ms，钳到 200ms..60s）
     refresh: Duration,
+    /// 这张卡所在显示器的刷新率与动画节拍（建窗 / 跨屏 / 显示器变化时重新探测）
+    timing: DisplayTiming,
+    /// `MC_FPS_LOG=1` 时的动画帧间隔采样（默认 None：不分配、不动）
+    fps: Option<FpsProbe>,
     /// 在 config.cards 里的下标（拖动/勾选要回写）
     cfg_idx: usize,
     /// 该窗口的 DPI（客户区像素 → 逻辑点）
@@ -355,6 +361,8 @@ struct DockWin {
     origin: (i32, i32),
     /// 该窗的 DPI（指针/区域换算）
     dpi: f32,
+    /// 该窗所在显示器的刷新率（交互动画每个显示帧一步）
+    timing: DisplayTiming,
     /// 布局用的指针 x（窗内逻辑 px）；离场保留最后位置，收缩才不会往左吸
     px: f32,
     /// 进场进度 0..1 与速度（临界阻尼 τ=50ms）
@@ -455,7 +463,8 @@ enum State {
     Todo(Vec<todo::Item>),
     /// 通知卡（0.1.3）：数据在 `NotifyService` 全局服务里，绘制时读快照。
     Notify {
-        scroll: usize,
+        /// 连续滚动 / 到达 / 删除 / hover / 清除确认 / 状态淡入的时间基（B 案 Motion）
+        motion: notify_card::Motion,
         show_body: bool,
         per_app: usize,
         /// 抬头「清除」第一次点击后的确认截止时刻（3 秒内再点才真清）
@@ -1019,6 +1028,8 @@ pub fn run(
         let wall = load_wallpaper();
         let dpi_sys = GetDpiForSystem() as f32;
         let mut wins: Vec<CardWin> = Vec::new();
+        // 启动日志去重：同一档刷新率只打一行（多屏不同档才各打一行）
+        let mut timing_seen: Vec<(u32, &'static str)> = Vec::new();
         for (cfg_idx, card) in cfg.cards.iter().enumerate().filter(|(_, c)| c.enabled) {
             let (win_w, win_h) = (card.size[0], card.size[1]);
             let w_px = (win_w * dpi_sys / 96.0).round() as i32;
@@ -1131,7 +1142,7 @@ pub fn run(
                     State::Calendar(calendar_of(y, m, d), 0, d)
                 }
                 CardKind::Notify => State::Notify {
-                    scroll: 0,
+                    motion: notify_card::Motion::new(),
                     show_body: cfg.settings.notify_show_body,
                     per_app: cfg.settings.notify_max_per_app.clamp(1, 3) as usize,
                     clear_armed: None,
@@ -1145,6 +1156,9 @@ pub fn run(
             }
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             PINNED.lock().unwrap().push((hwnd.0 as isize, card.pinned));
+            // 显示同步：按这张卡所在显示器探测刷新率（多屏可以不同档）
+            let timing = crate::display::detect(hwnd);
+            log_timing_once(&timing, &mut timing_seen);
             wins.push(CardWin {
                 hwnd,
                 gfx: Some(gfx),
@@ -1155,6 +1169,8 @@ pub fn run(
                 glass: glass_pair,
                 next_draw: Instant::now(),
                 refresh: Duration::from_millis(card.refresh_ms.clamp(200, 60_000)),
+                timing,
+                fps: FpsProbe::enabled().then(FpsProbe::new),
                 cfg_idx,
                 dpi,
                 slice_origin: (card.pos[0].round() as i32, card.pos[1].round() as i32),
@@ -1277,6 +1293,8 @@ pub fn run(
                     spawn_running_watcher();
                     spawn_click_worker();
                     let dk_dpi = dpi;
+                    let timing = crate::display::detect(hwnd);
+                    log_timing_once(&timing, &mut timing_seen);
                     let mut dw = DockWin {
                         hwnd,
                         gfx: Some(gfx),
@@ -1285,6 +1303,7 @@ pub fn run(
                         glass: glass_pair,
                         origin: (x, y),
                         dpi: dk_dpi,
+                        timing,
                         px: dk.w / 2.0,
                         ease: 0.0,
                         ease_v: 0.0,
@@ -1359,10 +1378,10 @@ pub fn run(
                             continue;
                         };
                         if let State::Notify {
-                            scroll,
+                            motion,
                             show_body,
                             per_app,
-                            ..
+                            clear_armed,
                         } = &mut win.state
                         {
                             let tk = notify_card::Tokens::notify(win.w, win.h);
@@ -1370,15 +1389,14 @@ pub fn run(
                             let opts = notify_card::Options {
                                 show_body: *show_body,
                                 per_app: *per_app,
-                                clear_armed: false,
+                                clear_armed: clear_armed.is_some(),
                             };
-                            let max =
-                                notify_card::max_scroll_opts(&tk, Some(&snap), opts);
-                            if delta > 0 {
-                                *scroll = scroll.saturating_sub(1);
-                            } else if delta < 0 {
-                                *scroll = (*scroll + 1).min(max);
-                            }
+                            // 连续滚动（2026-11-09 用户拍板）：按像素补间，不再整页翻
+                            let max = notify_card::max_scroll_px(&tk, Some(&snap), opts, motion);
+                            let step = notify_card::wheel_step_px(&tk);
+                            // WM_MOUSEWHEEL：delta > 0 = 向上滚 = 内容下移 = offset 减小
+                            let dir = if delta > 0 { -1.0 } else { 1.0 };
+                            motion.scroll_by(dir * step, max, Instant::now());
                             win.next_draw = Instant::now();
                         }
                     }
@@ -1910,6 +1928,8 @@ pub fn run(
                                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                                         );
                                         reslice(win, &wall, blur);
+                                        // 位置热载可能把卡搬到另一块屏：刷新率跟着重探
+                                        retime_card(win);
                                     }
                                 }
                             }
@@ -1977,8 +1997,13 @@ pub fn run(
             // Dock：悬停放大 + 名字气泡（每帧算，指针不动就不重绘）
             let mut dock_busy = false;
             let mut dock_paint_ms = 0.0f32;
+            // Dock 的显示帧长（无 Dock 时给个无害的 60Hz；dock_busy=false 时不会用到）
+            let mut dock_frame_step = Duration::from_micros(16_667);
             if let Some(dw) = dock_win.as_mut() {
                 let dpi = dw.dpi;
+                // Dock 交互/放大动画：每个显示帧一步（200Hz → 5ms）；MC_DOCK_HZ 只留给台架覆盖
+                let dock_step = dock_step_of(&dw.timing);
+                dock_frame_step = dock_step;
                 // 验收用：`MC_DOCK_DEMO=<窗内 x>` 把指针钉死，不依赖真鼠标（截图取证）
                 let demo_x = std::env::var("MC_DOCK_DEMO").ok().and_then(|s| s.parse::<f32>().ok());
                 // 性能台架：`MC_DOCK_SWEEP=1` 让指针在条上来回扫（真鼠标会被抢走，量不了帧率）
@@ -2258,19 +2283,10 @@ pub fn run(
                         }
                     }
                 }
-                // 悬停/动画中 60fps：**绝对节拍**（`next += 16.667ms`）而不是 `now += 16.667ms`
+                // 悬停/动画中：**每个显示帧**（绝对节拍 `next = prev + step`，不是 `now + step`），
+                // 落后整帧就跳到下一个显示帧。刷新率来自所在显示器（MC_DOCK_HZ 只做台架覆盖）。
                 if moving || hit.is_some() || bubble_moving || dragging || dw.settle_t0.is_some() {
-                    let hz: u64 = std::env::var("MC_DOCK_HZ").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
-                    let step = Duration::from_micros(1_000_000 / hz.max(30));
-                    if dw.next_draw > now + step * 3 {
-                        dw.next_draw = now;
-                    }
-                    let mut next = dw.next_draw + step;
-                    if next < now {
-                        let us = 1_000_000 / hz.max(30);
-                        let behind = ((now - next).as_micros() / us as u128) as u64 + 1;
-                        next += Duration::from_micros(us * behind);
-                    }
+                    let (next, _) = advance_deadline(dw.next_draw, now, dock_step);
                     dw.next_draw = next;
                 } else {
                     dw.next_draw = now + Duration::from_millis(1000);
@@ -2286,9 +2302,11 @@ pub fn run(
                     }
                     continue;
                 }
-                // Dock 正在跑高帧率、且上一帧已经吃掉一半预算（120Hz 下一帧只有 8.3ms）：
-                // 这一轮不画卡，下一轮再画（卡只晚 8ms，肉眼看不出来）
-                if dock_busy && dock_paint_ms > 4.0 {
+                // Dock 正在跑显示帧、且上一帧已经吃掉一半帧预算：这一轮不画卡，下一轮再画
+                // （卡只晚一个显示帧）。预算按 Dock 所在屏的帧长算：200Hz → 2.5ms，
+                // 60Hz → 8.33ms（原写死 4ms 在 200Hz 下等于吃掉 80% 预算，所以跟着刷新率走）。
+                let dock_yield_ms = (dock_frame_step.as_secs_f32() * 500.0).max(2.0);
+                if dock_busy && dock_paint_ms > dock_yield_ms {
                     if win.next_draw < earliest {
                         earliest = win.next_draw;
                     }
@@ -2307,14 +2325,24 @@ pub fn run(
                     &date,
                     &lunar_txt,
                 )?;
-                // 动画中按卡片类型分频；静置按 1s 走（采样也是 1s 一拍），空闲几乎不烧 CPU
-                // 短动效（待办勾选/FLIP、翻月、时钟翻位）用 200Hz：这几段只有
-                // 280~420ms，60fps 在 200Hz 屏上会明显跳；连续补间（性能/网络条、
-                // 音乐播放、番茄钟进度）仍走 60fps，别让常驻卡白烧 CPU。
-                let anim_step = anim_step(win.kind, animating, win.refresh);
-                win.next_draw = now + anim_step;
+                // 动画中按显示器节拍：短动效（待办勾选/FLIP、翻月、时钟翻位）每显示帧一步；
+                // 连续补间（性能/网络条、音乐播放、番茄钟进度）按 max(1,floor(hz/60)) 帧抽帧
+                // （保证 ≥60fps，别让常驻卡白烧 CPU）；静置按卡片自己的 refresh。
+                let anim_step = anim_step(win.kind, animating, win.refresh, &win.timing);
+                // 绝对 deadline：从上一拍按整步推进（不是 now + step），落后跳帧、不累积漂移
+                let (next, skipped) = advance_deadline(win.next_draw, now, anim_step);
+                win.next_draw = next;
                 if win.next_draw < earliest {
                     earliest = win.next_draw;
+                }
+                // MC_FPS_LOG=1：按卡统计动画帧间隔（静置帧不计入）
+                if let Some(fps) = win.fps.as_mut() {
+                    if animating {
+                        fps.note(now, anim_step, skipped);
+                        fps.log_if_due(win.kind, win.timing.hz);
+                    } else {
+                        fps.reset();
+                    }
                 }
             }
 
@@ -2443,14 +2471,16 @@ fn draw_one(
             p.tick(now);
             let tk = pomo::Tokens::pomo(win.w, win.h);
             pomo::paint(gfx, te, pal, &tk, p, now, glass_pair)?;
-            p.is_running()
+            // 只有「有效模式仍是运行中」才需要持续高帧率重绘；到点后 eff_mode 变 Done，
+            // 若还按 mode==Run 返回 true，会永远每显示帧重画（实测空转 30% CPU）。
+            p.eff_mode(now) == pomo::PomoMode::Run || p.animating(now)
         }
         (State::Todo(items), _) => {
             let tk = todo::Tokens::todo(win.w, win.h);
             todo::paint(gfx, te, pal, &tk, items, now, glass_pair)?;
             todo::animating(items, now)
         }
-        (State::Notify { scroll, show_body, per_app, clear_armed }, _) => {
+        (State::Notify { motion, show_body, per_app, clear_armed }, _) => {
             // 服务每 500ms 轮询一次；卡片按自身 refresh 节拍读快照（默认 1s，够及时也不白烧）
             let ns = if notify_enabled() {
                 Some(notify_service().snapshot())
@@ -2478,11 +2508,12 @@ fn draw_one(
                 ns.as_ref(),
                 &icons,
                 opts,
-                *scroll,
-                unix_now_ms().max(0) as u64,
+                motion,
+                now,
                 glass_pair,
             )?;
-            false
+            // 到达/删除/hover/滚动/清除/状态淡入还在跑：按显示帧继续重绘
+            motion.animating(now)
         }
         (State::Weather { seen_at }, _) => {
             let ws = wshared.read().unwrap().clone();
@@ -2639,9 +2670,28 @@ fn draw_one(
                 *c = calendar_for(y, mo, *off, d);
                 *built_day = today_day;
             }
+            // 台架钩子（默认关）：没有用户点击也能持续产生短动效，用来量「每显示帧」的节拍。
+            // 每 N 毫秒调一次 flip + roll_header（真实点击时两者同时起跑；月份不变，只验动效）。
+            if let Some(period) = cal_demo_period() {
+                static NEXT: Mutex<Option<Instant>> = Mutex::new(None);
+                let due = {
+                    let mut g = NEXT.lock().unwrap();
+                    let due = g.map(|t| now >= t).unwrap_or(true);
+                    if due {
+                        *g = Some(now + period);
+                    }
+                    due
+                };
+                if due {
+                    let prev_title = c.title();
+                    let prev_holiday = c.holiday.clone();
+                    c.flip(1);
+                    c.roll_header(prev_title, prev_holiday, 1);
+                }
+            }
             let ck = calendar::Tokens::cal(win.w, win.h);
             calendar::paint(gfx, te, pal, &ck, c, glass_pair)?;
-            // 翻月/按压缩放还在跑：保持 60fps，别等 1s 节拍
+            // 翻月/按压缩放还在跑：按显示帧节拍继续重绘，别等静置节拍
             c.animating(now)
         }
     };
@@ -2751,12 +2801,16 @@ fn click(
                     calendar::Hit::Prev => -1,
                     calendar::Hit::Next => 1,
                 };
+                // 建新页之前先记住旧标题/节日：头部要像滚轮一样「旧字滚出、新字滚入」
+                let prev_title = c.title();
+                let prev_holiday = c.holiday.clone();
                 *off += dir;
                 *c = calendar_for(yy, mo, *off, dd);
                 *built_day = if *off == 0 { dd } else { 0 };
                 // 只有用户点 ‹ › 才带动画（跨天刷新走 0，不重放）
                 c.flip(dir);
                 c.tap(dir);
+                c.roll_header(prev_title, prev_holiday, dir);
             }
         }
         State::Music { cover, prev, flip_t0, flip_dir, demo_t0, last_track } => {
@@ -2801,7 +2855,7 @@ fn click(
             }
         }
         State::Notify {
-            scroll,
+            motion,
             show_body,
             per_app,
             clear_armed,
@@ -2818,7 +2872,7 @@ fn click(
             };
             let mut m: &TextEngine = te;
             if let Some(h) =
-                notify_card::hit_at_with_scroll_opts(&mut m, &tk, Some(&snap), *scroll, opts, x, y)
+                notify_card::hit_at(&mut m, &tk, Some(&snap), opts, motion, x, y)
             {
                 match h {
                     notify_card::Hit::Item { id, aumid } => {
@@ -2843,7 +2897,11 @@ fn click(
                             }
                         });
                     }
-                    notify_card::Hit::Remove { id } => notify_service().remove(id),
+                    notify_card::Hit::Remove { id } => {
+                        // 本地先退场（180ms 塌缩 + suppress 压住快照），Windows 删除是异步的
+                        motion.mark_removed(id, Instant::now());
+                        notify_service().remove(id);
+                    }
                     notify_card::Hit::ClearAll => {
                         let armed = clear_armed
                             .is_some_and(|t| t.elapsed() < Duration::from_secs(3));
@@ -2854,10 +2912,11 @@ fn click(
                                 svc.remove(it.id);
                             }
                             *clear_armed = None;
-                            *scroll = 0;
+                            motion.reset_scroll();
                             minicard_shell::mlog!("通知清除：{} 条", snap.items.len());
                         } else {
-                            // 第一次点击先挂确认，3 秒内再点才真清
+                            // 第一次点击先挂确认，3 秒内再点才真清；
+                            // 150ms 交叉淡入由 paint 按 opts.clear_armed 同步给 Motion
                             *clear_armed = Some(Instant::now());
                             minicard_shell::mlog!("通知清除：等待确认");
                         }
@@ -2897,6 +2956,8 @@ fn drag_end(wins: &mut [CardWin], cfg: &mut Config, wall: &Option<glass::Wall>, 
         }
     }
     reslice(win, wall, blur);
+    // 拖到另一块屏：动画节拍跟着那块屏的刷新率走
+    retime_card(win);
     win.next_draw = Instant::now();
 }
 
@@ -3031,6 +3092,8 @@ fn handle_display_changed(
             }
         }
         reslice(win, wall, blur);
+        // 显示器增删/改刷新率/跨屏之后，这张卡的节拍要按新屏重探
+        retime_card(win);
         win.next_draw = Instant::now();
     }
     if let Some(dw) = dock_win {
@@ -3171,6 +3234,8 @@ fn dock_rebuild(
     }
     dw.origin = (x, y);
     *DOCK_ORIGIN.lock().unwrap() = Some((x, y, dw.dpi));
+    // Dock 可能换了屏/换了刷新率：交互动画节拍跟着重探（没变就静默）
+    retime_dock(dw);
     crate::drop::install(dw.hwnd, d.clone(), (x, y), dw.dpi);
     dw.running = vec![false; d.items.len()];
     dw.drag_from = None;
@@ -3459,18 +3524,145 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
-/// 动画重绘间隔：短动效按 200Hz 跑，连续补间保持 60Hz。
+/// 动画重绘间隔（显示同步后）：短动效每个显示帧一步，连续补间按整数帧抽帧。
 ///
-/// 200Hz 屏上 60fps 的 280~420ms 勾选/FLIP 只有 17~25 帧，肉眼就是一跳一跳；
-/// 而性能/网络的条宽补间、音乐播放、番茄钟进度是常驻的，提到 200Hz 会白烧 CPU。
-fn anim_step(kind: CardKind, animating: bool, refresh: Duration) -> Duration {
+/// 短动效（待办勾选/FLIP、时钟翻位、日历翻月）只有 200~420ms，60fps 在 200Hz 屏上会明显跳，
+/// 所以按显示器刷新率每帧走；连续补间（性能/网络条、音乐播放、番茄钟进度等）是常驻的，
+/// 按 `max(1, floor(hz/60))` 个显示帧抽一帧，保证 ≥60fps 又不让常驻卡白烧 CPU。
+/// 静置仍用卡片自己的 `refresh`（数据刷新节拍）。
+fn anim_step(
+    kind: CardKind,
+    animating: bool,
+    refresh: Duration,
+    timing: &DisplayTiming,
+) -> Duration {
     if !animating {
         return refresh;
     }
     match kind {
-        CardKind::Todo | CardKind::Clock | CardKind::Calendar => Duration::from_micros(5_000),
-        _ => Duration::from_micros(16_667),
+        // 通知卡的到达/删除/hover/滚动/清除/状态淡入都是短交互（120~180ms）：
+        // 与翻月/勾选同一档，每显示帧一步（B 案 2026-11-09）
+        CardKind::Todo | CardKind::Clock | CardKind::Calendar | CardKind::Notify => {
+            timing.frame_step()
+        }
+        _ => timing.ambient_step(),
     }
+}
+
+/// Dock 交互动画的一步：默认每个显示帧；`MC_DOCK_HZ` 只给台架覆盖（30..=1000）。
+fn dock_step_of(timing: &DisplayTiming) -> Duration {
+    static OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
+    let hz = OVERRIDE.get_or_init(|| {
+        std::env::var("MC_DOCK_HZ")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    });
+    match *hz {
+        Some(hz) => Duration::from_micros(1_000_000 / hz.clamp(30, 1000)),
+        None => timing.frame_step(),
+    }
+}
+
+/// 启动日志去重：同一档刷新率只打一行（多屏不同档才各打一行）。
+/// 行文格式见 `DisplayTiming::summary`，复核脚本按 `显示同步：` 开头抓。
+fn log_timing_once(t: &DisplayTiming, seen: &mut Vec<(u32, &'static str)>) {
+    let key = (t.hz, t.source.as_str());
+    if seen.contains(&key) {
+        return;
+    }
+    seen.push(key);
+    minicard_shell::mlog!("{}", t.summary());
+}
+
+/// 卡片跨屏 / 显示器变化后重探刷新率；只有真的变了才打日志（避免拖动时刷屏）。
+fn retime_card(win: &mut CardWin) {
+    let t = crate::display::detect(win.hwnd);
+    if t.hz != win.timing.hz || t.source != win.timing.source {
+        win.timing = t;
+        minicard_shell::mlog!("卡 {:?}：{}", win.kind, t.summary());
+    }
+}
+
+/// Dock 跨屏 / 显示器变化后重探刷新率。
+fn retime_dock(dw: &mut DockWin) {
+    let t = crate::display::detect(dw.hwnd);
+    if t.hz != dw.timing.hz || t.source != dw.timing.source {
+        dw.timing = t;
+        minicard_shell::mlog!("Dock：{}", t.summary());
+    }
+}
+
+/// `MC_FPS_LOG=1` 的按卡动画帧间隔采样。
+///
+/// 只在动画连续绘制期间采样：静置那一拍之后的第一帧、或间隔 >500ms 的断档不计入；
+/// 攒够 60 帧打一次 p50/p95/max + 期望帧长（台架验证「200Hz → 5ms 档」用）。
+/// 阈值不能太高：300~420ms 的短动效在 200Hz 只有 64~84 帧，按 120 帧永远打不出来。
+struct FpsProbe {
+    last: Option<Instant>,
+    dts: Vec<f32>,
+    expected: Duration,
+    skipped: u32,
+}
+
+impl FpsProbe {
+    fn enabled() -> bool {
+        std::env::var_os("MC_FPS_LOG").is_some()
+    }
+
+    fn new() -> Self {
+        Self { last: None, dts: Vec::new(), expected: Duration::from_millis(16), skipped: 0 }
+    }
+
+    /// 动画停下（或这一拍是静置帧）：结束当前采样窗口，下一段动画重新起算
+    fn reset(&mut self) {
+        self.last = None;
+    }
+
+    fn note(&mut self, now: Instant, expected: Duration, skipped: u32) {
+        self.expected = expected;
+        if let Some(last) = self.last {
+            let dt = now.duration_since(last).as_secs_f32() * 1000.0;
+            // >500ms = 中间是静置节拍（不是动画帧），不混进统计
+            if dt > 0.0 && dt < 500.0 {
+                self.dts.push(dt);
+                self.skipped += skipped;
+            }
+        }
+        self.last = Some(now);
+    }
+
+    fn log_if_due(&mut self, kind: CardKind, hz: u32) {
+        if self.dts.len() < 60 {
+            return;
+        }
+        let mut dts = std::mem::take(&mut self.dts);
+        let skipped = std::mem::take(&mut self.skipped);
+        dts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p = |q: f32| dts[((dts.len() - 1) as f32 * q) as usize];
+        let expected_ms = self.expected.as_secs_f32() * 1000.0;
+        minicard_shell::mlog!(
+            "卡 {kind:?} 动画帧间隔：{} 帧 p50 {:.2} / p95 {:.2} / max {:.2} ms（期望 {:.2} ms ≈ {:.1} fps，{hz}Hz 屏，跳帧 {}）",
+            dts.len(),
+            p(0.50),
+            p(0.95),
+            dts[dts.len() - 1],
+            expected_ms,
+            if expected_ms > 0.0 { 1000.0 / expected_ms } else { 0.0 },
+            skipped
+        );
+    }
+}
+
+/// 台架钩子：`MC_CAL_DEMO_MS=800` → 日历卡每 800ms 自翻一页（默认关；只用于测短动效帧率）。
+fn cal_demo_period() -> Option<Duration> {
+    static V: OnceLock<Option<Duration>> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("MC_CAL_DEMO_MS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|ms| *ms >= 50)
+            .map(Duration::from_millis)
+    })
 }
 
 /// 供 `main` 调用的入口：读 config、装字体、跑循环
@@ -3553,35 +3745,76 @@ mod tests {
     }
 
     #[test]
-    fn short_animations_run_at_200hz_continuous_ones_stay_60hz() {
+    fn short_animations_run_every_display_frame_continuous_ones_are_decimated() {
         let idle = Duration::from_millis(1000);
+        let t200 = DisplayTiming::new(200, crate::display::TimingSource::Dwm);
+        let t60 = DisplayTiming::new(60, crate::display::TimingSource::Dwm);
+        // 200Hz 屏：短动效每显示帧 5ms
         assert_eq!(
-            anim_step(CardKind::Todo, true, idle),
+            anim_step(CardKind::Todo, true, idle, &t200),
             Duration::from_micros(5_000)
         );
         assert_eq!(
-            anim_step(CardKind::Clock, true, idle),
+            anim_step(CardKind::Clock, true, idle, &t200),
             Duration::from_micros(5_000)
         );
         assert_eq!(
-            anim_step(CardKind::Calendar, true, idle),
+            anim_step(CardKind::Calendar, true, idle, &t200),
             Duration::from_micros(5_000)
         );
+        // 通知卡短交互（到达/删除/hover/滚动/清除/状态）也走每显示帧（B 案 2026-11-09）
         assert_eq!(
-            anim_step(CardKind::Performance, true, idle),
-            Duration::from_micros(16_667)
+            anim_step(CardKind::Notify, true, idle, &t200),
+            Duration::from_micros(5_000)
+        );
+        // 连续补间 3 帧抽 1 → 15ms
+        assert_eq!(
+            anim_step(CardKind::Performance, true, idle, &t200),
+            Duration::from_micros(15_000)
         );
         assert_eq!(
-            anim_step(CardKind::Music, true, idle),
-            Duration::from_micros(16_667)
+            anim_step(CardKind::Music, true, idle, &t200),
+            Duration::from_micros(15_000)
+        );
+        // 60Hz 屏：短动效 16.6667ms；补间不抽帧也是 16.6667ms
+        assert_eq!(
+            anim_step(CardKind::Todo, true, idle, &t60),
+            Duration::from_nanos(16_666_666)
+        );
+        assert_eq!(
+            anim_step(CardKind::Performance, true, idle, &t60),
+            Duration::from_nanos(16_666_666)
+        );
+        // 144Hz 屏：短动效 6.9444ms；补间 2 帧抽 1 → 13.8889ms
+        let t144 = DisplayTiming::new(144, crate::display::TimingSource::Dwm);
+        assert_eq!(
+            anim_step(CardKind::Calendar, true, idle, &t144),
+            Duration::from_nanos(6_944_444)
+        );
+        assert_eq!(
+            anim_step(CardKind::NetRate, true, idle, &t144),
+            Duration::from_nanos(13_888_888)
         );
     }
 
     #[test]
     fn idle_cards_use_their_refresh_interval() {
         let refresh = Duration::from_millis(1000);
-        assert_eq!(anim_step(CardKind::Todo, false, refresh), refresh);
-        assert_eq!(anim_step(CardKind::Performance, false, refresh), refresh);
+        let t200 = DisplayTiming::new(200, crate::display::TimingSource::Dwm);
+        assert_eq!(anim_step(CardKind::Todo, false, refresh, &t200), refresh);
+        assert_eq!(anim_step(CardKind::Performance, false, refresh, &t200), refresh);
+    }
+
+    /// MC_DOCK_HZ 覆盖只影响 Dock；默认跟显示器走（200Hz → 5ms）
+    #[test]
+    fn dock_step_follows_display_unless_overridden() {
+        let t200 = DisplayTiming::new(200, crate::display::TimingSource::Dwm);
+        // 测试进程里没设 MC_DOCK_HZ → 走显示帧
+        if std::env::var("MC_DOCK_HZ").is_err() {
+            assert_eq!(dock_step_of(&t200), Duration::from_micros(5_000));
+            let t60 = DisplayTiming::new(60, crate::display::TimingSource::Fallback);
+            assert_eq!(dock_step_of(&t60), Duration::from_nanos(16_666_666));
+        }
     }
 
     /// 三态判据与浏览器同一条（card.html::computeState）：
@@ -3758,6 +3991,8 @@ mod gfx_tests {
             glass: None,
             next_draw: Instant::now(),
             refresh: Duration::from_millis(5000),
+            timing: DisplayTiming::new(60, crate::display::TimingSource::Fallback),
+            fps: None,
             cfg_idx: 0,
             dpi,
             slice_origin: (0, 0),

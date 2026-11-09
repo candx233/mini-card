@@ -77,10 +77,12 @@ pub fn notify_sheet(
             }
         }
     }
-    let scroll: usize = std::env::var("MC_NOTIFY_SCROLL")
+    // 连续滚动取证（2026-11-09 起是像素滚动，不再有「页」）：
+    // MC_NOTIFY_SCROLL_PX=76 直接跳到 1 格位置（不播补间），用来截「滚到中间」的样张。
+    let scroll_px: f32 = std::env::var("MC_NOTIFY_SCROLL_PX")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(0.0);
     let mut snap = NotifySnapshot {
         access: NotifyAccess::Allowed,
         items,
@@ -96,24 +98,32 @@ pub fn notify_sheet(
     }
     let t = Tokens::notify(w, h);
     let opts = notify::Options::default();
+    let snap_opt = if state == "disabled" { None } else { Some(&snap) };
+    let now = std::time::Instant::now();
+    let state_kind = notify::display_state(snap_opt);
+    let mut motion = notify::Motion::new();
+    motion.observe(snap_opt, state_kind, now);
+    let max = notify::max_scroll_px(&t, snap_opt, opts, &motion);
+    motion.jump_scroll(scroll_px, max);
     if debug_layout {
-        let snap_opt = if state == "disabled" { None } else { Some(&snap) };
-        let tree = notify::tree_hook_scroll_opts(&t, snap_opt, scroll, opts, now_ms);
+        let tree = notify::tree_hook(&t, snap_opt, opts, &motion, now);
         let mut m: &TextEngine = te;
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
         notify::dump_layout(&placed, 0);
         minicard_shell::mlog!(
-            "tokens: r={:.2} pad={:.2}/{:.2}/{:.2}/{:.2} header={:.2} group_gh={:.2} item_h={:.2} body_fs={:.2}",
-            t.r, t.pad_t, t.pad_r, t.pad_b, t.pad_l, t.header_lh, t.group_gh, t.item_h, t.body_fs
+            "tokens: r={:.2} pad={:.2}/{:.2}/{:.2}/{:.2} header={:.2} group_gh={:.2} item_h={:.2} body_fs={:.2} viewport={:.2} content={:.2} scroll_max={:.2}",
+            t.r, t.pad_t, t.pad_r, t.pad_b, t.pad_l, t.header_lh, t.group_gh, t.item_h, t.body_fs,
+            notify::viewport_height(&t),
+            notify::content_height(&t, snap_opt, opts),
+            max
         );
     }
-    if state == "disabled" {
-        let icons = std::collections::HashMap::new();
-        notify::paint(g, te, pal, &t, None, &icons, opts, 0, now_ms, None)
+    let icons = if state == "disabled" {
+        std::collections::HashMap::new()
     } else {
-        let icons = crate::live::notify_icon_map(g, &snap);
-        notify::paint(g, te, pal, &t, Some(&snap), &icons, opts, scroll, now_ms, None)
-    }
+        crate::live::notify_icon_map(g, &snap)
+    };
+    notify::paint(g, te, pal, &t, snap_opt, &icons, opts, &mut motion, now, None)
 }
 
 /// D7 真数据冒烟：起 NotifyService 读一次 Windows 通知中心，按卡面同一套 paint 出图。
@@ -147,14 +157,19 @@ pub fn notify_live_sheet(
         snap.at_ms
     );
     let t = Tokens::notify(w, h);
+    let opts = minicard_cards::notify::Options::default();
+    let now = std::time::Instant::now();
+    let state_kind = notify::display_state(Some(&snap));
+    let mut motion = notify::Motion::new();
+    motion.observe(Some(&snap), state_kind, now);
     if debug_layout {
-        let tree = notify::tree_hook(&t, Some(&snap), 0);
+        let tree = notify::tree_hook(&t, Some(&snap), opts, &motion, now);
         let mut m: &TextEngine = te;
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
         notify::dump_layout(&placed, 0);
     }
     let icons = crate::live::notify_icon_map(g, &snap);
-    notify::paint(g, te, pal, &t, Some(&snap), &icons, minicard_cards::notify::Options::default(), 0, 0, None)
+    notify::paint(g, te, pal, &t, Some(&snap), &icons, opts, &mut motion, now, None)
 }
 
 pub fn shapes(g: &Gfx, te: &TextEngine, w: f32, h: f32) -> Result<()> {
@@ -680,19 +695,32 @@ pub fn music_sheet(
     minicard_cards::music::paint(g, te, pal, &t, &m, None, None, None)
 }
 
-/// 第十三张测试图：日历卡（240×180），2026-10（1 号周四，31 天 → 5 行），今天是 31 号。
+/// 第十三张测试图：日历卡（240×180）。
+/// 默认固定 2026-10（1 号周四，31 天 → 5 行），今天是 31 号；
+/// `MC_CAL_DATE=YYYY-MM-DD` 可换日期取证（如 `MC_CAL_DATE=2026-11-09` 验寒衣节）。
 pub fn calendar_sheet(
     g: &Gfx,
     te: &TextEngine,
     pal: &minicard_draw::color::Palette,
     debug_layout: bool,
 ) -> Result<()> {
-    use minicard_cards::calendar::{Calendar, Tokens};
+    use minicard_cards::calendar::{self, Calendar, Tokens};
 
+    let (y, m, d) = std::env::var("MC_CAL_DATE")
+        .ok()
+        .and_then(|s| {
+            let mut it = s.split(['-', '/']).filter_map(|v| v.parse::<i32>().ok());
+            let (y, m, d) = (it.next()?, it.next()?, it.next()?);
+            (1..=12).contains(&m).then_some((y, m as u32, d as u32))
+        })
+        .unwrap_or((2026, 10, 31));
     let t = Tokens::cal(240.0, 180.0);
-    let c = Calendar::build(2026, 10, 4, 31, 31);
+    let days = calendar::days_in_month_of(y, m);
+    let wd1 = calendar::weekday(y, m, 1);
+    let mut c = Calendar::build(y, m, wd1, days, d);
+    c.holiday = calendar::holiday(y, m, d);
     if debug_layout {
-        minicard_shell::mlog!("cal 网格 {} 格", c.cells.len());
+        minicard_shell::mlog!("cal {y}-{m}-{d} 网格 {} 格", c.cells.len());
         let tree = minicard_cards::calendar::tree_hook(&t, &c);
         let mut m: &TextEngine = te;
         let placed = minicard_draw::layout::layout(&tree, (t.w, t.h), &mut m);
@@ -851,8 +879,9 @@ fn icon_cache_path(it: &minicard_core::config::DockItem) -> Option<std::path::Pa
 }
 
 
-/// 日历翻月动效探针：把 `flip_t0` 往前挪 `ms`，画一帧（0 = 刚点下、200 = 收尾）。
-/// 验收判据：网格整体相对静止态横向位移 = 16·(1−easeOutQuart(u))，透明度 = 0.2+0.8e。
+/// 日历翻月动效探针：把 `flip_t0` 往前挪 `ms`，画一帧（0 = 刚点下、320 = 收尾）。
+/// 验收判据：网格整体相对静止态横向位移 = 64·(1−easeOutQuart(u))，
+/// 透明度 = 0.35+0.65e（u = ms/320；头部滚动是另一条 200ms 曲线，本探针不驱动 roll）。
 pub fn cal_flip(
     g: &Gfx,
     te: &TextEngine,
@@ -864,7 +893,12 @@ pub fn cal_flip(
     // 固定内容：2026-11，1 号周日（周一起始 offset=6），30 天
     let mut c = Calendar::build(2026, 11, 0, 30, 1);
     c.flip(1);
-    c.flip_t0 = Some(std::time::Instant::now() - std::time::Duration::from_millis(ms));
+    // 头部滚动也一起驱动（真实点击时 flip 与 roll_header 同时起跑）：
+    // 旧标题/节日用 2026-10；同一 `ms` 进度下能同时验「页横滑」与「头部上下滚」。
+    c.roll_header("2026年10月".to_string(), String::new(), 1);
+    let t0 = std::time::Instant::now() - std::time::Duration::from_millis(ms);
+    c.flip_t0 = Some(t0);
+    c.roll_t0 = Some(t0);
 
     let t = calendar::Tokens::cal(240.0, 180.0);
     calendar::paint(g, te, pal, &t, &c, None)
