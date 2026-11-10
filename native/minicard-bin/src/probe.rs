@@ -636,16 +636,34 @@ pub fn todo_sheet(
     todo::paint(g, te, pal, &t, &items, now, None)
 }
 
-/// 第十一张测试图：天气卡（320×240 基准）。
+/// 第十一张测试图：天气卡（默认 320×240 设计基准；`--w/--h` 可出真机档 240×180）。
+///
+/// 试值不重编：`MC_WX_DAY` / `MC_WX_SUN` 乘在「三日日期字号」与「当前天气大图标边长」上
+/// （只对探针生效，产品路径不读环境变量）。用途是同一份二进制出多档尺寸做挑图。
 pub fn weather_sheet(
     g: &Gfx,
     te: &TextEngine,
     pal: &minicard_draw::color::Palette,
     debug_layout: bool,
+    w: f32,
+    h: f32,
 ) -> Result<()> {
     use minicard_cards::weather::{Day, Tokens, Weather};
 
-    let t = Tokens::weather(320.0, 240.0);
+    let mut t = Tokens::weather(w, h);
+    let mul = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+    };
+    if let Some(m) = mul("MC_WX_DAY") {
+        t.day_fs *= m;
+        t.day_lh *= m;
+    }
+    if let Some(m) = mul("MC_WX_SUN") {
+        t.sun_sz *= m;
+    }
     let w = Weather {
         city: "杭州".into(),
         temp: Some(24.4),

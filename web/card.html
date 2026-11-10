@@ -266,12 +266,18 @@
   .w-top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
   .w-city { font-size: 1.25rem; line-height: 1.15; letter-spacing: 0.02em; color: var(--muted); margin-bottom: 0.25rem; }
   .w-temp { font-size: 4.25rem; font-weight: 500; line-height: 0.92; color: var(--fg); }
-  .w-sun { width: 3.375rem; height: 3.375rem; flex: 0 0 3.375rem; stroke: var(--fg); stroke-width: 1.5; fill: none; opacity: 0.9; }
+  .w-sun { width: 4.125rem; height: 4.125rem; flex: 0 0 4.125rem; stroke: var(--fg); stroke-width: 1.5; fill: none; opacity: 0.9; }
+    /* 2026-11-10 用户「大天气图标也可以调大一点」：3.375 → 4.125rem（54→66 设计 px）。
+       上限是顶部左列自然高（城市 1.25rem×1.15 + 下边距 0.25rem + 大温度 4.25rem×0.92
+       = 89.56 设计 px），再大顶栏被图标撑高、整栈下移，底行会贴下沿。 */
   /* 2026-10-01 用户「元素之间空隙调小一点 / 方块确定居中」：padding 14→12、底行上边距 14→10，
      让方块上下两条空隙相等（实测 7.5 / 7.5，差 0）。2026-10-06 随内容放大再收一档：padding 12→9、
      上边距 10→7（留白总量没变的前提下把空间让给字号）。 */
   .w-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; margin-top: 0.4375rem; padding: 0.5625rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-  .w-day { display: flex; flex-direction: column; align-items: center; gap: 0.34375rem; font-size: 0.84375rem; line-height: 1.15; color: var(--muted); }
+  .w-day { display: flex; flex-direction: column; align-items: center; gap: 0.34375rem; font-size: 1.0625rem; line-height: 1.15; color: var(--muted); }
+    /* 2026-11-10 用户「今天明天后天字太小了」：0.84375 → 1.0625rem（13.5→17 设计 px，活卡 240×180 = 12.75px）。
+       行盒同比放大（line-height 1.15 不动）让三日块长高 3.9 设计 px，整栈居中后上下各让 1.5 活卡 px；
+       底行「空气质量 / 湿度」离下沿 8.15→6.7px，没有裁切、也不压圆角。 */
   /* 2026-10-06 图标在日期/温度之间视觉不居中：两处 gap 本来就相等（0.4375rem），
      是字形盒留白不等：CJK「今天」字形下缘离行盒底还有空白，数字「25°」字形上缘几乎贴着行盒顶。
      用对称正负 margin 把图标上提，列高不变、两行文字不动。补偿值随字号/行高变动重标定：

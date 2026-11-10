@@ -161,13 +161,18 @@ impl Tokens {
             city_mb: 0.25 * r,
             temp_fs: 4.25 * r,
             temp_lh: 4.25 * r * 0.92,
-            sun_sz: 3.375 * r,
+            // 3.375 → 4.125（2026-11-10 用户「大天气图标也可以调大一点」）：66px 设计 / 49.5px 活卡（240×180）。
+            // 上限卡在「顶部左列自然高」= city_lh + city_mb + temp_lh = 89.56px 设计 / 67.17px 活卡：
+            // 再大顶栏会被图标撑高、整栈下移，底行离下沿不足 6px（三档对比见 docs/verify/wx-tune/）。
+            sun_sz: 4.125 * r,
             sun_stroke: 1.5,
             d3_gap: 0.5 * r,
             d3_mt: 0.4375 * r,
             d3_pv: 0.5625 * r,
-            day_fs: 0.84375 * r,
-            day_lh: 0.84375 * r * 1.15,
+            // 0.84375 → 1.0625（2026-11-10 用户「今天明天后天字太小了」）：17px 设计 / 12.75px 活卡。
+            // 行盒同比 ×1.15 后三日块长高 2.9px（活卡），整栈居中 → 上下各让 1.5px，底行离下沿 8.15→6.7px（不裁）。
+            day_fs: 1.0625 * r,
+            day_lh: 1.0625 * r * 1.15,
             day_gap: 0.34375 * r,
             day_ic: 1.5625 * r,
             day_stroke: 1.6,
@@ -623,6 +628,30 @@ mod tests {
         assert!((s.stack_pt - 2.0).abs() < 0.01, "stack_pt = {:.4}", s.stack_pt);
         // 下内边距仍是 padding-block 那 1px（两档差 1.667px，别把二者写成一档）
         assert!(t.stack_pt > 0.0625 * t.r + 1.0);
+    }
+
+    /// 2026-11-10 用户「今天明天后天字太小了 / 大天气图标也可以调大一点」：
+    /// 三日日期 13.5→17 设计 px、当前天气大图标 54→66 设计 px（活卡 240×180 → 12.75 / 49.5px）。
+    /// 图标边长必须 ≤ 顶部左列自然高（城市行盒 + 城市下边距 + 大温度行盒）：再大顶栏会被撑高、
+    /// 整栈下移，底行会贴到卡下沿（三档对比见 `docs/verify/wx-tune/cmp2.png`）。
+    #[test]
+    fn 天气日期与大图标调大后的预算() {
+        let t = Tokens::weather(320.0, 240.0);
+        assert!((t.day_fs - 17.0).abs() < 0.01, "day_fs = {:.2}", t.day_fs);
+        assert!((t.sun_sz - 66.0).abs() < 0.01, "sun_sz = {:.2}", t.sun_sz);
+        let top_left = t.city_lh + t.city_mb + t.temp_lh;
+        assert!(
+            t.sun_sz <= top_left,
+            "图标 {:.1} 超过顶栏自然高 {:.1}",
+            t.sun_sz,
+            top_left
+        );
+        // 行盒随字号同比 ×1.15（CSS line-height 不另改）
+        assert!((t.day_lh - 17.0 * 1.15).abs() < 0.01, "day_lh = {:.2}", t.day_lh);
+        // 活卡档 240×180（k = 0.75）同比
+        let s = Tokens::weather(240.0, 180.0);
+        assert!((s.day_fs - 12.75).abs() < 0.01, "活卡 day_fs = {:.2}", s.day_fs);
+        assert!((s.sun_sz - 49.5).abs() < 0.01, "活卡 sun_sz = {:.2}", s.sun_sz);
     }
 
     fn collect_text(n: &minicard_draw::layout::Node, out: &mut Vec<String>) {
