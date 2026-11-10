@@ -732,7 +732,15 @@ pub fn calendar_sheet(
             (1..=12).contains(&m).then_some((y, m as u32, d as u32))
         })
         .unwrap_or((2026, 10, 31));
-    let t = Tokens::cal(240.0, 180.0);
+    let mut t = Tokens::cal(240.0, 180.0);
+    // 取证钩子：MC_CAL_CHIP_W=20 临时改今日块宽（只影响 --probe 出图，live 走 Tokens 默认值）
+    if let Ok(v) = std::env::var("MC_CAL_CHIP_W") {
+        if let Ok(v) = v.parse::<f32>() {
+            if v > 0.0 {
+                t.chip_w = v;
+            }
+        }
+    }
     let days = calendar::days_in_month_of(y, m);
     let wd1 = calendar::weekday(y, m, 1);
     let mut c = Calendar::build(y, m, wd1, days, d);

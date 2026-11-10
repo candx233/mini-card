@@ -585,6 +585,29 @@ impl TextEngine {
         half_leading + self.ascent * t.size
     }
 
+    /// **ink 中心相对布局盒中心的水平偏差**（正 = 墨迹偏右，单位 px）。
+    ///
+    /// 居中对齐（`align=2`）居的是 **advance 盒**：等宽数字的每字 advance 一样宽，
+    /// 但「1」的字形在 advance 里明显偏左、右留白多，所以「10」这类串的墨迹整体
+    /// 偏 +0.5px 左右，压在色块里就变成「左边松、右边紧」。日历的今日块要的是
+    /// **视觉居中**，调用方按 `-bias` 微移即可（实测与像素测量差 <0.05px）。
+    ///
+    /// 口径来自 `IDWriteTextLayout::GetOverhangMetrics`：left/right 是墨迹相对
+    /// 布局盒的溢出量（负数 = 缩进），ink 中心偏差 = (right − left) / 2。
+    pub fn ink_center_bias(&self, t: &crate::layout::TextSpec, width: f32) -> f32 {
+        // 高度只要够装一行（GetOverhangMetrics 的水平量与盒高无关）
+        let h = t.line_h + 6.0;
+        match self.layout_spec(t, width, h, Mode::Clip) {
+            Ok(l) => unsafe {
+                match l.GetOverhangMetrics() {
+                    Ok(o) => (o.right - o.left) / 2.0,
+                    Err(_) => 0.0,
+                }
+            },
+            Err(_) => 0.0,
+        }
+    }
+
     /// 字体字面框（ascent, descent）的 em 比例 —— 行内元素（如单位 `<i>`）的盒子
     /// 高度是字面框而不是行高，卡片算度量时需要。
     pub fn font_box(&self) -> (f32, f32) {
@@ -798,6 +821,28 @@ mod tests {
         let (w_wrap, h_wrap) = Measurer::text(&mut te, &wrap, 60.0);
         assert!(w_wrap <= 60.5, "wrap 宽应收到盒内，实得 {w_wrap}");
         assert!(h_wrap > LH * 1.5, "wrap 高应长到多行，实得 {h_wrap}");
+    }
+
+    /// 今日块视觉居中的 ink 偏差：口径必须和真像素对得上。
+    /// 参考值来自 `minicard-bin --probe calendar --ss 3`（240×180 卡、14px/600 等宽数字），
+    /// 用今天块（19 宽）量左右留白反推：10 → 左 2.0 / 右 1.0（偏右 +0.50）；31 → 左 1.33 / 右 3.0（偏左 −0.83）。
+    /// 之所以不直接信"居中"：DWrite 居的是 advance 盒，「1」的字形在 advance 里偏左。
+    #[test]
+    fn ink_偏差与像素测量同口径() {
+        let Some(te) = engine3() else { return };
+        let mut spec = crate::layout::TextSpec::new("10", 14.0, 17.5);
+        spec.weight = 600;
+        spec.tabular = true;
+        spec.align = 2;
+        let w = 30.857; // 240 卡去掉左右 pad 后的一个日期列宽
+        let b10 = te.ink_center_bias(&spec, w);
+        assert!((b10 - 0.50).abs() < 0.12, "「10」墨迹应偏右 +0.50px，实得 {b10}");
+        spec.s = "31".into();
+        let b31 = te.ink_center_bias(&spec, w);
+        assert!((b31 + 0.83).abs() < 0.15, "「31」墨迹应偏左 −0.83px，实得 {b31}");
+        spec.s = "20".into();
+        let b20 = te.ink_center_bias(&spec, w);
+        assert!((b20 - 0.15).abs() < 0.12, "「20」接近居中，实得 {b20}");
     }
 }
 

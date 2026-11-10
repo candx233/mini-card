@@ -332,7 +332,12 @@ pub struct Tokens {
     pub wd_lh: f32,
     pub day_fs: f32,
     pub day_lh: f32,
-    pub chip: f32,
+    /// 今日块高度（= 当日数字那颗 `<i>` 的行盒高）
+    pub chip_h: f32,
+    /// 今日块宽度 —— 与高度分开：高度被 6 行月份的行高（18.8）卡死，横向却能单独给足。
+    /// 「10 / 30」这类两位数的 ink 有 16.3 宽，19 宽的方块里右边只剩 1px
+    /// （用户 2026-11-10：「今天的 10 右边快和小框贴上了」）→ 宽度给到 21。
+    pub chip_w: f32,
     pub chip_r: f32,
 }
 
@@ -363,9 +368,12 @@ impl Tokens {
             wd_lh: 0.8125 * r * 1.4,
             day_fs: 0.875 * r,
             day_lh: 0.875 * r * 1.25,
-            // 1.375r(22) 会把 22 高的行塞满 → 上下两行数字贴着方块（用户：空隙太小、比例不好看）。
+            // 1.375r(22) 高会把 22 高的行塞满 → 上下两行数字贴着方块（用户：空隙太小、比例不好看）。
             // 1.1875r(19) 留出约 3px 呼吸，方框里的数字也松快些；圆角按比例 6。
-            chip: 1.1875 * r,
+            chip_h: 1.1875 * r,
+            // 宽度单给：19 宽时「10」右边只剩 ~1px（贴着），21 宽（+2）配合视觉居中后
+            // 左右各 ~2.3~2.7px，和手机参考稿「块内留白 ≈ 块宽 12%」同比例。
+            chip_w: 1.3125 * r,
             chip_r: 0.375 * r,
         }
     }
@@ -742,10 +750,10 @@ fn tree(t: &Tokens, c: &Calendar) -> Node {
                 )
                 .id(id)
                 .style(move |s| {
-                    // 今日格的 `<i>` 是 22×22，会把整格撑到 22 高（比普通格高 4.5），
-                    // 居中后数字比邻居高 2.25px —— 这是 CSS 的实际行为，必须照做
+                    // 今日格的 `<i>` 是 19 高（宽 21），会把整格撑到 19 高（比普通格高 1.5），
+                    // 居中后数字比邻居高 0.75px —— 这是 CSS/设计稿的实际行为，必须照做
                     let h = if is_today {
-                        Dim::Px(t.chip)
+                        Dim::Px(t.chip_h)
                     } else {
                         Dim::Px(t.day_lh)
                     };
@@ -854,9 +862,9 @@ fn paint_tree(
         let idx = (pl.id - 9600) as usize;
         if let Some(cell) = c.cells.get(idx) {
             if cell.today && !cell.other {
-                // 块 = 22×22，横向居中于列、纵向就是节点盒子（节点高已经设成 22）
+                // 块 = chip_w×chip_h，横向居中于列、纵向就是节点盒子（节点高已经设成 chip_h）
                 let r = pl.rect;
-                let left = r.x + (r.w - t.chip) / 2.0;
+                let left = r.x + (r.w - t.chip_w) / 2.0;
                 let top = r.y;
                 set_color(g, pal.accent)?;
                 fill_round(
@@ -864,8 +872,8 @@ fn paint_tree(
                     D2D_RECT_F {
                         left,
                         top,
-                        right: left + t.chip,
-                        bottom: top + t.chip,
+                        right: left + t.chip_w,
+                        bottom: top + t.chip_h,
                     },
                     t.chip_r,
                 )?;
@@ -897,11 +905,18 @@ fn paint_tree(
         } else {
             color
         };
-        // 今日数字要在 22 高的块里居中（普通格是 17.5 的行盒，直接画即可）
-        // 横向居中由 `align=2` 完成；这里**只**补纵向（22 高的块里居中 17.5 的行盒）。
-        // 曾经这里又加了一次 `(w - tw)/2` —— 双重居中，把「31」推到蓝块外 ~5px。
+        // 今日数字要在 chip_h 高的块里居中（普通格是 17.5 的行盒，直接画即可）。
+        // 横向：`align=2` 居的是 advance 盒，墨迹并不居中 —— 「10」的 ink 比盒中心偏右
+        // ~0.5px（「31」偏左 ~0.9px，取自 IDWriteTextLayout overhang），方块里就会
+        // 「一边松一边紧」。这里补一次 ink 视觉居中（2026-11-10 用户「右边快贴上了」）。
+        // 曾经这里又加了一次 `(w - tw)/2` —— 双重居中，把「31」推到蓝块外 ~5px，别再犯。
         let dy = if is_today {
             (pl.rect.h - spec.line_h) / 2.0
+        } else {
+            0.0
+        };
+        let dx = if is_today {
+            -te.ink_center_bias(spec, pl.rect.w)
         } else {
             0.0
         };
@@ -910,7 +925,7 @@ fn paint_tree(
             te,
             pal,
             spec,
-            pl.rect.x,
+            pl.rect.x + dx,
             pl.rect.y + dy,
             pl.rect.w,
             color,
@@ -981,6 +996,17 @@ mod tests {
         );
         assert_eq!(c.cells[2].day, 30);
         assert_eq!(c.cells[34].day, 1, "末尾是 11 月 1 日");
+    }
+
+    /// 2026-11-10 用户「今天的 10 右边快和小框贴上了」：块高被 6 行月份的行高卡死（19），
+    /// 但宽度可以单独给足 —— 两位数 ink 最宽 16.3，21 宽的块左右各留 ~2.3px 呼吸。
+    #[test]
+    fn 今日块两位数的左右留白() {
+        let t = Tokens::cal(240.0, 180.0);
+        assert_eq!(t.chip_h, 19.0, "高度仍 19（1.1875r）：6 行月份行高 18.8，再高就贴上下两行");
+        assert_eq!(t.chip_w, 21.0, "宽度 21（1.3125r）：19 宽时两位数右边只剩 1px");
+        assert!(t.chip_w > t.chip_h, "块是「微扁」而非正方形 —— 高度被行高卡死");
+        assert_eq!(t.chip_r, 6.0, "圆角 0.375r，约为块高 31%（对齐手机参考稿）");
     }
 
     /// 2026-11-09 用户拍板：翻月要「慢一点、左右方向明显」，头部改「上下滚动」
