@@ -332,11 +332,13 @@ pub struct Tokens {
     pub wd_lh: f32,
     pub day_fs: f32,
     pub day_lh: f32,
-    /// 今日块高度（= 当日数字那颗 `<i>` 的行盒高）
+    /// 日号字距（em，CSS `letter-spacing`）。两位数的两块「数字-数字」之间会跟着收/放；
+    /// 今日块做正方形后内宽只有 19，靠它把两位数（最宽 ink 15.2）收出左右各 ~2px 的呼吸。
+    pub day_track: f32,
+    /// 今日块边长（正方形）。上界被 6 行月份的行高（18.8）卡死：19 是刚好塞满一行、
+    /// 又不贴上下两行数字的极限（2026-11-11 用户「小框尽量保证正方形」）。
     pub chip_h: f32,
-    /// 今日块宽度 —— 与高度分开：高度被 6 行月份的行高（18.8）卡死，横向却能单独给足。
-    /// 「10 / 30」这类两位数的 ink 有 16.3 宽，19 宽的方块里右边只剩 1px
-    /// （用户 2026-11-10：「今天的 10 右边快和小框贴上了」）→ 宽度给到 21。
+    /// 今日块宽度 —— 与高度同值，保持正方形（用户 2026-11-11：别再「微扁」）。
     pub chip_w: f32,
     pub chip_r: f32,
 }
@@ -366,14 +368,20 @@ impl Tokens {
             page_gap: 0.25 * r,
             wd_fs: 0.8125 * r,
             wd_lh: 0.8125 * r * 1.4,
-            day_fs: 0.875 * r,
-            day_lh: 0.875 * r * 1.25,
+            // 日号 14 → 13：今日块收回正方形（宽 21 → 19）后，两位数的 ink 要留出
+            // 左右各 ~2px。13px 下最宽（30）ink ≈ 15.2，19 的正方形里左右各 1.9；
+            // 14px 时 ink 16.3，只剩 1.3 —— 就是用户 2026-11-10 说的「右边快贴上了」。
+            day_fs: 0.8125 * r,
+            day_lh: 0.8125 * r * 1.25,
+            // 两位数之间略收一档（-0.03em ≈ -0.39px）：等宽数字的 advance 是满的，
+            // 「11 / 17」这类两根竖笔的串看着比「10 / 30」松；收一点两档观感才一致，
+            // 同时给正方形里的最宽两位数（30）再多让出半像素呼吸。
+            day_track: -0.03,
             // 1.375r(22) 高会把 22 高的行塞满 → 上下两行数字贴着方块（用户：空隙太小、比例不好看）。
             // 1.1875r(19) 留出约 3px 呼吸，方框里的数字也松快些；圆角按比例 6。
             chip_h: 1.1875 * r,
-            // 宽度单给：19 宽时「10」右边只剩 ~1px（贴着），21 宽（+2）配合视觉居中后
-            // 左右各 ~2.3~2.7px，和手机参考稿「块内留白 ≈ 块宽 12%」同比例。
-            chip_w: 1.3125 * r,
+            // 正方形：宽=高=19（高度被 6 行月份的行高 18.8 卡死，只能收宽度）
+            chip_w: 1.1875 * r,
             chip_r: 0.375 * r,
         }
     }
@@ -649,6 +657,18 @@ fn text_node(s: &str, size: f32, lh: f32, weight: u16) -> Node {
 }
 
 fn text_spec(s: &str, size: f32, lh: f32, weight: u16, align: u8) -> TextSpec {
+    text_spec_tracked(s, size, lh, weight, align, 0.0)
+}
+
+/// 带字距的 spec（CSS `letter-spacing`）：只有日号用，见 `Tokens::day_track`
+fn text_spec_tracked(
+    s: &str,
+    size: f32,
+    lh: f32,
+    weight: u16,
+    align: u8,
+    spacing_em: f32,
+) -> TextSpec {
     TextSpec {
         s: s.to_string(),
         size,
@@ -657,13 +677,18 @@ fn text_spec(s: &str, size: f32, lh: f32, weight: u16, align: u8) -> TextSpec {
         wrap: false,
         align,
         tabular: true,
-        spacing_em: 0.0,
+        spacing_em,
     }
 }
 
 /// `align`: 0 左 / 1 右 / 2 居中（走 DWrite 的文本对齐，盒子有多宽就按多宽居中）
 fn text_node_aligned(s: &str, size: f32, lh: f32, weight: u16, align: u8) -> Node {
     Node::text(text_spec(s, size, lh, weight, align))
+}
+
+/// 同 [`text_node_aligned`]，多一个字距（日号用）
+fn text_node_tracked(s: &str, size: f32, lh: f32, weight: u16, align: u8, spacing_em: f32) -> Node {
+    Node::text(text_spec_tracked(s, size, lh, weight, align, spacing_em))
 }
 
 fn tree(t: &Tokens, c: &Calendar) -> Node {
@@ -741,17 +766,18 @@ fn tree(t: &Tokens, c: &Calendar) -> Node {
             let id = 9600 + idx as u32;
             let is_today = cell.map(|x| x.today && !x.other).unwrap_or(false);
             row = row.child(
-                text_node_aligned(
+                text_node_tracked(
                     &txt,
                     t.day_fs,
                     t.day_lh,
                     if is_today { 600 } else { 400 },
                     2,
+                    t.day_track,
                 )
                 .id(id)
                 .style(move |s| {
-                    // 今日格的 `<i>` 是 19 高（宽 21），会把整格撑到 19 高（比普通格高 1.5），
-                    // 居中后数字比邻居高 0.75px —— 这是 CSS/设计稿的实际行为，必须照做
+                    // 今日格的 `<i>` 是 19 高（宽 19，正方形），会把整格撑到 19 高（比普通格高 1.4），
+                    // 居中后数字比邻居高 0.7px —— 这是 CSS/设计稿的实际行为，必须照做
                     let h = if is_today {
                         Dim::Px(t.chip_h)
                     } else {
@@ -905,7 +931,7 @@ fn paint_tree(
         } else {
             color
         };
-        // 今日数字要在 chip_h 高的块里居中（普通格是 17.5 的行盒，直接画即可）。
+        // 今日数字要在 chip_h 高的块里居中（普通格是 16.25 的行盒，直接画即可）。
         // 横向：`align=2` 居的是 advance 盒，墨迹并不居中 —— 「10」的 ink 比盒中心偏右
         // ~0.5px（「31」偏左 ~0.9px，取自 IDWriteTextLayout overhang），方块里就会
         // 「一边松一边紧」。这里补一次 ink 视觉居中（2026-11-10 用户「右边快贴上了」）。
@@ -998,15 +1024,27 @@ mod tests {
         assert_eq!(c.cells[34].day, 1, "末尾是 11 月 1 日");
     }
 
-    /// 2026-11-10 用户「今天的 10 右边快和小框贴上了」：块高被 6 行月份的行高卡死（19），
-    /// 但宽度可以单独给足 —— 两位数 ink 最宽 16.3，21 宽的块左右各留 ~2.3px 呼吸。
+    /// 2026-11-11 用户「小框尽量保证正方形」：块收成 19×19（高度被 6 行月份的行高卡死），
+    /// 日号 14 → 13、字距 -0.03em，让最宽的两位数（30）在正方形里左右各留 ~2px。
     #[test]
-    fn 今日块两位数的左右留白() {
+    fn 今日块是正方形且两位数不贴边() {
         let t = Tokens::cal(240.0, 180.0);
-        assert_eq!(t.chip_h, 19.0, "高度仍 19（1.1875r）：6 行月份行高 18.8，再高就贴上下两行");
-        assert_eq!(t.chip_w, 21.0, "宽度 21（1.3125r）：19 宽时两位数右边只剩 1px");
-        assert!(t.chip_w > t.chip_h, "块是「微扁」而非正方形 —— 高度被行高卡死");
+        assert_eq!(t.chip_h, 19.0, "边长 19（1.1875r）：6 行月份行高 18.8，再高就贴上下两行");
+        assert_eq!(t.chip_w, t.chip_h, "宽=高，正方形（用户 2026-11-11）");
         assert_eq!(t.chip_r, 6.0, "圆角 0.375r，约为块高 31%（对齐手机参考稿）");
+        assert_eq!(t.day_fs, 13.0, "日号 13（0.8125r）：14px 两位数 ink 16.3，19 的正方形塞不下");
+        assert_eq!(t.day_lh, 16.25, "行盒 1.25 倍字号，6 行月份不挤");
+        assert!((t.day_track + 0.03).abs() < 1e-6, "两位数字距 -0.03em");
+    }
+
+    /// 13px 等宽数字的最宽 ink（「30」）≈ 15.2：19 的正方形里左右各 ~2px，
+    /// 与手机参考稿「块内留白 ≈ 块宽 10~12%」同档；14px 时只剩 1.3（旧反馈「右边快贴上」）。
+    #[test]
+    fn 正方形今日块的两位数留白() {
+        let t = Tokens::cal(240.0, 180.0);
+        let ink_w = 16.33 * t.day_fs / 14.0 + t.day_track * t.day_fs;
+        let pad = (t.chip_w - ink_w) / 2.0;
+        assert!(pad >= 1.9, "左右留白应 ≥1.9px，实得 {pad}");
     }
 
     /// 2026-11-09 用户拍板：翻月要「慢一点、左右方向明显」，头部改「上下滚动」

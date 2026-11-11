@@ -733,12 +733,34 @@ pub fn calendar_sheet(
         })
         .unwrap_or((2026, 10, 31));
     let mut t = Tokens::cal(240.0, 180.0);
-    // 取证钩子：MC_CAL_CHIP_W=20 临时改今日块宽（只影响 --probe 出图，live 走 Tokens 默认值）
+    // 取证钩子（只影响 --probe 出图，live 走 Tokens 默认值）：
+    //   MC_CAL_CHIP_W / MC_CAL_CHIP_H  今日块边长
+    //   MC_CAL_DAY_FS                   日号字号
+    //   MC_CAL_DAY_TRACK                日号字距（em）
     if let Ok(v) = std::env::var("MC_CAL_CHIP_W") {
         if let Ok(v) = v.parse::<f32>() {
             if v > 0.0 {
                 t.chip_w = v;
             }
+        }
+    }
+    if let Ok(v) = std::env::var("MC_CAL_CHIP_H") {
+        if let Ok(v) = v.parse::<f32>() {
+            if v > 0.0 {
+                t.chip_h = v;
+            }
+        }
+    }
+    if let Ok(v) = std::env::var("MC_CAL_DAY_FS") {
+        if let Ok(v) = v.parse::<f32>() {
+            if v > 0.0 {
+                t.day_fs = v;
+            }
+        }
+    }
+    if let Ok(v) = std::env::var("MC_CAL_DAY_TRACK") {
+        if let Ok(v) = v.parse::<f32>() {
+            t.day_track = v;
         }
     }
     let days = calendar::days_in_month_of(y, m);
