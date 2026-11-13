@@ -8,7 +8,7 @@
 //!   .perf-rows .lab/.pct { font-size:1.3125rem; line-height:1.15 }
 //!   .perf-rows .bar { height:.9375rem; border-radius:999px }
 //!   .bar 底 = fg 25% / 填充 = fg 90%（SVG 药丸，亚像素连续）
-//!   .card { border-radius:1rem; text-shadow:0 .833px 1.667px #000/45% }
+//!   .card { border-radius:1rem }（文字无阴影 —— 2026-11-13 起全部去掉）
 
 use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -18,7 +18,7 @@ use windows_numerics::Vector2;
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Dim, Dir, Justify, Node, Placed, Rect, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_round};
-use minicard_draw::text::{draw_shadow_taps, TextEngine, TextShadow};
+use minicard_draw::text::TextEngine;
 use minicard_shell::gfx::Gfx;
 
 pub struct Row {
@@ -235,10 +235,7 @@ fn paint_tree(
             spec.line_h + 8.0,
             spec.tabular,
         )?;
-        // `.card` 的 text-shadow 是**模糊**投影（0 .833px 1.667px var(--tshadow)）：
-        // 原来画的是 y+0.833 的硬边副本，字缘没有任何过渡、看着像双影。
-        // 换成 3×3 高斯核的 9 次低透明度副本，坐标与正文一致（y 已含整像素吸附）。
-        draw_shadow_taps(g, &lay, p.rect.x, y, &TextShadow::CARD.with_color(pal.shadow))?;
+        // 文字只画一遍正文（无阴影）
         set_color(g, pal.fg)?;
         unsafe {
             g.d2d.DrawTextLayout(

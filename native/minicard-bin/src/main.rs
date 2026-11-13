@@ -79,7 +79,7 @@ struct Args {
     gamma: f32,
     contrast: f32,
     rmode: u8,
-    /// probe 用：按浅色主题出图（验浅色阴影/字色；live 走 config 的 theme）
+    /// probe 用：按浅色主题出图（验浅色字色/描边；live 走 config 的 theme）
     theme_light: bool,
     live: bool,
     live_topmost: bool,

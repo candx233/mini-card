@@ -846,106 +846,13 @@ mod tests {
     }
 }
 
-/// CSS `text-shadow: 0 Ypx Rpx color` 的全部参数。
+/// 画一段文字：布局 → 上色 → 一次 `DrawTextLayout`。
 ///
-/// `.card` 上那条是 `0 0.833px 1.667px var(--tshadow)`：只往下挪 0.833px、模糊半径 1.667px。
-/// 颜色走色板的 `--tshadow`（深色主题黑 45%、浅色主题白 60%），别写死黑色。
-#[derive(Clone, Copy, Debug)]
-pub struct TextShadow {
-    /// 阴影色（alpha 是该次阴影的总不透明度）
-    pub color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
-    /// 3×3 抽样网格的步长（≈ CSS 模糊半径的一半，实测 0.8335 与参考图最贴）
-    pub sigma: f32,
-    /// 纵向偏移（CSS 的第二个参数）
-    pub dy: f32,
-}
-
-impl TextShadow {
-    /// `.card { text-shadow: 0 0.833px 1.667px var(--tshadow) }` 的几何部分 + 深色主题的影色。
-    pub const CARD: Self = Self {
-        color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.45,
-        },
-        sigma: 0.8335,
-        dy: 0.833,
-    };
-
-    /// 只换影色（色板里的 `--tshadow`），几何仍按 CSS。
-    pub fn with_color(self, color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F) -> Self {
-        Self { color, ..self }
-    }
-}
-
-/// 3×3 高斯核的 9 个抽样点 `(dx, dy, 归一化权重)`。
-///
-/// 硬边偏移副本在每条字形边缘都会差一大截（边缘渐变完全没有），所以阴影一律走这一套。
-pub fn gauss_taps(sigma: f32) -> [(f32, f32, f32); 9] {
-    let mut total = 0.0f32;
-    let mut taps = [(0.0f32, 0.0f32, 0.0f32); 9];
-    let mut k = 0;
-    for i in -1..=1 {
-        for j in -1..=1 {
-            let (ox, oy) = (i as f32 * sigma, j as f32 * sigma);
-            let wt = (-(ox * ox + oy * oy) / (2.0 * sigma * sigma)).exp();
-            taps[k] = (ox, oy, wt);
-            total += wt;
-            k += 1;
-        }
-    }
-    if total > 0.0 {
-        for t in taps.iter_mut() {
-            t.2 /= total;
-        }
-    }
-    taps
-}
-
-/// 给**已经建好**的文本布局画一遍高斯阴影（不画正文）。
-///
-/// 滚动数字那种「每帧都在改字符」的场合复用它：布局已经在手，不必为了阴影再排版一次。
-pub fn draw_shadow_taps(
-    g: &minicard_shell::gfx::Gfx,
-    lay: &IDWriteTextLayout,
-    x: f32,
-    y: f32,
-    sh: &TextShadow,
-) -> Result<()> {
-    use windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE;
-    use windows_numerics::Vector2;
-    if sh.color.a <= 0.0 || sh.sigma <= 0.0 {
-        return Ok(());
-    }
-    for (ox, oy, wt) in gauss_taps(sh.sigma) {
-        let a = sh.color.a * wt;
-        if a <= 0.001 {
-            continue;
-        }
-        crate::paint::set_color(
-            g,
-            windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a, ..sh.color },
-        )?;
-        unsafe {
-            g.d2d.DrawTextLayout(
-                Vector2 {
-                    X: x + ox,
-                    Y: y + oy + sh.dy,
-                },
-                lay,
-                &g.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
-    }
-    Ok(())
-}
-
-/// CSS `text-shadow: 0 Ypx Rpx color` 的近似：R 是模糊半径（= 2σ），用 3×3 高斯核
-/// 画 9 遍低透明度副本。注意**不是**硬边偏移 —— 硬边在每一条字形边缘都会差一大截。
+/// 2026-11-13 用户「全部都不要阴影，也不要叠模糊副本」：卡片文字不再画
+/// `text-shadow`（那套「偏移 0.833px + 3×3 高斯核 9 遍低透明度副本」已整体删除）。
+/// 这里只负责把正文画一遍，不再有任何影子/重影层。
 #[allow(clippy::too_many_arguments)]
-pub fn draw_shadowed(
+pub fn draw_text(
     g: &minicard_shell::gfx::Gfx,
     spec: &crate::layout::TextSpec,
     x: f32,
@@ -954,17 +861,10 @@ pub fn draw_shadowed(
     h: f32,
     mode: Mode,
     color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
-    shadow: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
-    sigma: f32,
-    dy: f32,
     te: &TextEngine,
 ) -> Result<()> {
     use windows_numerics::Vector2;
     let lay = te.layout_spec(spec, w, h, mode)?;
-    // 阴影色跟主题走：深色 = 黑 45%、浅色 = 白 60%（`Palette::shadow`）。
-    // 以前这里写死黑色 → 浅色主题下待办/磁盘卡是「黑晕」，其余 7 张卡是「白晕」。
-    let sh = TextShadow { color: shadow, sigma, dy };
-    draw_shadow_taps(g, &lay, x, y, &sh)?;
     crate::paint::set_color(g, color)?;
     unsafe {
         g.d2d.DrawTextLayout(

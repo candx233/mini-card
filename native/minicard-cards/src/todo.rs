@@ -16,7 +16,7 @@ use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
-use minicard_draw::text::{Mode as TextMode, TextEngine};
+use minicard_draw::text::{draw_text, Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
 
 #[derive(Clone, Debug)]
@@ -438,8 +438,8 @@ fn paint_tree(
         } else {
             pal.fg
         };
-        // CSS 的 text-shadow（0 0.833px 1.667px black 45%；浅色主题是白色 60%）——带模糊，不是硬边副本
-        minicard_draw::text::draw_shadowed(
+        // 文字只画一遍正文（无阴影/模糊副本）
+        draw_text(
             g,
             spec,
             pl.rect.x,
@@ -448,9 +448,6 @@ fn paint_tree(
             spec.line_h + 6.0,
             TextMode::Ellipsis,
             color,
-            pal.shadow,
-            0.8335,
-            0.833,
             te,
         )?;
         // 删除线：文字中线（CSS text-decoration: line-through 约在基线上方 ~0.3em）

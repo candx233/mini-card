@@ -19,7 +19,7 @@ use minicard_draw::gradient;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_round, pop_clip, push_clip, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
-use minicard_draw::text::{draw_shadow_taps, Mode as TextMode, TextEngine, TextShadow};
+use minicard_draw::text::{Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
 
 #[derive(Clone, Debug)]
@@ -727,8 +727,7 @@ fn paint_tree(
             9201 => pal.muted,
             _ => pal.fg,
         };
-        // `.card { text-shadow: 0 .833px 1.667px var(--tshadow) }`：卡内所有文字都有
-        let shadow = TextShadow::CARD.with_color(pal.shadow);
+        // 歌名 / 歌手 / 时间：只画正文，没有任何阴影/模糊副本
         let mut marquee_drawn = false;
         // 歌名 / 歌手：放不下（溢出 > 2px）就来回滚 —— 浏览器 `musicMarquee`
         if pl.id == 9101 || pl.id == 9102 {
@@ -758,7 +757,6 @@ fn paint_tree(
                         bottom: pl.rect.y + spec.line_h,
                     },
                 );
-                draw_shadow_taps(g, &lay, pl.rect.x - off, pl.rect.y, &shadow)?;
                 set_color(g, color)?;
                 unsafe {
                     g.d2d.DrawTextLayout(
@@ -782,7 +780,6 @@ fn paint_tree(
                 TextMode::Clip
             };
             let lay = te.layout_spec(spec, pl.rect.w, spec.line_h + 6.0, mode)?;
-            draw_shadow_taps(g, &lay, pl.rect.x, pl.rect.y, &shadow)?;
             set_color(g, color)?;
             unsafe {
                 g.d2d.DrawTextLayout(

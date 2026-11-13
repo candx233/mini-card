@@ -25,7 +25,7 @@ use minicard_core::notify::{relative_time, NotifyAccess, NotifyItem, NotifySnaps
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Measurer, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_rect, fill_round, set_color, stroke_round};
-use minicard_draw::text::{draw_shadowed, Mode as TextMode, TextEngine};
+use minicard_draw::text::{draw_text, Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
 use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -1512,22 +1512,6 @@ fn clip_rect(r: D2D_RECT_F) -> D2D_RECT_F {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_text(
-    g: &Gfx,
-    te: &TextEngine,
-    spec: &TextSpec,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    mode: TextMode,
-    color: D2D1_COLOR_F,
-    shadow: D2D1_COLOR_F,
-) -> Result<()> {
-    draw_shadowed(g, spec, x, y, w, h, mode, color, shadow, 0.8335, 0.833, te)
-}
-
 fn paint_children(
     g: &Gfx,
     te: &TextEngine,
@@ -1636,7 +1620,6 @@ fn paint_tree(
                     if let Some(spec) = pl.text() {
                         draw_text(
                             g,
-                            te,
                             spec,
                             pl.rect.x,
                             pl.rect.y,
@@ -1644,7 +1627,7 @@ fn paint_tree(
                             spec.line_h + 6.0,
                             TextMode::Clip,
                             alpha_color(pal.muted, hover),
-                            alpha_color(text_shadow(pal), hover),
+                            te,
                         )?;
                     }
                 }
@@ -1685,9 +1668,8 @@ fn paint_tree(
             }
         };
         // 空 / 授权 / 不可用态：内容 160ms 淡入（抬头「通知」不跟着淡）
-        let mut alpha = 1.0;
         if matches!(pl.id, ID_STATE | ID_HINT) {
-            alpha = ctx.state_fade;
+            let alpha = ctx.state_fade;
             if alpha <= 0.001 {
                 return Ok(());
             }
@@ -1695,7 +1677,6 @@ fn paint_tree(
         }
         draw_text(
             g,
-            te,
             spec,
             pl.rect.x,
             pl.rect.y,
@@ -1703,7 +1684,7 @@ fn paint_tree(
             spec.line_h + 6.0,
             TextMode::Ellipsis,
             color,
-            alpha_color(text_shadow(pal), alpha),
+            te,
         )?;
     }
 
@@ -1908,7 +1889,6 @@ fn paint_clear_label(
         };
         draw_text(
             g,
-            te,
             spec,
             pl.rect.x,
             pl.rect.y,
@@ -1916,7 +1896,7 @@ fn paint_clear_label(
             spec.line_h + 6.0,
             TextMode::Ellipsis,
             alpha_color(color, target_a),
-            alpha_color(text_shadow(pal), target_a),
+            te,
         )?;
     }
     let ghost_a = 1.0 - target_a;
@@ -1931,7 +1911,6 @@ fn paint_clear_label(
         };
         draw_text(
             g,
-            te,
             &ghost_spec,
             pl.rect.x,
             pl.rect.y,
@@ -1939,7 +1918,7 @@ fn paint_clear_label(
             spec.line_h + 6.0,
             TextMode::Ellipsis,
             alpha_color(color, ghost_a),
-            alpha_color(text_shadow(pal), ghost_a),
+            te,
         )?;
     }
     Ok(())
@@ -2040,7 +2019,7 @@ fn paint_app_tile(
         tabular: false,
         spacing_em: 0.0,
     };
-    draw_shadowed(
+    draw_text(
         g,
         &spec,
         pl.rect.x,
@@ -2054,8 +2033,6 @@ fn paint_app_tile(
             b: 1.0,
             a: 1.0,
         },
-        text_shadow(_pal),        0.5,
-        0.5,
         te,
     )?;
     Ok(())
@@ -2140,7 +2117,7 @@ fn paint_item_content(
         tabular: false,
         spacing_em: 0.0,
     };
-    draw_shadowed(
+    draw_text(
         g,
         &title_spec,
         x,
@@ -2149,9 +2126,6 @@ fn paint_item_content(
         t.title_lh + 4.0,
         TextMode::Ellipsis,
         pal.fg,
-        text_shadow(pal),
-        0.8335,
-        0.833,
         te,
     )?;
     if !show_body {
@@ -2168,7 +2142,7 @@ fn paint_item_content(
         tabular: false,
         spacing_em: 0.0,
     };
-    draw_shadowed(
+    draw_text(
         g,
         &body_spec,
         x,
@@ -2177,9 +2151,6 @@ fn paint_item_content(
         t.body_lh + 4.0,
         TextMode::Ellipsis,
         pal.muted,
-        text_shadow(pal),
-        0.8335,
-        0.833,
         te,
     )?;
     Ok(())
@@ -2211,20 +2182,6 @@ fn app_color(app: &str) -> D2D1_COLOR_F {
 
 fn color(r: f32, g: f32, b: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a: 1.0 }
-}
-
-/// 深色主题用白/黑阴影压住壁纸；亮色主题是深色字，再叠白影只会糊，直接关掉。
-fn text_shadow(pal: &Palette) -> D2D1_COLOR_F {
-    if pal.fg.r > 0.5 {
-        pal.shadow
-    } else {
-        D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }
-    }
 }
 
 /// 命中（D4 用）：条目 / 删除 / 授权引导。

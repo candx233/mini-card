@@ -1,4 +1,4 @@
-//! 颜色：CSS `oklch()` → sRGB，以及卡片调色板（fg / 白纱 / 描边 / 阴影 / 条）。
+//! 颜色：CSS `oklch()` → sRGB，以及卡片调色板（fg / 白纱 / 描边 / 拖拽影 / 条）。
 
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
@@ -36,6 +36,7 @@ pub struct Palette {
     pub fg: D2D1_COLOR_F,
     pub veil: D2D1_COLOR_F,
     pub border: D2D1_COLOR_F,
+    /// Dock 拖拽图标的落地阴影色（2026-11-13 起文字不再用阴影，这里只剩这一处）
     pub shadow: D2D1_COLOR_F,
     pub track: D2D1_COLOR_F,
     pub fill: D2D1_COLOR_F,
@@ -70,7 +71,7 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// glass: 0..100（config 的 glass_alpha）→ 白纱 alpha 0..0.30；blur 与阴影走固定 token。
+    /// glass: 0..100（config 的 glass_alpha）→ 白纱 alpha 0..0.30；blur 走固定 token。
     pub fn new(glass: f32, debug_alpha: bool) -> Self {
         let fg = oklch(0.966, 0.005, 258.3, 1.0);
         let veil_a = (glass.clamp(0.0, 100.0) / 100.0 * 0.30).clamp(0.0, 0.30);
@@ -100,7 +101,7 @@ impl Palette {
     }
 
     /// 浅色主题（主界面「深色字」）：照 card.html::__setTheme(false) 的四个 token
-    /// 换 fg/muted/border/tshadow，其余由 fg 派生的色一并重算。
+    /// 换 fg/muted/border，其余由 fg 派生的色一并重算。
     pub fn with_theme(mut self, dark: bool) -> Self {
         if dark {
             return self;
@@ -177,10 +178,10 @@ mod tests {
         assert!(p.veil.a > 0.0, "glass alpha 不能被主题改掉");
     }
 
-    /// C1（0.1.3）：文字阴影色必须跟主题走 —— 深色黑 45% / 浅色白 60%。
-    /// 以前 todo/disks 写死黑色，浅色主题下这两张卡是「黑晕」、其余七张是「白晕」。
+    /// `shadow`（Dock 拖拽图标的落地阴影）必须跟主题走 —— 深色黑 45% / 浅色白 60%。
+    /// 文字阴影已在 2026-11-13 全部删除，这里只剩 Dock 拖拽态在用。
     #[test]
-    fn 文字阴影色跟主题走() {
+    fn 拖拽阴影色跟主题走() {
         let dark = Palette::new(30.0, false);
         assert_eq!((dark.shadow.r, dark.shadow.g, dark.shadow.b), (0.0, 0.0, 0.0));
         assert!((dark.shadow.a - 0.45).abs() < 1e-6);

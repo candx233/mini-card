@@ -17,9 +17,6 @@
     --surface: oklch(0.966 0.005 258.3 / 0.08);
     --fg:      oklch(0.966 0.005 258.3);
     --muted:   oklch(0.85 0.02 261.1);    /* 2026-09-30 四轮（白偏灰方向）：0.775 → 0.85。活卡 5 档扫描（0.775/0.80/0.82/0.85/0.88）+ vision 定档：0.88 发白抢主数字层次，0.85 是甜点。只动亮度，字重/投影/白纱/模糊都不动 */
-    /* 卡面文字阴影色：深色主题压一层黑、浅色主题托一层白，让文字从「花哨的磨砂壁纸」上浮起来。
-       （用户 2026-09-30：「灰色的字有些情况会稍微有点看不清」） */
-    --tshadow: oklch(0 0 0 / 0.45);
     --border:  oklch(1 0 0 / 0.10);
     --accent:  oklch(0.685 0.168 256.0);
     /* 实色强调块（勾选框、今日块）里的字色：浅强调色（粉/白）时 __setAccent 换成深字，
@@ -74,10 +71,6 @@
     position: absolute; inset: 0;
     display: flex; flex-direction: column;
     padding: 0.875rem 1rem 0.875rem;   /* 上下对称：配合 card-body 垂直居中 → 上沿留空 = 下沿留空（设计稿 v9 同源） */
-    /* 2026-10-01 用户「有些卡灰字有阴影有些没有，时钟这种是我觉得好看的」：原来写 rem →
-       阴影随每张卡的缩放比变（实测 性能 0.625/1.25 ~ 网络·番茄 1/2，0.625px 的模糊基本看不见）。
-       现改固定 px，全六卡完全一致 = 时钟原来的 0.833/1.667（与原时钟肉眼无差）。 */
-    text-shadow: 0 0.833px 1.667px var(--tshadow);
     border-radius: 1rem;
     overflow: hidden;                  /* 裁掉磨砂层模糊外溢的软边 */
     background: none;
@@ -743,7 +736,6 @@
     var s = document.documentElement.style;
     s.setProperty('--fg', r ? r.fg : 'oklch(0.966 0.005 258.3)');
     s.setProperty('--muted', r ? r.muted : 'oklch(0.85 0.02 261.1)');
-    s.setProperty('--tshadow', r ? 'oklch(1 0 0 / 0.6)' : 'oklch(0 0 0 / 0.45)');
     s.setProperty('--border', r ? r.border : 'oklch(1 0 0 / 0.10)');
     DARK_THEME = !!dark;
     paintOnAccent();              // 浅色主题：实色块统一换深字

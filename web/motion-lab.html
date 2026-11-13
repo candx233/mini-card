@@ -96,7 +96,6 @@
     --fg: oklch(0.28 0.02 258);
     --muted: oklch(0.47 0.02 261);
     --border: oklch(0 0 0 / 0.10);
-    --tshadow: oklch(1 0 0 / 0.6);
     --accent: oklch(0.685 0.168 256.0);
     --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent);
     position: relative; width: 240px; height: 120px; border-radius: 1rem; overflow: hidden;
@@ -108,7 +107,6 @@
     -webkit-backdrop-filter: blur(18px) saturate(1.15);
     backdrop-filter: blur(18px) saturate(1.15);
     color: var(--fg); font-size: 16px;
-    text-shadow: 0 .833px 1.667px var(--tshadow);
     display: flex; flex-direction: column; user-select: none;
   }
   .mcard > * { position: relative; z-index: 2; }

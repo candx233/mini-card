@@ -20,10 +20,10 @@ use windows_numerics::Vector2;
 use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_round};
-use minicard_draw::text::{draw_shadow_taps, Mode, TextEngine, TextShadow};
+use minicard_draw::text::{Mode, TextEngine};
 use minicard_shell::gfx::Gfx;
 
-use crate::roll::{cell, draw_digit_shadowed, Roll};
+use crate::roll::{cell, draw_digit, Roll};
 
 pub struct Tokens {
     pub w: f32,
@@ -324,8 +324,8 @@ fn paint_tree(
             tabular: true,
             spacing_em: t.spacing_em,
         };
-        // 滚动数字同样吃 `.card` 的 text-shadow（原来完全没画，字像直接贴在玻璃上）
-        return draw_digit_shadowed(
+        // 滚动数字：不再叠任何阴影/模糊副本，逐格只画一次正文
+        return draw_digit(
             g,
             te,
             p.rect.x,
@@ -335,21 +335,11 @@ fn paint_tree(
             clock.idx(i, now),
             &spec,
             pal.fg,
-            Some(TextShadow::CARD.with_color(pal.shadow)),
         );
     } else if let Some(spec) = p.text() {
         // 冒号属于 .clock-time（--fg），不是日期/农历的 --muted
         let color = if p.id == 3900 { pal.fg } else { pal.muted };
         let lay = te.layout_spec(spec, p.rect.w, spec.line_h + 8.0, Mode::Clip)?;
-        // CSS 是**模糊**投影（0 .833px 1.667px var(--tshadow)）：原来画的是 y+0.833 的
-        // 硬边副本，字缘没有过渡、看着像双影。这里换成 3×3 高斯核的 9 次低透明度副本。
-        draw_shadow_taps(
-            g,
-            &lay,
-            p.rect.x,
-            p.rect.y,
-            &TextShadow::CARD.with_color(pal.shadow),
-        )?;
         set_color(g, color)?;
         unsafe {
             g.d2d.DrawTextLayout(

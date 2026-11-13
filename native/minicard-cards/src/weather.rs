@@ -15,7 +15,7 @@ use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_rect, fill_round, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
-use minicard_draw::text::{draw_shadow_taps, Mode as TextMode, TextEngine, TextShadow};
+use minicard_draw::text::{Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
 
 /// 文字基线的整像素落位：Chrome 把基线**向下取整**、D2D/DWrite 是四舍五入 —— 基线小数部分
@@ -532,15 +532,6 @@ fn paint_tree(
         // 三日日期与底行仍是低 1px（DWrite 对 CJK 字形另有 hint 相位，统一公式盖不住）。
         // 净效果 p95 22 → 19 / 平均 4.41 → 3.81，故保留。
         let ty = snap_text_y(te, spec, pl.rect.y);
-        // `.card { text-shadow: 0 .833px 1.667px var(--tshadow) }` 对卡内所有文字生效：
-        // 这里原来只有一次 DrawTextLayout，等于整张天气卡没有任何投影。
-        draw_shadow_taps(
-            g,
-            &lay,
-            pl.rect.x,
-            ty,
-            &TextShadow::CARD.with_color(pal.shadow),
-        )?;
         set_color(g, color)?;
         unsafe {
             g.d2d.DrawTextLayout(

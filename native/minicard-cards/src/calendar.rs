@@ -14,7 +14,7 @@ use minicard_draw::color::Palette;
 use minicard_draw::layout::{layout, Align, Dim, Dir, Justify, Node, Placed, TextSpec};
 use minicard_draw::paint::{fill_round, set_color, stroke_path, stroke_round};
 use minicard_draw::path::Path;
-use minicard_draw::text::{draw_shadow_taps, Mode as TextMode, TextEngine, TextShadow};
+use minicard_draw::text::{Mode as TextMode, TextEngine};
 use minicard_shell::gfx::Gfx;
 
 #[derive(Clone, Debug)]
@@ -502,7 +502,7 @@ fn find_placed(p: &Placed, id: u32) -> Option<&Placed> {
     p.children.iter().find_map(|c| find_placed(c, id))
 }
 
-/// 头部两代文字的绘制（新字 + 滚动中的旧字），带文字阴影；滚动时裁在头部文字带内。
+/// 头部两代文字的绘制（新字 + 滚动中的旧字）；滚动时裁在头部文字带内。
 #[allow(clippy::too_many_arguments)]
 fn draw_header_text(
     g: &Gfx,
@@ -538,13 +538,11 @@ fn draw_header_text(
         draw_card_text(
             g,
             te,
-            pal,
             &spec,
             title.rect.x,
             title.rect.y + old_dy,
             (clip.right - clip.left).max(1.0),
             pal.fg,
-            false,
         )?;
     }
     if rolling && !c.roll_prev_holiday.is_empty() {
@@ -553,13 +551,11 @@ fn draw_header_text(
             draw_card_text(
                 g,
                 te,
-                pal,
                 &spec,
                 h.rect.x,
                 h.rect.y + old_dy,
                 (clip.right - h.rect.x).max(1.0),
                 pal.accent_mix,
-                false,
             )?;
         }
     }
@@ -568,13 +564,11 @@ fn draw_header_text(
         draw_card_text(
             g,
             te,
-            pal,
             spec,
             title.rect.x,
             title.rect.y + new_dy,
             (clip.right - clip.left).max(1.0),
             pal.fg,
-            false,
         )?;
     }
     if let Some(h) = holiday {
@@ -582,13 +576,11 @@ fn draw_header_text(
             draw_card_text(
                 g,
                 te,
-                pal,
                 spec,
                 h.rect.x,
                 h.rect.y + new_dy,
                 (clip.right - h.rect.x).max(1.0),
                 pal.accent_mix,
-                false,
             )?;
         }
     }
@@ -598,27 +590,19 @@ fn draw_header_text(
     Ok(())
 }
 
-/// 卡片文字的统一绘制（布局 + 阴影 + 灰阶加粗实验），`x/y` 是**行盒左上角**。
+/// 卡片文字的统一绘制（布局 + 一次正文），`x/y` 是**行盒左上角**。
 /// 返回值之外不改任何状态：调用方负责颜色/透明度层。
 #[allow(clippy::too_many_arguments)]
 fn draw_card_text(
     g: &Gfx,
     te: &TextEngine,
-    pal: &Palette,
     spec: &TextSpec,
     x: f32,
     y: f32,
     w: f32,
     color: D2D1_COLOR_F,
-    other: bool,
 ) -> Result<()> {
     let lay = te.layout_spec(spec, w, spec.line_h + 6.0, TextMode::Clip)?;
-    let mut sh = TextShadow::CARD.with_color(pal.shadow);
-    if other {
-        sh.color.a *= 0.32;
-    }
-    draw_shadow_taps(g, &lay, x + g.text_dx, y + g.text_dy, &sh)?;
-    // 阴影会把笔刷改成影色 —— 正文必须在自己画之前重新上色，否则整卡文字都是「影色」
     set_color(g, color)?;
     unsafe {
         g.d2d.DrawTextLayout(
@@ -949,13 +933,11 @@ fn paint_tree(
         draw_card_text(
             g,
             te,
-            pal,
             spec,
             pl.rect.x + dx,
             pl.rect.y + dy,
             pl.rect.w,
             color,
-            other,
         )?;
     }
     for ch in &pl.children {

@@ -14,7 +14,6 @@
     --surface: oklch(0.966 0.005 258.3 / 0.08);
     --fg:      oklch(0.966 0.005 258.3);
     --muted:   oklch(0.85 0.02 261.1);
-    --tshadow: oklch(0 0 0 / 0.45);
     --border:  oklch(1 0 0 / 0.10);
     --accent:  oklch(0.685 0.168 256.0);
     --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent);
@@ -96,7 +95,6 @@
   .item .glyph {
     font-family: var(--font-mono); font-weight: 600; font-size: 20px;
     color: color-mix(in oklch, var(--fg) 88%, transparent);
-    text-shadow: 0 0.833px 1.667px var(--tshadow);
   }
   .item.running::after {                   /* 运行中指示点（稿：4×4、bottom -5px、留 4px 余量别贴条底边）
                                               条目放大时用 --ki=1/k 抵掉：点恒 4px、恒在图标底下 5px */
@@ -296,7 +294,6 @@
     var s = document.documentElement.style;
     s.setProperty('--fg', r ? r.fg : 'oklch(0.966 0.005 258.3)');
     s.setProperty('--muted', r ? r.muted : 'oklch(0.85 0.02 261.1)');
-    s.setProperty('--tshadow', r ? 'oklch(1 0 0 / 0.6)' : 'oklch(0 0 0 / 0.45)');
     s.setProperty('--border', r ? r.border : 'oklch(1 0 0 / 0.10)');
     // 气泡跟着主题翻：亮主题 = 白底深字（暗主题是 --bg 暗底 + 白字）
     s.setProperty('--bubble-bg', r ? 'oklch(1 0 0 / 0.88)' : 'color-mix(in oklch, oklch(0.210 0.025 255.0) 84%, transparent)');

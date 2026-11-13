@@ -700,8 +700,7 @@ fn status_tokens(kind: CardKind, w: f32, h: f32) -> StatusTok {
     }
 }
 
-/// 空态 / 异常态的整卡：玻璃 + 白纱 + 描边 + 正中一行灰字。
-/// 与其它卡一样带 `.card` 的 text-shadow（0 0.833px 1.667px #000/45%）。
+/// 空态 / 异常态的整卡：玻璃 + 白纱 + 描边 + 正中一行灰字（文字只画一遍，无阴影）。
 #[allow(clippy::too_many_arguments)]
 fn paint_status(
     g: &Gfx,
@@ -759,16 +758,6 @@ fn paint_status(
         let y = t.pad_tb + (box_h - t.line_h).max(0.0) / 2.0;
         let fmt = te.format_cached(t.fs, t.line_h, 2)?; // 2 = 居中
         let lay = te.layout_cached(2, &fmt, text, box_w, t.line_h + 8.0, false)?;
-        set_color(g, pal.shadow)?;
-        g.d2d.DrawTextLayout(
-            Vector2 {
-                X: t.pad_lr,
-                Y: y + 0.833,
-            },
-            &lay,
-            &g.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
         set_color(g, pal.muted)?;
         g.d2d.DrawTextLayout(
             Vector2 { X: t.pad_lr, Y: y },

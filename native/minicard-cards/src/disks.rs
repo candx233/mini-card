@@ -363,9 +363,7 @@ fn paint_tree(
         // 用 spec 建布局：缓存键含字重（`layout_cached`/`format_cached` 的口径是固定 400，
         // 而 `.pct` 在告警态是 600 —— 走那条路会把两种字面的布局混用）
         let lay = te.layout_spec(spec, w, parent.h.max(spec.line_h) + 8.0, TextMode::Clip)?;
-        // 徽标字母没有阴影（CSS 只在 .card 上给 text-shadow，理论上所有字都有；
-        // 但徽标是 mono 小字，实测与浏览器一致的做法是照画）
-        // 硬边副本 → 换成 CSS 的模糊阴影（0 0.833px 1.667px black 45%）
+        // 所有文字都只画一遍正文：不再有阴影/模糊副本
         let ty = if (2000..2500).contains(&p.id) {
             // 徽标字母是 grid `place-items:center` 居中的（基线相位与普通行盒不同，实测
             // 不校正就已经对齐），别套一般文字那条 floor-vs-round 校正。
@@ -373,45 +371,6 @@ fn paint_tree(
         } else {
             snap_text_y(te, spec, p.rect.y)
         };
-        {
-            let mut total = 0.0f32;
-            let mut taps = [(0.0f32, 0.0f32, 0.0f32); 9];
-            let mut k = 0;
-            let sigma = 0.833;
-            for i in -1..=1 {
-                for j in -1..=1 {
-                    let (ox, oy) = (i as f32 * sigma, j as f32 * sigma);
-                    let wt = (-(ox * ox + oy * oy) / (2.0 * sigma * sigma)).exp();
-                    taps[k] = (ox, oy, wt);
-                    total += wt;
-                    k += 1;
-                }
-            }
-            for (ox, oy, wt) in taps {
-                // 阴影色跟主题走（深色黑 45% / 浅色白 60%），与其它 7 张卡同源
-                let a = pal.shadow.a * wt / total;
-                set_color(
-                    g,
-                    D2D1_COLOR_F {
-                        r: pal.shadow.r,
-                        g: pal.shadow.g,
-                        b: pal.shadow.b,
-                        a,
-                    },
-                )?;
-                unsafe {
-                    g.d2d.DrawTextLayout(
-                        Vector2 {
-                            X: x + ox,
-                            Y: ty + 0.833 + oy,
-                        },
-                        &lay,
-                        &g.brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    );
-                }
-            }
-        }
         let is_badge = (2000..2500).contains(&p.id);
         let warn = if (3000..4000).contains(&p.id) {
             disks
