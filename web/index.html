@@ -34,6 +34,10 @@
     --dur-fast: 120ms;
     --dur-normal: 200ms;
     --dur-slow: 320ms;
+    /* B 表（2026-11-14）：单选组滑块/列表行动效 180ms；强调色过渡 240ms。
+       语义命名，不叫 --dur-180（数值改档时不用改名）。 */
+    --dur-pill: 180ms;
+    --dur-accent: 240ms;
     --ease-out: cubic-bezier(.22, 1, .36, 1);
     --ease-snap: cubic-bezier(.2, 0, 0, 1);
     --ease-spring: cubic-bezier(.34, 1.3, .64, 1);
@@ -117,6 +121,33 @@
   @keyframes pageIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
   @media (prefers-reduced-motion: reduce) { .page.active { animation: none; } }
 
+  /* ─── B 表动效（0.1.3 E 段，2026-11-14）───
+     统一口径：内容换值 120ms 淡入（E2/E5）· 列表行动效 180/120ms（E3）· 强调色 240ms（E7）。
+     位移都 ≤4px、无回弹；重建型列表靠 JS 记「已画过」的 id，不靠 CSS 每次重建都重放。
+     `.accent-anim` 只在强调色切换的那 260ms 挂在 <html> 上 —— 常驻会让 hover 的 150ms 反馈也被拖慢。 */
+  @keyframes txIn { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+  @keyframes rowIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @keyframes rowOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-2px); } }
+  .tx-in, .swap-in { animation: txIn var(--dur-fast) var(--ease-out) both; }
+  .row-in { animation: rowIn var(--dur-pill) var(--ease-out) both; }
+  .row-out { animation: rowOut var(--dur-fast) ease-in both; pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .tx-in, .swap-in, .row-in, .row-out { animation: none; }
+  }
+  html.accent-anim .btn-primary,
+  html.accent-anim .switch.on,
+  html.accent-anim .chip2.on,
+  html.accent-anim .chip2 .d,
+  html.accent-anim .opt.sel,
+  html.accent-anim .linkbtn,
+  html.accent-anim .nav-item.sel,
+  html.accent-anim .upd-bar i {
+    transition: background-color var(--dur-accent) var(--ease-out),
+                color var(--dur-accent) var(--ease-out),
+                border-color var(--dur-accent) var(--ease-out),
+                box-shadow var(--dur-accent) var(--ease-out);
+  }
+
   .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex: 0 0 auto; }
   .top h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
   .top .sub { margin-top: 3px; font-size: 13.5px; color: var(--muted); }
@@ -161,9 +192,21 @@
   .switch:active::after { transform: translateX(0) scaleX(1.22) scaleY(.88); }
   .switch.on:active::after { transform: translateX(15px) scaleX(1.22) scaleY(.88); }
 
-  .opts { display: flex; background: #F1F2F4; padding: 2px; border-radius: 9px; }
-  .opt { border: 0; background: transparent; color: var(--muted); font-size: 13px; font-weight: 500; line-height: 18px; padding: 5px 11px; border-radius: 7px; }
-  .opt.sel { background: #fff; color: var(--accent-strong); box-shadow: 0 1px 2px rgba(20,25,35,.12); }
+  /* 单选组（B4/E4）：白底选中块独立成一层，在项之间滑动（与 A2 侧栏滑块同法）。
+     以前白底挂在 .opt.sel 上，换档是硬切；现在由 .opt-pill 画，只给它 transform/width 过渡。
+     pill 里没有文字、且绝对定位，宽度变化不会让兄弟项重排（唯一非 transform 的动画，代价可忽略）。 */
+  .opts { position: relative; display: flex; background: #F1F2F4; padding: 2px; border-radius: 9px; }
+  .opt-pill {
+    position: absolute; left: 0; top: 0; width: 0; height: 0; border-radius: 7px; background: #fff;
+    box-shadow: 0 1px 2px rgba(20,25,35,.12); pointer-events: none; opacity: 0;
+    transition: transform var(--dur-pill) var(--ease-out), width var(--dur-pill) var(--ease-out),
+                opacity var(--dur-fast) linear;
+  }
+  .opt-pill.on { opacity: 1; }
+  .opt-pill.snap { transition: none; }
+  .opt { position: relative; z-index: 1; border: 0; background: transparent; color: var(--muted); font-size: 13px; font-weight: 500; line-height: 18px; padding: 5px 11px; border-radius: 7px; }
+  .opt.sel { background: transparent; color: var(--accent-strong); }
+  @media (prefers-reduced-motion: reduce) { .opt-pill { transition: none; } }
   .opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   /* 刷新间隔 = 与参数弹窗同一套分段控件（原生 <select> 在 WebView2 里是系统下拉，与本界面两套语言） */
   #cx-rate { flex: none; }
@@ -869,14 +912,85 @@
   var $  = function (s, r) { return (r || document).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
 
-  /* toast */
-  var toastEl = $('#toast'), toastTimer;
-  function toast(msg) {
-    toastEl.textContent = msg;
-    toastEl.classList.add('show');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2200);
-  }
+  /* ─── 动效共享件（0.1.3 B 表）：toast 队列 · 单选组滑块 · 强调色过渡 ───
+     三个都在 shell 这一层实现，Tauri 桥那段与参数面板直接复用 window.__mcMotion，
+     不要各写一份（以前 toast 就是两份实现，行为不一致）。 */
+  var MOTION = (function () {
+    var reducedMq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+    function isReduced() { return !!(reducedMq && reducedMq.matches); }
+
+    /* E6 toast 队列：1.2s 内连续提示只换文案、不重播入场；1.2s 后再来才算新提示。
+       重播 = 先把 .show 摘掉再挂上（否则 classList.add 幂等，看不出新提示）。 */
+    var tEl = document.getElementById('toast'), hideT = 0, lastT = 0;
+    function toast(msg) {
+      if (!tEl) return;
+      var now = performance.now();
+      var fresh = (now - lastT) > 1200;
+      lastT = now;
+      clearTimeout(hideT);
+      if (fresh && tEl.classList.contains('show')) {
+        tEl.classList.remove('show');
+        void tEl.offsetWidth;              // 强制回流：让 .show 的过渡真的从 0 开始
+      }
+      tEl.textContent = msg;
+      tEl.classList.add('show');
+      hideT = setTimeout(function () { tEl.classList.remove('show'); }, 2200);
+    }
+
+    /* E4 单选组滑块：`.opts` 里垫一层 `.opt-pill`，位置跟 `.opt.sel` 走。
+       用 rect 差值而不是 offsetLeft —— 分组在隐藏页里 offsetParent 可能是 .app，rect 才可靠。 */
+    var pillRaf = 0;
+    function ensurePill(group) {
+      var pill = group.querySelector('.opt-pill');
+      if (!pill) {
+        pill = document.createElement('i');
+        pill.className = 'opt-pill';
+        pill.setAttribute('aria-hidden', 'true');
+        group.insertBefore(pill, group.firstChild);
+      }
+      return pill;
+    }
+    function syncOpts(group, instant) {
+      if (!group) return;
+      var sel = group.querySelector('.opt.sel'), pill = ensurePill(group);
+      if (!sel) { pill.classList.remove('on'); return; }
+      var g = group.getBoundingClientRect(), s = sel.getBoundingClientRect();
+      var dx = s.left - g.left - group.clientLeft, dy = s.top - g.top - group.clientTop;
+      var snap = instant || isReduced();
+      if (snap) pill.classList.add('snap');
+      pill.style.width = s.width + 'px';
+      pill.style.height = s.height + 'px';
+      pill.style.transform = 'translate(' + dx.toFixed(2) + 'px,' + dy.toFixed(2) + 'px)';
+      pill.classList.add('on');
+      if (snap) { void pill.offsetWidth; pill.classList.remove('snap'); }
+    }
+    function syncAll(instant) {
+      $$('.opts').forEach(function (g) { syncOpts(g, instant); });
+    }
+    /* 谁改了 .opt.sel 都自动跟（现网有 7 处 programmatic 切换，逐个补调用迟早漏） */
+    var mo = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var t = muts[i].target;
+        if (t && t.closest && t.closest('.opt-pill')) continue;   // 自己写 style/class 不算触发源
+        if (!pillRaf) pillRaf = requestAnimationFrame(function () { pillRaf = 0; syncAll(false); });
+        return;
+      }
+    });
+    mo.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+
+    /* E7 强调色：只在切换那一小段挂 .accent-anim，让消费处按 240ms 插值；到点摘掉。 */
+    var accentT = 0;
+    function accentFade() {
+      var h = document.documentElement;
+      h.classList.add('accent-anim');
+      clearTimeout(accentT);
+      accentT = setTimeout(function () { h.classList.remove('accent-anim'); }, 260);
+    }
+
+    return { toast: toast, syncOpts: syncOpts, syncAll: syncAll, accentFade: accentFade, isReduced: isReduced };
+  })();
+  window.__mcMotion = MOTION;
+  function toast(msg) { MOTION.toast(msg); }
 
   /* 侧栏切页：入页淡入+上浮（CSS）+ 独立白底滑块移到选中项（transform 过渡，图标不动）。
      offsetTop 相对 .rail（position:relative），含 rail 的 padding-top。 */
@@ -897,6 +1011,8 @@
       placeNavPill(btn);
       $$('.page').forEach(function (p) { p.classList.toggle('active', p === next); });
       var c = $('.content'); if (c) c.scrollTop = 0;
+      // 隐藏页里的单选组量不到宽度（display:none）→ 切过来这一拍补一次滑块定位
+      requestAnimationFrame(function () { MOTION.syncAll(true); });
       // 卡片库的预览 iframe：只在「卡片库」这一页开着时轮询（9 个 iframe 后台各拉一次 = 白跑）
       // 实现在下面那个 IIFE 里（卡片库预览与它同域），挂 window 上跨块调用
       if (window.__setPreviewsPaused) window.__setPreviewsPaused(next.id !== 'page-lib');
@@ -941,6 +1057,7 @@
     sw.addEventListener('click', function () {
       $$('.sw', swGroup).forEach(function (s) { s.classList.remove('sel'); });
       sw.classList.add('sel');
+      MOTION.accentFade();
       document.documentElement.style.setProperty('--accent', sw.dataset.c);
     });
   });
@@ -951,6 +1068,7 @@
       var kind = btn.dataset.reset;
       if (kind === 'glass' && rng) { rng.value = 30; val.textContent = '30'; paint(rng); }
       if (kind === 'accent') {
+        MOTION.accentFade();
         document.documentElement.style.setProperty('--accent', 'oklch(0.685 0.168 256.0)');
         $$('.sw', swGroup).forEach(function (s, i) { s.classList.toggle('sel', i === 0); });
       }
@@ -986,6 +1104,9 @@
     $('.nav-item[data-page="page-lib"]').click();
   });
 
+  /* 首帧把现有单选组的滑块摆到位（隐藏页里的量不到宽度，切过去时 nav 那边会补一次） */
+  requestAnimationFrame(function () { MOTION.syncAll(true); });
+
 })();
 </script>
 <script>
@@ -997,11 +1118,7 @@
   var $  = function (s, r) { return (r || document).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
 
-  function toast(m) {
-    var t = $('#toast'); if (!t) return;
-    t.textContent = m; t.classList.add('show');
-    clearTimeout(t._tm); t._tm = setTimeout(function () { t.classList.remove('show'); }, 2200);
-  }
+  function toast(m) { if (window.__mcMotion) window.__mcMotion.toast(m); }
   function save() { return invoke('save_config', { cfg: CFG }).catch(function (e) { console.error('[bridge] save', e); }); }
 
   // 尺寸（2026-10-02 定死）：每张卡**只有一个尺寸**，都是 60px 基准方格的整数倍 ——
@@ -1160,6 +1277,10 @@
       return n === 1 ? id : id + '#' + n;
     });
   }
+  /* E3 列表增删：按 id 记「已画过」的集合，只给新增项挂一次入场动画。
+     chip 节点是按位置复用的（第 i 个 chip 换成另一张卡）→ 用卡片 id 判新旧，
+     不能按节点判（否则每次 renderDesk 都会重放）。 */
+  var CHIP_SEEN = {};
   function renderChips(cards) {
     var chips = $('#chips');
     if (!chips) return;
@@ -1174,7 +1295,10 @@
     }
     cards.forEach(function (c, i) {
       var b = chips.children[i], k = KINDS[c.kind] || KINDS.Performance;
-      b.className = 'chip2' + (c.enabled ? '' : ' off');
+      var key = c.id ? String(c.id) : ('@' + i);
+      var fresh = !CHIP_SEEN[key];
+      CHIP_SEEN[key] = 1;
+      b.className = 'chip2' + (c.enabled ? '' : ' off') + (fresh ? ' row-in' : '');
       if (b.lastChild) b.lastChild.nodeValue = k.name;
       b.onclick = function () { goDeck(i); };
       // 参数弹窗不再占可见入口（与右侧面板重复）；双击卡片名仍能打开
@@ -1252,41 +1376,67 @@
     placeDeck(false); paintPanel();
   }
 
+  /* E2：右侧面板「卡片名 / 尺寸 / 位置」换值时的 120ms 淡入。
+     只认「文本真的变了」—— renderDesk() 在开关、滑条松手、pin 切换时都会打到 paintPanel，
+     同值再加类就会变成每次操作都闪一下（旧清单 B2 的「重建不重放」要求）。 */
+  function setFxText(el, txt) {
+    if (!el || el.textContent === txt) return;
+    el.textContent = txt;
+    el.classList.remove('tx-in');
+    void el.offsetWidth;              // 强制回流：同一个动画能在连续两次换值时重新播
+    el.classList.add('tx-in');
+    clearTimeout(el.__fxT);
+    el.__fxT = setTimeout(function () { el.classList.remove('tx-in'); }, 140);
+  }
+
   function paintPanel() {
     var cards = deckCards(), c = cards[DECK_SEL];
-    var sub = $('#cx-sub');
-    if (sub) sub.textContent = c
+    setFxText($('#cx-sub'), c
       ? (cards.length + ' 张在桌面 · 当前编辑：' + (KINDS[c.kind] || KINDS.Performance).name)
-      : '桌面上还没有卡片';
+      : '桌面上还没有卡片');
 
     var chipEls = $$('#chips .chip2');
     chipEls.forEach(function (b, i) { b.classList.toggle('on', i === DECK_SEL); });
 
     if (!c) {
-      ['#cx-size', '#cx-cap', '#cx-pos'].forEach(function (s) { var e = $(s); if (e) e.textContent = '—'; });
-      var rh = $('#cx-rate-hint'); if (rh) rh.textContent = '—';
-      var rs0 = $('#cx-rate'); if (rs0) rs0.innerHTML = '';
+      ['#cx-size', '#cx-cap', '#cx-pos'].forEach(function (s) { setFxText($(s), '—'); });
+      setFxText($('#cx-rate-hint'), '—');
+      var rs0 = $('#cx-rate'); if (rs0) { rs0.innerHTML = ''; rs0.__mcOptKey = ''; }
       paintPos(null);
       return;
     }
     var k = KINDS[c.kind] || KINDS.Performance;
     setSwitch($('#cx-on'), c.enabled);
     setSwitch($('#cx-pin'), c.pinned);
-    $('#cx-size').textContent = Math.round(c.size[0]) + ' × ' + Math.round(c.size[1]);
-    $('#cx-cap').textContent = '实际大小 ' + Math.round(c.size[0]) + ' × ' + Math.round(c.size[1]) + ' · 这里放大 ' + DECK_K + ' 倍';
-    $('#cx-pos').textContent = c.pinned ? '已固定 · 拖动不移动' : '自由摆放';
-    $('#cx-rate-hint').textContent = RATE_HINT[c.kind] || '—';
+    setFxText($('#cx-size'), Math.round(c.size[0]) + ' × ' + Math.round(c.size[1]));
+    setFxText($('#cx-cap'), '实际大小 ' + Math.round(c.size[0]) + ' × ' + Math.round(c.size[1]) + ' · 这里放大 ' + DECK_K + ' 倍');
+    setFxText($('#cx-pos'), c.pinned ? '已固定 · 拖动不移动' : '自由摆放');
+    setFxText($('#cx-rate-hint'), RATE_HINT[c.kind] || '—');
     var sel = $('#cx-rate');
-    if (k.rates && k.rates.length) {
-      // 分段控件（与参数弹窗的「刷新间隔」同一套 .opts/.opt，不用原生 <select>）
-      sel.innerHTML = k.rates.map(function (r) {
-        var on = r[0] === c.refresh_ms;
-        return '<button class="opt' + (on ? ' sel' : '') + '" type="button" role="radio" aria-checked="' +
-          (on ? 'true' : 'false') + '" data-val="' + r[0] + '">' + r[1] + '</button>';
-      }).join('');
-    } else {
-      sel.innerHTML = '<span class="opt sel" role="radio" aria-checked="true" aria-disabled="true">' +
-        (c.kind === 'Clock' ? '跟随系统' : '不轮询') + '</span>';
+    // 分段控件只在「卡片类型 / 档位表」变了才重建：每次 paintPanel 都 innerHTML
+    // 会把 .opts 里的滑块一起重建 → 位置从 (0,0) 重播一下（E2/E4 都不允许）；
+    // 只是选中的档变了就原地换 .sel，让滑块真的滑过去（B4 的观感）。
+    var optKey = (c.kind || '') + '|' + (k.rates ? k.rates.map(function (r) { return r[0]; }).join(',') : '-');
+    if (sel && sel.__mcOptKey !== optKey) {
+      sel.__mcOptKey = optKey;
+      if (k.rates && k.rates.length) {
+        // 分段控件（与参数弹窗的「刷新间隔」同一套 .opts/.opt，不用原生 <select>）
+        sel.innerHTML = k.rates.map(function (r) {
+          var on = r[0] === c.refresh_ms;
+          return '<button class="opt' + (on ? ' sel' : '') + '" type="button" role="radio" aria-checked="' +
+            (on ? 'true' : 'false') + '" data-val="' + r[0] + '">' + r[1] + '</button>';
+        }).join('');
+      } else {
+        sel.innerHTML = '<span class="opt sel" role="radio" aria-checked="true" aria-disabled="true">' +
+          (c.kind === 'Clock' ? '跟随系统' : '不轮询') + '</span>';
+      }
+      if (window.__mcMotion) window.__mcMotion.syncOpts(sel, true);
+    } else if (sel) {
+      var want = sel.querySelector('.opt[data-val="' + (c.refresh_ms || 0) + '"]');
+      if (want && !want.classList.contains('sel')) {
+        $$('.opt', sel).forEach(function (o) { o.classList.remove('sel'); });
+        want.classList.add('sel');          // MutationObserver 会接着把滑块滑过去
+      }
     }
     if (!POS_DRAG) paintPos(c);
   }
@@ -1349,24 +1499,50 @@
     var deck = $('#deck');
     if (deck) {
       deck.addEventListener('wheel', function (e) {
-        if (Math.abs(e.deltaY) < 6) return;
-        e.preventDefault();
-        deckStep(e.deltaY);
+        e.preventDefault();                    // 卡堆区域不吃页面滚动：小 delta 也要收进来累积
+        wheelPush(e.deltaY);
       }, { passive: false });
       window.addEventListener('resize', function () { placeDeck(true); });
     }
-    // 卡面是独立文档（iframe），滚轮在它里面不会冒泡到本页 —— 卡堆模式的卡面会把
-    // deltaY 用 postMessage 转上来（card.html 只在 ?deck=1 时挂），这里接进同一套翻页。
+    /* B1/E1 触控板累积：精密触控板一次手势是几十个 1~3px 的小 delta，以前「<6 直接丢弃」，
+       得搓很多下才翻一页。现在累加，到 6px 才走一次 deckStep；80ms 空闲清零（两次手势不粘连），
+       方向翻转也清零（来回搓不会互相抵消成「纹丝不动」）。 */
+    var WHEEL_ACC = 0, WHEEL_T = 0, WHEEL_TH = 6, WHEEL_IDLE = 80;
+    function wheelPush(dy) {
+      if (!isFinite(dy) || !dy) return;
+      var now = performance.now();
+      if (DECK_LOCK) { WHEEL_ACC = 0; WHEEL_T = now; return; }
+      if (now - WHEEL_T > WHEEL_IDLE) WHEEL_ACC = 0;
+      if (WHEEL_ACC && ((WHEEL_ACC > 0) !== (dy > 0))) WHEEL_ACC = 0;
+      WHEEL_T = now;
+      WHEEL_ACC += dy;
+      if (Math.abs(WHEEL_ACC) < WHEEL_TH) return;
+      var d = WHEEL_ACC;
+      WHEEL_ACC = 0;
+      deckStep(d);
+    }
     function deckStep(dy) {
-      if (!isFinite(dy) || Math.abs(dy) < 6) return;
+      if (!isFinite(dy) || Math.abs(dy) < WHEEL_TH) return;
       if (DECK_LOCK) return;
       DECK_LOCK = true;
       setTimeout(function () { DECK_LOCK = false; }, 460);
       goDeck(DECK_SEL + (dy > 0 ? 1 : -1));
     }
+    /* 点卡面 = 选中这张（B1/E1）：卡面是独立文档，点击同样冒泡不上来 → card.html 只在 deck=1
+       时把 click 转成 postMessage。已经是当前这张就不拦，卡里的按钮（番茄钟 / 待办勾选）照常可用。 */
+    function deckSelectFrom(src) {
+      var track = $('#deckTrack'); if (!track || !src) return;
+      var nodes = $$('.slide', track);
+      for (var i = 0; i < nodes.length; i++) {
+        var f = nodes[i].__mcFrame;
+        if (f && f.contentWindow === src) { if (i !== DECK_SEL) goDeck(i); return; }
+      }
+    }
     window.addEventListener('message', function (e) {
       var d = e.data;
-      if (d && typeof d.__mcDeckWheel === 'number') deckStep(d.__mcDeckWheel);
+      if (!d) return;
+      if (typeof d.__mcDeckWheel === 'number') wheelPush(d.__mcDeckWheel);
+      if (d.__mcDeckClick) deckSelectFrom(e.source);
     });
     var on = $('#cx-on');
     if (on) on.addEventListener('click', function () {
@@ -1388,6 +1564,9 @@
       var c = deckCards()[DECK_SEL]; if (!c) return;
       var ms = +b.dataset.val;
       if (!ms) return;
+      // 先原地换 .sel：滑块立刻开始滑（B4），不等 IPC 回来再跳过去
+      $$('.opt', rateBox).forEach(function (o) { o.classList.remove('sel'); });
+      b.classList.add('sel');
       invoke('card_update', {
         id: c.id, size: c.size, enabled: !!c.enabled, refreshMs: ms,
         showGpu: c.show_gpu !== false, warn90: c.warn90 !== false
@@ -1665,6 +1844,7 @@
     }).catch(function () { openSheetNow(c); });
   }
   function openSheetNow(c) {
+    var wasOpen = $('#param-modal').classList.contains('open');   // 弹窗开着换卡 = 内容切换（E5）
     sheetCard = c;
     var k = KINDS[c.kind] || KINDS.Performance;
     $('#pm-title').textContent = k.name + ' · 参数';
@@ -1711,6 +1891,18 @@
       '<button class="switch' + (c.enabled ? ' on' : '') + '" id="pm-enabled" role="switch" aria-checked="' + (c.enabled ? 'true' : 'false') + '" aria-label="在桌面显示"></button></div>' +
       '<p class="snote">关掉后卡片从桌面消失，尺寸与位置保留</p></div>';
     $('#pm-body').innerHTML = html;
+    // E5：弹窗不重建，只在「开着的时候换了卡」给内容层补 120ms 淡入。
+    // 首次打开不挂 —— 那是 .modal.open 自己的入场动画，两套叠在一起会晃；
+    // 同时把上一次残留的 .swap-in 清掉，状态别跨次累积。
+    var scroll = $('#param-modal .modal-scroll');
+    if (scroll) {
+      scroll.classList.remove('swap-in');
+      if (wasOpen) { void scroll.offsetWidth; scroll.classList.add('swap-in'); }
+    }
+    // 弹窗里的分段控件首次出现要「瞬移到位」，不能让滑块从 (0,0) 滑过来
+    $$('.pm-seg', $('#pm-body')).forEach(function (g) {
+      if (window.__mcMotion) window.__mcMotion.syncOpts(g, true);
+    });
     $$('.pm-seg', $('#pm-body')).forEach(function (g) {
       $$('.opt', g).forEach(function (o) {
         o.addEventListener('click', function () {
@@ -1725,19 +1917,25 @@
         sw.setAttribute('aria-checked', on ? 'true' : 'false');
       });
     });
-    // 待办编辑器：行内 完成开关 / 删除；底部 添加一条（新行默认未完成）
+    // 待办编辑器：行内删除（先淡出再移除，E3）/ 底部 添加一条（新行默认未完成）
     var teWrap = $('#pm-todo');
     if (teWrap) {
       teWrap.addEventListener('click', function (e) {
         var t = e.target;
         if (!t || !t.closest) return;
         var del = t.closest('.btn-del');
-        if (del) del.closest('.te-row').remove();
+        if (!del) return;
+        var row = del.closest('.te-row');
+        if (!row || row.classList.contains('row-out')) return;
+        row.classList.add('row-out');
+        setTimeout(function () { if (row.parentNode) row.parentNode.removeChild(row); }, 120);
       });
       var addBtn = $('#pm-todo-add');
       if (addBtn) addBtn.addEventListener('click', function () {
         teWrap.insertAdjacentHTML('beforeend', todoRowHtml(''));
-        var inp = teWrap.lastElementChild.querySelector('input');
+        var row = teWrap.lastElementChild;
+        row.classList.add('row-in');
+        var inp = row.querySelector('input');
         if (inp) inp.focus();
       });
     }
@@ -1879,6 +2077,9 @@
     }
     var sws = $$('.sw');
     function applyAccent() {
+      // E7：CSS 变量本身不可过渡 → 切换时给 <html> 挂 260ms 的 .accent-anim，
+      // 让「消费处」按 240ms 把颜色插过去（color-mix() 的结果可插值）。
+      if (window.__mcMotion) window.__mcMotion.accentFade();
       var a = CFG.settings.accent, hit = null;
       sws.forEach(function (s) {
         var r = oklchToRgb(s.dataset.c);
@@ -2417,13 +2618,18 @@
     } catch (e) { /* 预览没就绪，下一拍会补 */ }
   }
 
+  /* E3：Dock 列表每次都是整段 innerHTML 重建 → 按条目 id 记「已画过」，只有新增行才淡入；
+     删除改成「先 120ms 淡出、再打 dock_remove」，失败则把行放回来（不能骗用户说删了）。 */
+  var DOCK_SEEN = {};
   function renderDockList() {
     var list = $('#dock-list'); if (!list) return;
     var items = dockItems();
     list.innerHTML = '';
     items.forEach(function (it, i) {
       var row = document.createElement('div');
-      row.className = 'drow';
+      var fresh = !DOCK_SEEN[it.id];
+      DOCK_SEEN[it.id] = 1;
+      row.className = 'drow' + (fresh ? ' row-in' : '');
       row.dataset.dock = it.id;
       var icon = it.icon
         ? '<img src="' + esc(fileSrc(it.icon)) + '" alt="">'
@@ -2455,7 +2661,16 @@
         renderDockList();
       });
       row.querySelector('.btn-del').addEventListener('click', function () {
-        invoke('dock_remove', { id: it.id }).then(afterDockChange).catch(function (e) { toast('移除失败：' + e); });
+        if (row.classList.contains('row-out')) return;
+        delete DOCK_SEEN[it.id];
+        row.classList.add('row-out');            // 先淡出 120ms（E3），动画完再真删
+        setTimeout(function () {
+          invoke('dock_remove', { id: it.id }).then(afterDockChange).catch(function (e) {
+            row.classList.remove('row-out');     // 失败：行放回来，别让界面和 config 不一致
+            DOCK_SEEN[it.id] = 1;
+            toast('移除失败：' + e);
+          });
+        }, 120);
       });
       // 启动参数：失焦 / 回车保存（值没变就不打 IPC）
       var argsEl = row.querySelector('.d-args');

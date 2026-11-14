@@ -2307,13 +2307,17 @@
   });
   }
 
-  /* ── 主界面卡堆（deck=1）：卡面是独立文档，滚轮事件不会冒泡到父页 →
-     这里转成消息交给父页翻页。卡片库缩略图不带 deck=1，不受影响。 */
+  /* ── 主界面卡堆（deck=1）：卡面是独立文档，滚轮/点击事件都不会冒泡到父页 →
+     这里转成消息交给父页翻页、选中。卡片库缩略图不带 deck=1，不受影响。
+     点击用捕获阶段：父页改了选中之后卡内按钮照常收到这一次点击，不用点两下。 */
   if (previewMode && params.get('deck') === '1') {
     window.addEventListener('wheel', function (e) {
       if (!e.deltaY) return;
       try { parent.postMessage({ __mcDeckWheel: e.deltaY }, '*'); } catch (err) {}
     }, { passive: true });
+    window.addEventListener('click', function () {
+      try { parent.postMessage({ __mcDeckClick: 1 }, '*'); } catch (err) {}
+    }, true);
   }
 
   render(true);
