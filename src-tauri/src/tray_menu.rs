@@ -26,6 +26,36 @@ use tauri::{
 
 pub const LABEL: &str = "tray-menu";
 
+/// 把菜单窗从任务栏 / Alt+Tab 里摘掉（WS_EX_TOOLWINDOW，去 WS_EX_APPWINDOW）。
+/// Tauri 的 `.skip_taskbar(true)` 在本版运行时没生效（见 `ensure` 里的注释），而且 WebView2
+/// 首次 show 会把 exstyle 覆盖回去 → 建窗时和每次 show 后都要再压一次；`SWP_FRAMECHANGED`
+/// 让外壳重新读样式（否则任务栏按钮可能还留着）。
+fn hide_from_taskbar(hwnd: windows_sys::Win32::Foundation::HWND) {
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        };
+        const WS_EX_TOOLWINDOW: i32 = 0x0000_0080;
+        const WS_EX_APPWINDOW: i32 = 0x0004_0000;
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let fixed = (ex | WS_EX_TOOLWINDOW as u32) & !(WS_EX_APPWINDOW as u32);
+        if fixed != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, fixed as isize);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            crate::mlog(&format!("tray menu: exstyle 0x{ex:08X} → 0x{fixed:08X}"));
+        }
+    }
+}
+
 /// 菜单项（id, 文案）。**加项要连 `web/menu.html` 的静态 DOM 一起改**（窗口高度按条数算；
 /// 单测 `menu_html_matches_items` 会盯着两边一致）。
 pub const ITEMS: &[(&str, &str)] = &[("show", "显示主窗口"), ("quit", "退出 Mini Card")];
@@ -167,6 +197,14 @@ pub fn show_at(app: &AppHandle, rect: Rect) {
     let _ = w.show();
     if let Some(h) = crate::hwnd_of(&w) {
         focus_menu(h);
+        // WebView2 宿主显示时会把 skip_taskbar 的 exstyle 覆盖回去 → show 后再压一次；
+        // 宿主初始化是异步的，120ms 后再补一枪（这时去读 style 才是稳定的）。
+        hide_from_taskbar(h);
+        let raw = h as usize;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            hide_from_taskbar(raw as windows_sys::Win32::Foundation::HWND);
+        });
     }
     set_hidden(None);
 }
@@ -247,6 +285,12 @@ fn ensure(app: &AppHandle, pos: (f64, f64)) -> Option<WebviewWindow> {
         }
     };
     apply_menu_chrome(&win);
+    // Windows 上 `.skip_taskbar(true)` 在本版运行时没有落到 WS_EX_TOOLWINDOW（2026-11-14 实测
+    // exstyle=0x00040018，仍带 WS_EX_APPWINDOW）→ 菜单开着时任务栏/Alt+Tab 里会多一格。
+    // 建窗、每次 show 后各修一次：WebView2 宿主在首次显示时会把 exstyle 覆盖回去。
+    if let Some(h) = crate::hwnd_of(&win) {
+        hide_from_taskbar(h);
+    }
     // 1px 尺寸抖动逼 WebView2 重算表面 bounds（卡片 / Dock 同款）；菜单窗口是「用时建」的，
     // 这一拍必须在 —— 少了它首帧可能是没画完的空白
     use tauri::LogicalSize;

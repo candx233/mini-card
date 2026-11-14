@@ -473,13 +473,16 @@ pub fn disks_sheet(
 ) -> Result<()> {
     use minicard_cards::disks::{self, Disk, Tokens};
 
-    let list = vec![
+    // C3 对表用：MC_DISKS_N=1|3|4|5 裁到对应盘数（默认 5，与历史基线一致）
+    let n = std::env::var("MC_DISKS_N").ok().and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(5).clamp(1, 5);
+    let list: Vec<Disk> = vec![
         Disk { name: "C:".into(), used: 300_000_000_000, total: 500_000_000_000 },
         Disk { name: "D:".into(), used: 420_000_000_000, total: 500_000_000_000 },
         Disk { name: "E:".into(), used: 120_000_000_000, total: 400_000_000_000 },
         Disk { name: "F:".into(), used: 60_000_000_000, total: 300_000_000_000 },
         Disk { name: "G:".into(), used: 190_000_000_000, total: 200_000_000_000 },
-    ];
+    ].into_iter().take(n).collect();
     let t = Tokens::disks(240.0, 180.0, list.len());
     if debug_layout {
         let tree = disks::tree_hook(&t, &list);
