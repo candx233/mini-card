@@ -2876,10 +2876,13 @@ fn click(
                             .unwrap_or_default();
                         std::thread::spawn(move || {
                             if crate::appwin::activate_app(&app, &aumid) {
+                                // 日志只记 app / 路径，不含通知正文
+                                minicard_shell::mlog!("通知打开：{app} → 激活已有窗口");
                                 return;
                             }
                             let target = format!("shell:AppsFolder\\{aumid}");
                             if !aumid.trim().is_empty() {
+                                minicard_shell::mlog!("通知打开：{app} → ShellExecute 启动");
                                 if let Err(e) = crate::appwin::launch(&target, "") {
                                     minicard_shell::mlog!("通知打开发送方失败: {e}");
                                 }
@@ -3509,8 +3512,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             PostQuitMessage(0);
             LRESULT(0)
         }
+        // 验收钩子：外部脚本 PostMessage(card, MC_CLICK_MSG, 0x4D43, MAKELPARAM(x,y)) 注入一次
+        // 客户区像素点击（游戏全屏时 SetCursorPos 会被 ClipCursor 吃掉，只能走这条）。
+        // 入队的是与 WM_LBUTTONUP 完全相同的 UiEvent::Click，走同一套 hit/click 代码。
+        // wParam 必须为 'MC'（0x4D43），防其他进程误触/误投。
+        m if m == debug_click_msg() => {
+            if wp.0 == 0x4D43 {
+                let x = (lp.0 & 0xFFFF) as u16 as i16 as i32;
+                let y = ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+                let _ = EVENTS.lock().unwrap().push(UiEvent::Click {
+                    hwnd: hwnd.0 as isize,
+                    x,
+                    y,
+                });
+            }
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+}
+
+/// 验收钩子用的窗口消息（RegisterWindowMessageW；名字全系统唯一）
+fn debug_click_msg() -> u32 {
+    static MSG: OnceLock<u32> = OnceLock::new();
+    *MSG.get_or_init(|| unsafe { RegisterWindowMessageW(w!("MiniCardDebugClick")) })
 }
 
 /// 动画重绘间隔（显示同步后）：短动效每个显示帧一步，连续补间按整数帧抽帧。

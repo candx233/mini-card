@@ -72,6 +72,11 @@ struct Args {
     desktop_layer: bool,
     viewer: Option<(i32, i32, i32, i32)>,
     probe: Option<String>,
+    /// `--probe activate-app` 用：应用名 / AUMID（E2E 验收钩子，只做一次窗口激活）
+    app: Option<String>,
+    aumid: Option<String>,
+    /// `--probe activate-app` 用：激活后保持进程存活 N ms（父进程要在存活期间断言前台窗口）
+    hold_ms: u64,
     cover: Option<PathBuf>,
     debug_layout: bool,
     roll_ms: u64,
@@ -115,6 +120,9 @@ impl Args {
             desktop_layer: false,
             viewer: None,
             probe: None,
+            app: None,
+            aumid: None,
+            hold_ms: 0,
             cover: None,
             debug_layout: false,
             roll_ms: 120,
@@ -166,6 +174,9 @@ impl Args {
                 "--animate" => a.animate = true,
                 "--desktop" => a.desktop_layer = true,
                 "--probe" => a.probe = Some(next(&mut i)),
+                "--app" => a.app = Some(next(&mut i)),
+                "--aumid" => a.aumid = Some(next(&mut i)),
+                "--hold-ms" => a.hold_ms = next(&mut i).parse().unwrap_or(0),
                 "--cover" => a.cover = Some(PathBuf::from(next(&mut i))),
                 "--debug-layout" => a.debug_layout = true,
                 "--roll-ms" => a.roll_ms = next(&mut i).parse().unwrap_or(120),
@@ -496,6 +507,18 @@ fn main() -> Result<()> {
     let t0 = Instant::now();
     minicard_shell::log::init(&std::env::temp_dir().join("minicard-native.log"));
     let args = Args::parse();
+
+    // 验收钩子：只跑一次「激活已在运行的应用」，不建窗口、不画卡（E2E 断言用）
+    if args.probe.as_deref() == Some("activate-app") {
+        let app = args.app.clone().unwrap_or_default();
+        let aumid = args.aumid.clone().unwrap_or_default();
+        let ok = appwin::activate_app(&app, &aumid);
+        mlog!("probe activate-app: app={app} aumid={aumid} ok={ok}");
+        if args.hold_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(args.hold_ms));
+        }
+        std::process::exit(if ok { 0 } else { 3 });
+    }
 
     // 真数据接线模式：读 config.toml → 每张启用的卡一个窗口 → 共用采样线程
     if args.live {

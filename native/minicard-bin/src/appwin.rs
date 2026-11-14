@@ -5,16 +5,22 @@
 //! 同一安装树也算同一应用（Steam 这类 launcher：条目是 Steam.exe，
 //! 真正开窗的是 bin\cef\…\steamwebhelper.exe）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SetForegroundWindow, ShowWindow, SW_MINIMIZE, SW_RESTORE,
+    EnumWindows, FlashWindowEx, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    SetForegroundWindow, SetWindowPos, ShowWindow, SwitchToThisWindow, FLASHWINFO, FLASHW_ALL,
+    FLASHW_TIMERNOFG, GWL_EXSTYLE, GW_OWNER, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_MINIMIZE, SW_RESTORE, SW_SHOW, WS_EX_TOOLWINDOW,
 };
 
 fn base(p: &str) -> &str {
@@ -163,9 +169,176 @@ pub fn is_running(item_path: &str) -> bool {
     item_running(&match_key(item_path), &running_set())
 }
 
-/// 通知等场景：按应用名/AUMID 找到**已在运行**的窗口（含最小化到托盘的窗口）并切到前台。
-/// 返回 false 表示没找到，调用方再走 ShellExecute。
-pub fn activate_app(app: &str, aumid: &str) -> bool {
+/// 一个顶层窗口的快照（**含隐藏窗**）。QQ 关到托盘时主窗 `IsWindowVisible=false`，
+/// 上一版只枚举可见窗 → 匹配不到 → 回退 ShellExecute，表现为「点通知又开一个新 QQ」。
+#[derive(Debug, Clone)]
+struct WinRow {
+    hwnd: isize,
+    exe: String,
+    title: String,
+    class: String,
+    rect: RECT,
+    visible: bool,
+    iconic: bool,
+    owner: isize,
+    tool: bool,
+}
+
+unsafe extern "system" fn enum_all_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    let rows = &mut *(lparam.0 as *mut Vec<(isize, u32)>);
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid != 0 {
+        rows.push((hwnd.0 as isize, pid));
+    }
+    true.into()
+}
+
+/// 全部顶层窗（含隐藏 / 最小化）。与 `visible_windows()` 分开：Dock 的「运行中」
+/// 仍按可见口径，这里只给「点通知激活发送方」用。
+fn all_windows() -> Vec<WinRow> {
+    let mut raw: Vec<(isize, u32)> = Vec::new();
+    unsafe {
+        let p = &mut raw as *mut Vec<(isize, u32)>;
+        let _ = EnumWindows(Some(enum_all_cb), LPARAM(p as isize));
+    }
+    let mut exe_cache: HashMap<u32, Option<String>> = HashMap::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for (h, pid) in raw {
+        let exe = exe_cache.entry(pid).or_insert_with(|| exe_of(pid)).clone();
+        let Some(exe) = exe else { continue };
+        let hwnd = HWND(h as *mut _);
+        unsafe {
+            let mut title = [0u16; 256];
+            let n = GetWindowTextW(hwnd, &mut title) as usize;
+            let mut class = [0u16; 256];
+            let m = GetClassNameW(hwnd, &mut class) as usize;
+            let mut r = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut r);
+            let owner = GetWindow(hwnd, GW_OWNER).map(|x| x.0 as isize).unwrap_or(0);
+            let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            out.push(WinRow {
+                hwnd: h,
+                exe,
+                title: String::from_utf16_lossy(&title[..n]),
+                class: String::from_utf16_lossy(&class[..m]),
+                rect: r,
+                visible: IsWindowVisible(hwnd).as_bool(),
+                iconic: IsIconic(hwnd).as_bool(),
+                owner,
+                tool: ex_style & WS_EX_TOOLWINDOW.0 as isize != 0,
+            });
+        }
+    }
+    out
+}
+
+/// 像不像「可直接激活的主窗」：挡掉 IME/辅助窗、0×0 与小工具条（与 Dock 的 120×90 同口径）
+fn usable(w: &WinRow) -> bool {
+    let ww = w.rect.right - w.rect.left;
+    let hh = w.rect.bottom - w.rect.top;
+    if ww < 120 || hh < 90 || w.tool {
+        return false;
+    }
+    let c = w.class.as_str();
+    !(c == "IME" || c == "MSCTFIME UI" || c.starts_with("GDI+"))
+}
+
+fn hit_keys(w: &WinRow, keys: &[String]) -> bool {
+    let stem = base(&w.exe).trim_end_matches(".exe");
+    keys.iter().any(|k| {
+        k.len() >= 2
+            && (stem == k.as_str()
+                || (k.len() >= 4 && stem.contains(k.as_str()))
+                || (stem.len() >= 4 && k.contains(stem)))
+    })
+}
+
+fn title_hit(w: &WinRow, keys: &[String]) -> bool {
+    let t = w.title.to_lowercase();
+    keys.iter().any(|k| k.chars().count() >= 2 && t.contains(k.as_str()))
+}
+
+/// 在「可见 / 隐藏」这一档里挑最像主窗的：标题命中 > 无 owner > 非最小化 > 面积大。
+/// QQ 现场（5 个隐藏窗）会选中 1054×695 的主面板，而不是会话窗/小工具窗。
+fn pick_main<'a>(wins: &'a [WinRow], keys: &[String], want_visible: bool) -> Option<&'a WinRow> {
+    let mut best: Option<(&WinRow, i64)> = None;
+    for w in wins {
+        if w.visible != want_visible || !usable(w) || !hit_keys(w, keys) {
+            continue;
+        }
+        let area = (w.rect.right - w.rect.left).max(0) as i64
+            * (w.rect.bottom - w.rect.top).max(0) as i64;
+        let score = if title_hit(w, keys) { 1_000_000_000i64 } else { 0 }
+            + if w.owner == 0 { 100_000_000i64 } else { 0 }
+            + if !w.iconic { 10_000_000i64 } else { 0 }
+            + area;
+        if best.map_or(true, |(_, s)| score > s) {
+            best = Some((w, score));
+        }
+    }
+    best.map(|(w, _)| w)
+}
+
+/// 抢前台四连兜底（与 `src-tauri/src/dock.rs:784-851` 同口径）：
+/// SetForegroundWindow → AttachThreadInput → 合成 ALT → SwitchToThisWindow；
+/// 全败抬到 z 顶 + 闪任务栏。返回值 = 是否真拿到前台。
+fn raise_window(hwnd: isize) -> bool {
+    let h = HWND(hwnd as *mut _);
+    unsafe {
+        if GetForegroundWindow() == h {
+            return true;
+        }
+        if SetForegroundWindow(h).as_bool() {
+            return true;
+        }
+        // ① 临时把输入队列挂到前台线程上再抢
+        let fg = GetForegroundWindow();
+        let fg_tid = GetWindowThreadProcessId(fg, None);
+        let me = GetCurrentThreadId();
+        if fg_tid != 0 && fg_tid != me {
+            let _ = AttachThreadInput(me, fg_tid, true);
+            let ok = SetForegroundWindow(h).as_bool();
+            let _ = AttachThreadInput(me, fg_tid, false);
+            if ok {
+                return true;
+            }
+        }
+        // ② 合成一次 ALT：把「最后输入事件」抢到本进程，前台锁就放行
+        const VK_MENU: u8 = 0x12;
+        keybd_event(VK_MENU, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+        if SetForegroundWindow(h).as_bool() {
+            return true;
+        }
+        // ③ 未公开但任务栏那套一直在用
+        SwitchToThisWindow(h, true);
+        if GetForegroundWindow() == h {
+            return true;
+        }
+        let _ = SetWindowPos(
+            h,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        let fwi = FLASHWINFO {
+            cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+            hwnd: h,
+            dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount: 3,
+            dwTimeout: 0,
+        };
+        let _ = FlashWindowEx(&fwi);
+        false
+    }
+}
+
+/// 匹配键：应用名 / 去空格名 / AUMID（包名!AppId 拆开）/ 常见别名表
+fn keys_of(app: &str, aumid: &str) -> Vec<String> {
     fn push(keys: &mut Vec<String>, s: &str) {
         let k = s.trim().to_lowercase();
         if k.chars().count() >= 2 && !keys.iter().any(|x| x == &k) {
@@ -206,42 +379,47 @@ pub fn activate_app(app: &str, aumid: &str) -> bool {
             push(&mut keys, exe);
         }
     }
-    let wins = visible_windows();
-    let mut best: Option<(isize, i64)> = None;
-    for (h, exe) in wins {
-        let stem = base(&exe).trim_end_matches(".exe").to_string();
-        let hit = keys.iter().any(|k| {
-            if k.len() < 2 {
-                return false;
+    keys
+}
+
+/// 通知等场景：按应用名/AUMID 找到**已在运行**的窗口并切到前台。
+/// 先找可见窗（保持旧行为），没有再找**隐藏窗**（QQ 关到托盘 = 5 个 Chrome_WidgetWin_1
+/// 全 IsWindowVisible=false）；只要认领到窗口就返回 true，调用方绝不能再 ShellExecute。
+pub fn activate_app(app: &str, aumid: &str) -> bool {
+    let keys = keys_of(app, aumid);
+    if keys.is_empty() {
+        return false;
+    }
+    let wins = all_windows();
+
+    // ① 可见窗：保持旧行为；只对**最小化**的做 SW_RESTORE（别把最大化窗口还原成小窗）
+    if let Some(w) = pick_main(&wins, &keys, true) {
+        unsafe {
+            if w.iconic {
+                let _ = ShowWindow(HWND(w.hwnd as *mut _), SW_RESTORE);
             }
-            stem == *k
-                || (k.len() >= 4 && stem.contains(k.as_str()))
-                || (stem.len() >= 4 && k.contains(stem.as_str()))
-        });
-        if !hit {
-            continue;
         }
-        let hwnd = HWND(h as *mut _);
-        let mut title = [0u16; 256];
-        let n = unsafe { GetWindowTextW(hwnd, &mut title) } as usize;
-        let iconic = unsafe { IsIconic(hwnd).as_bool() };
-        let mut r = RECT::default();
-        let _ = unsafe { GetWindowRect(hwnd, &mut r) };
-        let area = ((r.right - r.left).max(0) as i64) * ((r.bottom - r.top).max(0) as i64);
-        let score = i64::from(n > 0) * 1_000_000_000
-            + i64::from(!iconic) * 100_000_000
-            + area;
-        if best.map_or(true, |(_, s)| score > s) {
-            best = Some((h, score));
+        let fg = raise_window(w.hwnd);
+        minicard_shell::mlog!("通知激活：{app} 可见窗 hwnd={} 到前台={fg}", w.hwnd);
+        return true;
+    }
+
+    // ② 隐藏窗：QQ 关到托盘走这条（ShowWindow(SW_SHOW) 实测可拉起 Electron 主窗）
+    if let Some(w) = pick_main(&wins, &keys, false) {
+        unsafe {
+            let cmd = if w.iconic { SW_RESTORE } else { SW_SHOW };
+            let _ = ShowWindow(HWND(w.hwnd as *mut _), cmd);
         }
+        let visible = unsafe { IsWindowVisible(HWND(w.hwnd as *mut _)).as_bool() };
+        let fg = raise_window(w.hwnd);
+        minicard_shell::mlog!(
+            "通知激活：{app} 隐藏窗 hwnd={} 已显示={visible} 到前台={fg}",
+            w.hwnd
+        );
+        // 窗口已认领：即使显示/抢前台失败，也不能再启动，避免双开
+        return true;
     }
-    let Some((h, _)) = best else { return false };
-    unsafe {
-        let hwnd = HWND(h as *mut _);
-        let _ = ShowWindow(hwnd, SW_RESTORE);
-        let _ = SetForegroundWindow(hwnd);
-    }
-    true
+    false
 }
 
 /// 点图标：**已在跑就切到前台**（没有前台窗口时先 restore），否则 ShellExecute 启动。
@@ -448,11 +626,92 @@ mod tests {
         assert!(!item_running("", &set));
     }
 
-    /// 真机手测：QQ 最小化在托盘时，点通知应把已有窗口拉起来而不是再开一个。
-    /// 默认 ignore（会改变前台窗口）。
+    /// 真机手测：QQ 关到托盘（窗口全隐藏）时，点通知应把已有主窗拉起来而不是再开一个。
+    /// 默认 ignore（会改变前台窗口，需要人手把 QQ 藏回托盘）。
     #[test]
     #[ignore = "会真的把 QQ 拉到前台"]
     fn qq已有窗口激活() {
         assert!(activate_app("QQ", "QQ"), "没找到运行中的 QQ 窗口");
+    }
+
+    fn row(
+        hwnd: isize,
+        exe: &str,
+        title: &str,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        visible: bool,
+        iconic: bool,
+        owner: isize,
+    ) -> WinRow {
+        WinRow {
+            hwnd,
+            exe: exe.to_string(),
+            title: title.to_string(),
+            class: "Chrome_WidgetWin_1".to_string(),
+            rect: RECT {
+                left: x,
+                top: y,
+                right: x + w,
+                bottom: y + h,
+            },
+            visible,
+            iconic,
+            owner,
+            tool: false,
+        }
+    }
+
+    /// 2026-11-14 现场：QQ 关托盘时 5 个 Chrome_WidgetWin_1 全隐藏；主面板 1054×695。
+    /// 修复前只枚举可见窗 → 找不到 → ShellExecute 再开一个 QQ；修复后应选中隐藏主窗。
+    #[test]
+    fn 隐藏主窗按标题与面积选中() {
+        let keys = keys_of("QQ", "QQ");
+        let wins = vec![
+            row(100, r"e:\qq\qq.exe", "QQ", 560, 256, 800, 600, false, false, 0),
+            row(101, r"e:\qq\qq.exe", "QQ", 434, 199, 1054, 695, false, false, 0),
+            row(102, r"e:\qq\qq.exe", "QQ", 959, 555, 48, 39, false, false, 0),
+            row(103, r"e:\other\wechat.exe", "微信", 0, 0, 1920, 1080, false, false, 0),
+        ];
+        let hit = pick_main(&wins, &keys, false).expect("应找到隐藏主窗");
+        assert_eq!(hit.hwnd, 101, "应选面积最大的 1054×695 主面板");
+        // 可见档里没有 → 旧逻辑确实会漏（这正是 bug 的入口）
+        assert!(pick_main(&wins, &keys, true).is_none());
+    }
+
+    /// 标题命中优先于纯面积（避免把标题为空的窗口/会话窗当主窗）
+    #[test]
+    fn 标题命中优先于面积() {
+        let keys = keys_of("QQ", "QQ");
+        let wins = vec![
+            row(200, r"e:\qq\qq.exe", "", 0, 0, 1600, 900, false, false, 0),
+            row(201, r"e:\qq\qq.exe", "QQ", 0, 0, 300, 200, false, false, 0),
+        ];
+        assert_eq!(pick_main(&wins, &keys, false).unwrap().hwnd, 201);
+    }
+
+    /// 可见窗与隐藏窗分两档选：可见档不得把隐藏窗选进来（保持旧行为）
+    #[test]
+    fn 可见与隐藏分档() {
+        let keys = keys_of("QQ", "QQ");
+        let wins = vec![
+            row(300, r"e:\qq\qq.exe", "QQ", 0, 0, 500, 400, true, false, 0),
+            row(301, r"e:\qq\qq.exe", "QQ", 0, 0, 1054, 695, false, false, 0),
+        ];
+        assert_eq!(pick_main(&wins, &keys, true).unwrap().hwnd, 300);
+        assert_eq!(pick_main(&wins, &keys, false).unwrap().hwnd, 301);
+    }
+
+    /// 应用名 / AUMID / 别名表都能产出匹配键（QQ 的 AUMID 实测就是 "QQ"）
+    #[test]
+    fn 匹配键覆盖应用名与_aumid() {
+        let k = keys_of("QQ", "QQ");
+        assert!(k.iter().any(|x| x == "qq"), "{k:?}");
+        let k = keys_of("WeChat", "Tencent.WeChat_8wekyb3d8bbwe!App");
+        assert!(k.iter().any(|x| x == "wechat"), "{k:?}");
+        assert!(k.iter().any(|x| x == "tencent.wechat"), "{k:?}");
+        assert!(!keys_of("", "").iter().any(|x| x.is_empty()));
     }
 }
