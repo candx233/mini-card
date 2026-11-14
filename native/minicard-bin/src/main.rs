@@ -75,6 +75,10 @@ struct Args {
     /// `--probe activate-app` 用：应用名 / AUMID（E2E 验收钩子，只做一次窗口激活）
     app: Option<String>,
     aumid: Option<String>,
+    /// `--probe notify-activation` 用：通知 id（只查系统通知库，不执行激活）
+    id: Option<u32>,
+    /// `--probe window-content` 用：要量内容的窗口句柄
+    hwnd: Option<isize>,
     /// `--probe activate-app` 用：激活后保持进程存活 N ms（父进程要在存活期间断言前台窗口）
     hold_ms: u64,
     cover: Option<PathBuf>,
@@ -122,6 +126,8 @@ impl Args {
             probe: None,
             app: None,
             aumid: None,
+            id: None,
+            hwnd: None,
             hold_ms: 0,
             cover: None,
             debug_layout: false,
@@ -176,6 +182,14 @@ impl Args {
                 "--probe" => a.probe = Some(next(&mut i)),
                 "--app" => a.app = Some(next(&mut i)),
                 "--aumid" => a.aumid = Some(next(&mut i)),
+                "--id" => a.id = next(&mut i).parse().ok(),
+                "--hwnd" => {
+                    let s = next(&mut i);
+                    a.hwnd = s.parse::<isize>().ok().or_else(|| {
+                        isize::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                            .ok()
+                    });
+                }
                 "--hold-ms" => a.hold_ms = next(&mut i).parse().unwrap_or(0),
                 "--cover" => a.cover = Some(PathBuf::from(next(&mut i))),
                 "--debug-layout" => a.debug_layout = true,
@@ -518,6 +532,42 @@ fn main() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(args.hold_ms));
         }
         std::process::exit(if ok { 0 } else { 3 });
+    }
+
+    // 验收钩子：只查「这条通知点开会做什么」，不执行激活、不打印 URI（隐私）
+    if args.probe.as_deref() == Some("notify-activation") {        let id = args.id.unwrap_or(0);
+        match minicard_core::notify_launch::for_notification(id) {
+            Some(a) => {
+                mlog!(
+                    "probe notify-activation: id={id} kind={:?} launch_chars={}",
+                    a.kind,
+                    a.launch.chars().count()
+                );
+                std::process::exit(0);
+            }
+            None => {
+                mlog!("probe notify-activation: id={id} 没有可复刻的激活信息");
+                std::process::exit(3);
+            }
+        }
+    }
+
+    // 验收钩子：量一个窗口「有没有内容」（PrintWindow 采样颜色种数；空壳窗实测 = 1）
+    if args.probe.as_deref() == Some("window-content") {
+        let hwnd = args.hwnd.unwrap_or(0);
+        match appwin::probe_content(hwnd) {
+            Some(ink) => {
+                mlog!(
+                    "probe window-content: hwnd={hwnd} ink_pct={ink} has_content={}",
+                    ink >= 3
+                );
+                std::process::exit(if ink >= 3 { 0 } else { 3 });
+            }
+            None => {
+                mlog!("probe window-content: hwnd={hwnd} 量不了（PrintWindow 失败/尺寸异常）");
+                std::process::exit(4);
+            }
+        }
     }
 
     // 真数据接线模式：读 config.toml → 每张启用的卡一个窗口 → 共用采样线程

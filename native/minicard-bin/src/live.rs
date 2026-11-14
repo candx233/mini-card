@@ -2879,8 +2879,6 @@ fn click(
                 match h {
                     notify_card::Hit::Item { id, aumid } => {
                         notify_service().mark_read(id);
-                        // 先按应用名/AUMID 切回**已在运行**的窗口（QQ 最小化到托盘也能拉起来）；
-                        // 找不到才 ShellExecute 启动，避免点通知又开第二个 QQ。
                         let app = snap
                             .items
                             .iter()
@@ -2888,6 +2886,27 @@ fn click(
                             .map(|it| it.app.clone())
                             .unwrap_or_default();
                         std::thread::spawn(move || {
+                            // ① 复刻系统 toast 自己的激活：`activationType="protocol"` 时
+                            //    Windows 点它只是 ShellExecute(launch)（QQ 邮件提醒就是这条，
+                            //    打开的是那封邮件的页面）。比猜 hwnd 可靠，也不会点出空壳窗。
+                            if let Some(act) =
+                                minicard_core::notify_launch::for_notification(id)
+                            {
+                                if act.kind
+                                    == minicard_core::notify_launch::ActivationKind::Protocol
+                                {
+                                    // 日志只记 app / 方式，URI（含邮箱与 mailid）不落盘
+                                    minicard_shell::mlog!("通知打开：{app} → toast 协议激活");
+                                    match crate::appwin::launch(&act.launch, "") {
+                                        Ok(()) => return,
+                                        Err(e) => minicard_shell::mlog!(
+                                            "通知协议激活失败（回落窗口激活）：{e}"
+                                        ),
+                                    }
+                                }
+                            }
+                            // ② 再按应用名/AUMID 切回**已在运行**的窗口（托盘隐藏也能拉起来）；
+                            //    找到就绝不 ShellExecute，避免点通知又开第二个 QQ。
                             if crate::appwin::activate_app(&app, &aumid) {
                                 // 日志只记 app / 路径，不含通知正文
                                 minicard_shell::mlog!("通知打开：{app} → 激活已有窗口");

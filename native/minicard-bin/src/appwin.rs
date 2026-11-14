@@ -6,8 +6,13 @@
 //! 真正开窗的是 bin\cef\…\steamwebhelper.exe）。
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
+};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -17,11 +22,20 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FlashWindowEx, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SetForegroundWindow, SetWindowPos, ShowWindow, SwitchToThisWindow, FLASHWINFO, FLASHW_ALL,
-    FLASHW_TIMERNOFG, GWL_EXSTYLE, GW_OWNER, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SW_MINIMIZE, SW_RESTORE, SW_SHOW, WS_EX_TOOLWINDOW,
+    GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow, SwitchToThisWindow, FLASHWINFO,
+    FLASHW_ALL, FLASHW_TIMERNOFG, GWL_EXSTYLE, GW_OWNER, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
 };
+
+// PrintWindow 在 windows crate 里被归到 Xps feature（我们只用一个函数，不值当多开一套绑定）。
+#[link(name = "user32")]
+extern "system" {
+    fn PrintWindow(hwnd: HWND, hdc: HDC, flags: u32) -> i32;
+}
+
+/// `PW_RENDERFULLCONTENT`：Electron/DComp 窗要这个标志才画内容，否则整块黑
+const PW_RENDERFULLCONTENT: u32 = 2;
 
 fn base(p: &str) -> &str {
     p.rsplit('\\').next().unwrap_or(p)
@@ -178,6 +192,9 @@ struct WinRow {
     title: String,
     class: String,
     rect: RECT,
+    /// 还原后的矩形（`GetWindowPlacement().rcNormalPosition`）。
+    /// 最小化窗口的 `GetWindowRect` 是 (-32000,-32000)-(…,160×28) 占位值，面积/可用性都要看这个。
+    rc_normal: RECT,
     visible: bool,
     iconic: bool,
     owner: isize,
@@ -215,6 +232,11 @@ fn all_windows() -> Vec<WinRow> {
             let m = GetClassNameW(hwnd, &mut class) as usize;
             let mut r = RECT::default();
             let _ = GetWindowRect(hwnd, &mut r);
+            let mut wp = WINDOWPLACEMENT {
+                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            let _ = GetWindowPlacement(hwnd, &mut wp);
             let owner = GetWindow(hwnd, GW_OWNER).map(|x| x.0 as isize).unwrap_or(0);
             let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             out.push(WinRow {
@@ -223,6 +245,7 @@ fn all_windows() -> Vec<WinRow> {
                 title: String::from_utf16_lossy(&title[..n]),
                 class: String::from_utf16_lossy(&class[..m]),
                 rect: r,
+                rc_normal: wp.rcNormalPosition,
                 visible: IsWindowVisible(hwnd).as_bool(),
                 iconic: IsIconic(hwnd).as_bool(),
                 owner,
@@ -233,10 +256,29 @@ fn all_windows() -> Vec<WinRow> {
     out
 }
 
+/// 窗口「真实尺寸」：最小化时 `GetWindowRect` 是 (-32000,-32000) 起的 160×28 占位值，
+/// 必须用 `rcNormalPosition`，否则最小化的主窗会被当成小工具窗过滤掉（2026-11-14 现场）。
+fn size_of_window(w: &WinRow) -> (i64, i64) {
+    let (mut ww, mut hh) = (
+        (w.rect.right - w.rect.left) as i64,
+        (w.rect.bottom - w.rect.top) as i64,
+    );
+    if w.iconic || ww < 120 || hh < 90 {
+        let (nw, nh) = (
+            (w.rc_normal.right - w.rc_normal.left) as i64,
+            (w.rc_normal.bottom - w.rc_normal.top) as i64,
+        );
+        if nw > 0 && nh > 0 {
+            ww = nw;
+            hh = nh;
+        }
+    }
+    (ww, hh)
+}
+
 /// 像不像「可直接激活的主窗」：挡掉 IME/辅助窗、0×0 与小工具条（与 Dock 的 120×90 同口径）
 fn usable(w: &WinRow) -> bool {
-    let ww = w.rect.right - w.rect.left;
-    let hh = w.rect.bottom - w.rect.top;
+    let (ww, hh) = size_of_window(w);
     if ww < 120 || hh < 90 || w.tool {
         return false;
     }
@@ -261,23 +303,39 @@ fn title_hit(w: &WinRow, keys: &[String]) -> bool {
 
 /// 在「可见 / 隐藏」这一档里挑最像主窗的：标题命中 > 无 owner > 非最小化 > 面积大。
 /// QQ 现场（5 个隐藏窗）会选中 1054×695 的主面板，而不是会话窗/小工具窗。
+fn score_of(w: &WinRow, keys: &[String]) -> i64 {
+    let (ww, hh) = size_of_window(w);
+    let area = ww.max(0) * hh.max(0);
+    let title = if title_hit(w, keys) { 1_000_000_000i64 } else { 0 };
+    title
+        + if w.owner == 0 { 100_000_000i64 } else { 0 }
+        + if !w.iconic { 10_000_000i64 } else { 0 }
+        + area
+}
+
 fn pick_main<'a>(wins: &'a [WinRow], keys: &[String], want_visible: bool) -> Option<&'a WinRow> {
     let mut best: Option<(&WinRow, i64)> = None;
     for w in wins {
         if w.visible != want_visible || !usable(w) || !hit_keys(w, keys) {
             continue;
         }
-        let area = (w.rect.right - w.rect.left).max(0) as i64
-            * (w.rect.bottom - w.rect.top).max(0) as i64;
-        let score = if title_hit(w, keys) { 1_000_000_000i64 } else { 0 }
-            + if w.owner == 0 { 100_000_000i64 } else { 0 }
-            + if !w.iconic { 10_000_000i64 } else { 0 }
-            + area;
+        let score = score_of(w, keys);
         if best.map_or(true, |(_, s)| score > s) {
             best = Some((w, score));
         }
     }
     best.map(|(w, _)| w)
+}
+
+/// 同一档里按「像主窗」从高到低排（隐藏窗要逐个试，见 `activate_app`）
+fn ranked<'a>(wins: &'a [WinRow], keys: &[String], want_visible: bool) -> Vec<&'a WinRow> {
+    let mut v: Vec<(&WinRow, i64)> = wins
+        .iter()
+        .filter(|w| w.visible == want_visible && usable(w) && hit_keys(w, keys))
+        .map(|w| (w, score_of(w, keys)))
+        .collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.into_iter().map(|(w, _)| w).collect()
 }
 
 /// 抢前台四连兜底（与 `src-tauri/src/dock.rs:784-851` 同口径）：
@@ -383,8 +441,10 @@ fn keys_of(app: &str, aumid: &str) -> Vec<String> {
 }
 
 /// 通知等场景：按应用名/AUMID 找到**已在运行**的窗口并切到前台。
-/// 先找可见窗（保持旧行为），没有再找**隐藏窗**（QQ 关到托盘 = 5 个 Chrome_WidgetWin_1
-/// 全 IsWindowVisible=false）；只要认领到窗口就返回 true，调用方绝不能再 ShellExecute。
+/// ① 可见窗（含最小化）直接用；没有才看 ② 隐藏窗（QQ 关到托盘 = 5 个 Chrome_WidgetWin_1
+/// 全 IsWindowVisible=false）。②里 QQ 的会话/子窗也会隐藏，外部 `SW_SHOW` 只能得到一个
+/// 空壳（2026-11-14 实测：720×640 只有 1 种颜色）——所以逐个拉起、验内容，空壳立刻藏回去，
+/// 一个都不像主窗就什么都不显示。只要认领到窗口就返回 true，调用方绝不能再 ShellExecute。
 pub fn activate_app(app: &str, aumid: &str) -> bool {
     let keys = keys_of(app, aumid);
     if keys.is_empty() {
@@ -392,7 +452,7 @@ pub fn activate_app(app: &str, aumid: &str) -> bool {
     }
     let wins = all_windows();
 
-    // ① 可见窗：保持旧行为；只对**最小化**的做 SW_RESTORE（别把最大化窗口还原成小窗）
+    // ① 可见窗：只对**最小化**的做 SW_RESTORE（别把最大化窗口还原成小窗）
     if let Some(w) = pick_main(&wins, &keys, true) {
         unsafe {
             if w.iconic {
@@ -404,22 +464,119 @@ pub fn activate_app(app: &str, aumid: &str) -> bool {
         return true;
     }
 
-    // ② 隐藏窗：QQ 关到托盘走这条（ShowWindow(SW_SHOW) 实测可拉起 Electron 主窗）
-    if let Some(w) = pick_main(&wins, &keys, false) {
+    // ② 隐藏窗（QQ 关到托盘走这条）：按「像主窗」排序后逐个试
+    let cands = ranked(&wins, &keys, false);
+    if cands.is_empty() {
+        return false;
+    }
+    for w in cands {
         unsafe {
             let cmd = if w.iconic { SW_RESTORE } else { SW_SHOW };
             let _ = ShowWindow(HWND(w.hwnd as *mut _), cmd);
         }
-        let visible = unsafe { IsWindowVisible(HWND(w.hwnd as *mut _)).as_bool() };
-        let fg = raise_window(w.hwnd);
-        minicard_shell::mlog!(
-            "通知激活：{app} 隐藏窗 hwnd={} 已显示={visible} 到前台={fg}",
-            w.hwnd
-        );
-        // 窗口已认领：即使显示/抢前台失败，也不能再启动，避免双开
-        return true;
+        // 给 Electron 一帧时间把内容画出来（实测 ~100ms 足够；点击本来就在工作线程）
+        std::thread::sleep(Duration::from_millis(180));
+        match paints_content(w.hwnd) {
+            Some(ink) if ink < 3 => {
+                unsafe {
+                    let _ = ShowWindow(HWND(w.hwnd as *mut _), SW_HIDE);
+                }
+                minicard_shell::mlog!(
+                    "通知激活：{app} 隐藏窗 hwnd={} 是空壳（墨迹 {ink}%），跳过",
+                    w.hwnd
+                );
+            }
+            _ => {
+                let fg = raise_window(w.hwnd);
+                minicard_shell::mlog!("通知激活：{app} 隐藏窗 hwnd={} 到前台={fg}", w.hwnd);
+                return true;
+            }
+        }
     }
-    false
+    // 全是空壳：宁可什么都不显示，也不给用户一块黑屏，更不能借机再启动一个实例
+    minicard_shell::mlog!("通知激活：{app} 只有空壳隐藏窗，放弃显示（不重开实例）");
+    true
+}
+
+/// `SW_SHOW` 之后窗口里到底有没有内容：`PrintWindow(PW_RENDERFULLCONTENT)` 取样算墨迹率。
+/// 空壳窗整块一个颜色（实测 1 种），QQ 主面板 >20%；低于 3% 就当空壳。
+/// 返回 `None` = 量不了（尺寸异常/取不到 DC/PrintWindow 失败）→ 调用方按「有内容」处理。
+fn paints_content(hwnd: isize) -> Option<u32> {
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        let mut r = RECT::default();
+        GetWindowRect(h, &mut r).ok()?;
+        let (ww, hh) = (r.right - r.left, r.bottom - r.top);
+        if ww <= 0 || hh <= 0 || ww > 4096 || hh > 4096 {
+            return None;
+        }
+        let screen = GetDC(None);
+        if screen.is_invalid() {
+            return None;
+        }
+        let dc = CreateCompatibleDC(Some(screen));
+        if dc.is_invalid() {
+            let _ = ReleaseDC(None, screen);
+            return None;
+        }
+        let cleanup = |dc: HDC, dib: Option<HBITMAP>| {
+            if let Some(dib) = dib {
+                let _ = DeleteObject(dib.into());
+            }
+            let _ = DeleteDC(dc);
+            let _ = ReleaseDC(None, screen);
+        };
+
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = ww;
+        bmi.bmiHeader.biHeight = -hh; // 自上而下，省一次翻转
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let Ok(dib) = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            cleanup(dc, None);
+            return None;
+        };
+        let old = SelectObject(dc, dib.into());
+        let ok = PrintWindow(h, dc, PW_RENDERFULLCONTENT) != 0;
+        SelectObject(dc, old);
+
+        // 「有内容」= 取样中与主色不同的像素占比（墨迹率）。空壳窗整块一个色 → 0；
+        // QQ 主面板实测 >20%。比「颜色种数」稳：抗主题色、抗边框/圆角。
+        let mut ink: Option<u32> = None;
+        if ok && !bits.is_null() {
+            let px = std::slice::from_raw_parts(
+                bits as *const u8,
+                ww as usize * hh as usize * 4,
+            );
+            let step = ((ww as usize * hh as usize) / 40_000).max(1) * 4;
+            let mut counts: HashMap<u32, u32> = HashMap::new();
+            let mut total: u32 = 0;
+            let mut i = 0;
+            while i + 3 < px.len() {
+                let key = ((px[i] >> 4) as u32) << 8
+                    | ((px[i + 1] >> 4) as u32) << 4
+                    | (px[i + 2] >> 4) as u32;
+                *counts.entry(key).or_insert(0) += 1;
+                total += 1;
+                i += step;
+            }
+            let dominant = counts.values().copied().max().unwrap_or(0);
+            ink = Some(((total - dominant) as u64 * 100 / total.max(1) as u64) as u32);
+        }
+        cleanup(dc, Some(dib));
+        if !ok {
+            return None;
+        }
+        ink
+    }
+}
+
+/// 验收钩子：量一个窗口「有没有内容」——`Some(墨迹率 %)`；`None` = 量不了。
+pub fn probe_content(hwnd: isize) -> Option<u32> {
+    paints_content(hwnd)
 }
 
 /// 点图标：**已在跑就切到前台**（没有前台窗口时先 restore），否则 ShellExecute 启动。
@@ -646,22 +803,69 @@ mod tests {
         iconic: bool,
         owner: isize,
     ) -> WinRow {
+        let rect = RECT {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h,
+        };
         WinRow {
             hwnd,
             exe: exe.to_string(),
             title: title.to_string(),
             class: "Chrome_WidgetWin_1".to_string(),
-            rect: RECT {
-                left: x,
-                top: y,
-                right: x + w,
-                bottom: y + h,
-            },
+            rect,
+            rc_normal: rect,
             visible,
             iconic,
             owner,
             tool: false,
         }
+    }
+
+    /// 最小化窗口的 GetWindowRect 是占位值（160×28），必须按 rcNormalPosition 判可用
+    #[test]
+    fn 最小化主窗仍然可用() {
+        let keys = keys_of("QQ", "QQ");
+        let mut min = row(
+            400,
+            r"e:\qq\qq.exe",
+            "QQ",
+            -32000,
+            -32000,
+            160,
+            28,
+            true,
+            true,
+            0,
+        );
+        min.rc_normal = RECT {
+            left: 434,
+            top: 199,
+            right: 1488,
+            bottom: 894,
+        };
+        let wins = vec![
+            min,
+            // 隐藏的会话窗：不该在「可见档」里被选到
+            row(401, r"e:\qq\qq.exe", "QQ", 600, 236, 720, 640, false, false, 0),
+        ];
+        let hit = pick_main(&wins, &keys, true).expect("最小化的主窗应可用");
+        assert_eq!(hit.hwnd, 400);
+        assert!(pick_main(&wins, &keys, false).unwrap().hwnd == 401);
+    }
+
+    /// 隐藏窗逐个试：主面板（面积大）排在会话窗前面
+    #[test]
+    fn 隐藏窗按像主窗排序() {
+        let keys = keys_of("QQ", "QQ");
+        let wins = vec![
+            row(500, r"e:\qq\qq.exe", "QQ", 600, 236, 720, 640, false, false, 0),
+            row(501, r"e:\qq\qq.exe", "QQ", 434, 199, 1054, 695, false, false, 0),
+            row(502, r"e:\qq\qq.exe", "QQ", 959, 555, 48, 39, false, false, 0),
+        ];
+        let order: Vec<isize> = ranked(&wins, &keys, false).iter().map(|w| w.hwnd).collect();
+        assert_eq!(order, vec![501, 500], "小工具窗被可用性过滤，主面板排第一");
     }
 
     /// 2026-11-14 现场：QQ 关托盘时 5 个 Chrome_WidgetWin_1 全隐藏；主面板 1054×695。
