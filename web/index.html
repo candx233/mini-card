@@ -952,8 +952,15 @@
     }
     function syncOpts(group, instant) {
       if (!group) return;
-      var sel = group.querySelector('.opt.sel'), pill = ensurePill(group);
-      if (!sel) { pill.classList.remove('on'); return; }
+      var sel = group.querySelector('.opt.sel');
+      if (!sel) {
+        // 空组（没卡 / 没选项）不能留 pill：`#cx-rate:empty { display:none }` 靠「没有子节点」隐藏，
+        // 垫一层空的 pill 会变成一条多余的空灰条。
+        var dead = group.querySelector('.opt-pill');
+        if (dead) dead.parentNode.removeChild(dead);
+        return;
+      }
+      var pill = ensurePill(group);
       var g = group.getBoundingClientRect(), s = sel.getBoundingClientRect();
       var dx = s.left - g.left - group.clientLeft, dy = s.top - g.top - group.clientTop;
       var snap = instant || isReduced();
@@ -1045,8 +1052,12 @@
     if (group.classList.contains('swatches')) return;
     $$('.opt', group).forEach(function (opt) {
       opt.addEventListener('click', function () {
-        $$('.opt', group).forEach(function (o) { o.classList.remove('sel'); });
+        $$('.opt', group).forEach(function (o) {
+          o.classList.remove('sel');
+          if (o.getAttribute('role') === 'radio') o.setAttribute('aria-checked', 'false');
+        });
         opt.classList.add('sel');
+        if (opt.getAttribute('role') === 'radio') opt.setAttribute('aria-checked', 'true');
       });
     });
   });
@@ -1434,8 +1445,11 @@
     } else if (sel) {
       var want = sel.querySelector('.opt[data-val="' + (c.refresh_ms || 0) + '"]');
       if (want && !want.classList.contains('sel')) {
-        $$('.opt', sel).forEach(function (o) { o.classList.remove('sel'); });
-        want.classList.add('sel');          // MutationObserver 会接着把滑块滑过去
+        $$('.opt', sel).forEach(function (o) {
+          var on = o === want;
+          o.classList.toggle('sel', on);
+          if (o.getAttribute('role') === 'radio') o.setAttribute('aria-checked', on ? 'true' : 'false');
+        });
       }
     }
     if (!POS_DRAG) paintPos(c);
