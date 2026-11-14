@@ -326,7 +326,12 @@ fn tree(t: &Tokens, w: &Weather) -> Node {
     });
     for i in 0..3u32 {
         let d = w.days.get(i as usize);
-        let label = d.map(|x| x.label.clone()).unwrap_or_default();
+        // 预报缺数据（days 为空 / label 为空）也要画「今天/明天/后天」，
+        // 不能整行空着——否则用户只看到三列图标 + `--/--`，分不清是哪三天。
+        let label = d
+            .map(|x| x.label.clone())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| ["今天", "明天", "后天"][i as usize].to_string());
         let mut col = Node::new(Dir::Column)
             .id(8100 + i)
             .style(move |s| s.grow(1.0).basis(0.0).align(Align::Center).gap(t.day_gap))
@@ -678,6 +683,30 @@ mod tests {
         assert!(texts(false, true).iter().any(|s| s == "数据异常"));
         let normal = texts(false, false);
         assert!(!normal.iter().any(|s| s == "等待数据…" || s == "数据异常"));
+    }
+
+    /// 2026-11-14 现场：`days:[]` 时三日列标签全空，用户看到三列图标 + `--/--`
+    /// 却不知道是哪天。预报缺数据也必须画「今天/明天/后天」。
+    #[test]
+    fn 预报缺数据仍画三日标签() {
+        let t = Tokens::weather(240.0, 180.0);
+        let w = Weather {
+            city: "绍兴市".into(),
+            temp: Some(18.0),
+            code: 3,
+            air: Some("轻度污染".into()),
+            humidity: Some(99),
+            empty: false,
+            error: false,
+            days: Vec::new(),
+        };
+        let mut texts = Vec::new();
+        collect_text(&tree_hook(&t, &w), &mut texts);
+        for lbl in ["今天", "明天", "后天"] {
+            assert!(texts.iter().any(|s| s == lbl), "缺标签 {lbl}: {texts:?}");
+        }
+        // 高低温保持 "--"
+        assert!(texts.iter().filter(|s| s.as_str() == "--").count() >= 6);
     }
 }
 

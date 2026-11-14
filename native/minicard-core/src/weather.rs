@@ -18,7 +18,13 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-const FORECAST: &str = "https://api.open-meteo.com/v1/forecast";
+/// 预报主域 + 镜像。2026-11-14 实测：`api.open-meteo.com` 在本机解析到
+/// `51.81.167.44`，443 直连/代理都超时；同厂商其他子域可达。镜像域与主域同参数、
+/// 同 JSON 结构（`daily` 三日数组可直接喂 `parse_days`），主域恢复后自动回到主域。
+const FORECAST_HOSTS: &[&str] = &[
+    "https://api.open-meteo.com",
+    "https://historical-forecast-api.open-meteo.com",
+];
 const AIR: &str = "https://air-quality-api.open-meteo.com/v1/air-quality";
 const GEOCODE: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const IPWHO: &str = "https://ipwho.is/";
@@ -353,12 +359,33 @@ fn cache_path() -> PathBuf {
 }
 
 fn get_json(url: &str) -> Option<serde_json::Value> {
+    get_json_timeout(url, 12)
+}
+
+fn get_json_timeout(url: &str, secs: u64) -> Option<serde_json::Value> {
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(12)))
+        .timeout_global(Some(Duration::from_secs(secs)))
         .build()
         .new_agent();
     let text = agent.get(url).call().ok()?.body_mut().read_to_string().ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// 三日预报：主域不通时依次走镜像；每源 5s 超时（别让一次刷新卡 12s）。
+/// 全失败返回 None，调用方保留旧 `days`（见 `merge_missing_days`）。
+fn forecast_json(lat: f64, lon: f64) -> Option<serde_json::Value> {
+    let q = format!(
+        "?latitude={:.4}&longitude={:.4}&current=temperature_2m,relative_humidity_2m,weather_code\
+         &daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=3",
+        lat, lon
+    );
+    for host in FORECAST_HOSTS {
+        let url = format!("{host}/v1/forecast{q}");
+        if let Some(v) = get_json_timeout(&url, 5) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 fn f(v: &serde_json::Value, k: &str) -> f64 {
@@ -543,13 +570,8 @@ pub fn fetch(cfg: &crate::config::Config) -> Result<WeatherSnap, String> {
         .or_else(|| wx_resolve(&city, ""));
     let cma = wxid.as_deref().and_then(cma_current);
 
-    // ② 三日预报（Open-Meteo）。实况有中国天气网时预报挂了也不致命
-    let f_url = format!(
-        "{}?latitude={:.4}&longitude={:.4}&current=temperature_2m,relative_humidity_2m,weather_code\
-         &daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=3",
-        FORECAST, lat, lon
-    );
-    let v = get_json(&f_url);
+    // ② 三日预报（Open-Meteo 主域 → 镜像）。实况有中国天气网时预报挂了也不致命
+    let v = forecast_json(lat, lon);
     let cur = v.as_ref().and_then(|x| x.get("current"));
     let days = v
         .as_ref()
@@ -640,11 +662,31 @@ pub fn write_cache(s: &WeatherSnap) {
     }
 }
 
+/// 新快照缺预报时沿用上一份好 `days`（预报源抖动/不可达时卡面不再被清空）。
+/// 返回是否真的沿用了旧值。
+pub fn merge_missing_days(new: &mut WeatherSnap, old: Option<&WeatherSnap>) -> bool {
+    if !new.days.is_empty() {
+        return false;
+    }
+    let Some(old) = old.filter(|o| !o.days.is_empty()) else {
+        return false;
+    };
+    new.days = old.days.clone();
+    true
+}
+
 /// 拉一轮：取配置 → 抓 → 写共享 → 落盘。**只管取数，不负责广播**
 /// （emit 是外壳的事：Tauri 版在 `src-tauri/src/weather.rs`，自绘版自己推）。
 pub fn refresh_local(shared: &SharedWeather) -> Result<WeatherSnap, String> {
     let cfg = crate::config::Config::load();
-    let s = fetch(&cfg)?;
+    let mut s = fetch(&cfg)?;
+    // 预报失败不能让「有实况、无预报」的快照覆盖掉上一次好的三日预报
+    let old = shared
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+        .or_else(read_cache);
+    merge_missing_days(&mut s, old.as_ref());
     *shared.write().unwrap() = Some(s.clone());
     write_cache(&s);
     Ok(s)
@@ -702,5 +744,58 @@ mod tests {
         assert_eq!(aqi_text(60.0), "良");
         assert_eq!(aqi_text(160.0), "中度污染");
         assert_eq!(aqi_text(-1.0), "");
+    }
+
+    /// 2026-11-14 实测的镜像返回（sha256 396597F8…，完整文件见
+    /// `docs/verify/wx_forecast_fixture.json`）。钉死三日解析，防字段名漂移。
+    #[test]
+    fn parse_days_三日_fixture() {
+        let daily = serde_json::from_str::<serde_json::Value>(
+            r#"{"weather_code":[81,51,51],
+                "temperature_2m_max":[21.3,20.1,19.2],
+                "temperature_2m_min":[16.6,14.6,12.0]}"#,
+        )
+        .unwrap();
+        let days = parse_days(&daily);
+        assert_eq!(days.len(), 3);
+        assert_eq!(days[0].label, "今天");
+        assert_eq!(days[1].label, "明天");
+        assert_eq!(days[2].label, "后天");
+        assert_eq!(days[0].code, 81);
+        assert_eq!(days[2].code, 51);
+        assert!((days[0].hi - 21.3).abs() < 1e-9);
+        assert!((days[1].lo - 14.6).abs() < 1e-9);
+    }
+
+    /// 预报源失败时保留上一次好值：2026-11-14 现场 `days:[]` 覆盖缓存导致卡面长期空
+    #[test]
+    fn 预报失败保留旧三日() {
+        fn snap(days: Vec<DayOut>) -> WeatherSnap {
+            WeatherSnap { days, ..Default::default() }
+        }
+        fn day(label: &str, hi: f64) -> DayOut {
+            DayOut { label: label.to_owned(), code: 3, hi, lo: hi - 5.0 }
+        }
+        let old = snap(vec![day("今天", 21.0), day("明天", 20.0), day("后天", 19.0)]);
+
+        let mut new = snap(Vec::new());
+        assert!(merge_missing_days(&mut new, Some(&old)));
+        assert_eq!(new.days.len(), 3, "应沿用旧三日");
+        assert_eq!(new.days[2].label, "后天");
+
+        // 已有预报时不覆盖
+        assert!(!merge_missing_days(&mut new, Some(&old)));
+        // 旧值也空时保持空（卡面走「预报暂不可用」）
+        let mut empty = snap(Vec::new());
+        assert!(!merge_missing_days(&mut empty, None));
+        assert!(empty.days.is_empty());
+    }
+
+    /// 主域排第一（恢复后自动回主域），镜像只做回退
+    #[test]
+    fn 预报源顺序_主域优先() {
+        assert_eq!(FORECAST_HOSTS[0], "https://api.open-meteo.com");
+        assert_eq!(FORECAST_HOSTS.len(), 2);
+        assert!(FORECAST_HOSTS[1].contains("historical-forecast-api"));
     }
 }

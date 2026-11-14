@@ -974,7 +974,20 @@ pub fn run(
                         Ok(s) => {
                             seen = city;
                             last = Instant::now();
-                            minicard_shell::mlog!("天气已刷新：{} {}°", s.city, s.temp);
+                            if s.days.is_empty() {
+                                minicard_shell::mlog!(
+                                    "天气已刷新：{} {}°（三日预报为空，源不可达）",
+                                    s.city,
+                                    s.temp
+                                );
+                            } else {
+                                minicard_shell::mlog!(
+                                    "天气已刷新：{} {}° 预报 {} 天",
+                                    s.city,
+                                    s.temp,
+                                    s.days.len()
+                                );
+                            }
                         }
                         Err(e) => {
                             last = Instant::now() - Duration::from_secs(570);
