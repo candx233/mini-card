@@ -356,10 +356,10 @@ pub fn pick_exe() -> Option<String> {
         GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
     };
     let mut buf = [0u16; 1024];
-    let filter: Vec<u16> = "程序 (*.exe;*.lnk) *.exe;*.lnk 所有文件 (*.*) *.*  "
+    let filter: Vec<u16> = "程序 (*.exe;*.lnk)\0*.exe;*.lnk\0所有文件 (*.*)\0*.*\0\0"
         .encode_utf16()
         .collect();
-    let title: Vec<u16> = "选择要添加到 Dock 的程序 ".encode_utf16().collect();
+    let title: Vec<u16> = "选择要添加到 Dock 的程序\0".encode_utf16().collect();
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         lpstrFilter: windows::core::PCWSTR(filter.as_ptr()),
