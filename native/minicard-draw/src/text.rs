@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::{Interface, Result, HSTRING, PCWSTR};
 use windows::Win32::Graphics::DirectWrite::{
@@ -31,6 +32,55 @@ pub enum Mode {
     Wrap = 1,
     /// `nowrap + text-overflow:ellipsis`（末尾三点）
     Ellipsis = 2,
+}
+
+// ─────────────────────── 小字补墨（超采样降采样的墨量补偿） ───────────────────────
+
+/// 2× 超采样 + 盒式降采样会掉墨，且**字号越小掉得越多**（2026-11-14 实测，同一张卡
+/// `--ss=1` 原生 vs `--ss=2` dump 盒式降采样，按文字行带统计墨量）：
+///
+/// | 卡 / 行 | 字高 | 掉墨 |
+/// |---|---|---|
+/// | clock 时间大字 | 49px | −1.4% |
+/// | clock 农历 | 13px | −9.9% |
+/// | todo 正文 | 15–17px | −8.3 ~ −12.3% |
+/// | calendar 星期 / 日号 | 11–12px | −6.5 ~ −10.1% |
+///
+/// 根因：DWrite 在 2× 上就把 gamma 作用到覆盖率上，4 个采样点求均值 ≠ 1× 的 gamma 结果
+/// （凹函数、均值偏低）。补偿路径已经用尽：gamma 钉在 DWrite 上限 2.2（给 2.6/3.0 逐字节
+/// 相同）、`grayscaleEnhancedContrast` 0.5 以上也逐字节相同（实测 gs+1.0/1.5 与 gs+0.5
+/// 同一帧）、`NATURAL_SYMMETRIC_DOWNSAMPLED` 在 2× 与默认逐项相同。
+///
+/// 还能加墨的只有**换真 Medium 面**：实测同串 15px 墨量 400→500 = +10~11%，正好抵消
+/// 小字的掉墨（todo 卡 2×box 463 → 516，已追平 1× 原生的 506）。所以超采样时把
+/// ≤[`SMALL_EMBOLD_MAX_PX`] 的 400 升到 500 面；大字不掉墨，不动。
+///
+/// `MC_SMALL_EMBOLD=0` 可关（A/B 用），`=1` 强制开。
+static SMALL_EMBOLD: AtomicBool = AtomicBool::new(false);
+
+/// 触发小字补墨的字号上限（DIP）：15px 覆盖待办正文（15）、通知正文（12）与抬头（14.5）、
+/// 日历星期/日号（13）、音乐歌手（13）、磁盘标签（11–12）；时钟 72 / 天气 68 这类大字
+/// 掉墨只 −1.4%，不参与。
+pub const SMALL_EMBOLD_MAX_PX: f32 = 15.0;
+
+/// 开关小字补墨（进程级，启动时设一次；`--ss>1` 时开）。
+pub fn set_small_embold(on: bool) {
+    SMALL_EMBOLD.store(on, Ordering::Relaxed);
+}
+
+/// 当前是否需要给 400 的小字换 500 面。
+pub fn small_embold() -> bool {
+    SMALL_EMBOLD.load(Ordering::Relaxed)
+}
+
+/// 400 → 500 的落点：只补 `weight <= 400` 的正文档；标题（500/600）本来就在更重的面上。
+#[inline]
+fn embold_weight(size: f32, weight: u16) -> u16 {
+    if weight <= 400 && size <= SMALL_EMBOLD_MAX_PX && small_embold() {
+        500
+    } else {
+        weight
+    }
 }
 
 pub struct TextEngine {
@@ -286,7 +336,7 @@ impl TextEngine {
         weight: u16,
     ) -> Result<IDWriteTextFormat> {
         unsafe {
-            let face_w = self.css_weight(weight);
+            let face_w = self.css_weight(embold_weight(size, weight));
             if std::env::var("MC_DBG_WEIGHT").is_ok() {
                 eprintln!("want {} → face {} / 字面 {:?}", weight, face_w, self.faces);
             }

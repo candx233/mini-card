@@ -522,6 +522,16 @@ fn main() -> Result<()> {
     minicard_shell::log::init(&std::env::temp_dir().join("minicard-native.log"));
     let args = Args::parse();
 
+    // 小字补墨：只在超采样时开（1× 原生不掉墨，不用补）。见 text.rs 的实测表。
+    // MC_SMALL_EMBOLD=0/1 可强制关/开（A/B 用）。
+    let ss_now = if args.live { live::ss_factor() } else { args.ss.max(1) };
+    let embold = match std::env::var("MC_SMALL_EMBOLD").ok().as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => ss_now > 1,
+    };
+    minicard_draw::text::set_small_embold(embold);
+
     // 验收钩子：只跑一次「激活已在运行的应用」，不建窗口、不画卡（E2E 断言用）
     if args.probe.as_deref() == Some("activate-app") {
         let app = args.app.clone().unwrap_or_default();

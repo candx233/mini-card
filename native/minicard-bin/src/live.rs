@@ -44,7 +44,7 @@ use crate::display::{advance_deadline, DisplayTiming};
 /// DComp 0.5 缩放显示 —— 文字边缘多 4 倍采样。取证/对照阶段由脚本设，稳定后再改默认。
 /// 超采样倍率：默认 **2×**（0.1.3 起，文字边缘更软/台阶更少；release 实测 9 卡
 /// 只 +0.9～1.8 单核百分点、私有内存 +1.4～1.9 MB）。`MC_SS=1` 可退回 1×（A/B 对照用）。
-fn ss_factor() -> u32 {
+pub(crate) fn ss_factor() -> u32 {
     std::env::var("MC_SS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
