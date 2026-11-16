@@ -317,6 +317,10 @@
      保证条里显示的永远是**屏幕上那一段**壁纸。 */
   var wallEl = document.getElementById('wall');
   var wallImg = null, wallPos = [0, 0], wallMon = [0, 0], wallGeo = null, wallPad = 120;
+  /* 主界面预览用：payload 里的 `bar` = 玻璃条左上角在屏上的位置（逻辑 px）。
+     预览的 iframe 只比条高 28px，没有真窗上方 172px 的放大预留 —— 按窗口 `pos` 铺壁纸会
+     整体偏上 ~144px（颜色明显偏亮）。有 `bar` 就改成按条对齐，没有就还是按窗口（真 Dock 窗）。 */
+  var wallBar = null;
   var barOffsetY = 0;
   function barTopY() { return (window.innerHeight || 0) - (SIZE + 16); }
   /* 只在「壁纸/模糊/窗口位置」变时调；**条宽变化不再需要重算**（磨砂层在屏幕上定住，条只是裁剪窗口）。
@@ -331,9 +335,12 @@
     }
     wallEl.style.backgroundSize = wallGeo.bw.toFixed(1) + 'px ' + wallGeo.bh.toFixed(1) + 'px';
     // 元素左上的屏幕坐标 = 窗口坐标 + (−pad)（transform 把条的位移抵掉）→ 位置只跟窗口有关
+    // 有 `bar`（主界面预览）时改成以**条**为锚：条顶在窗内 barOffsetY 处，反推窗口口径。
+    var wx = wallBar ? wallBar[0] : wallPos[0];
+    var wy = wallBar ? wallBar[1] - barOffsetY : wallPos[1];
     wallEl.style.backgroundPosition =
-      (-(wallGeo.ox + wallPos[0] - wallPad)).toFixed(1) + 'px ' +
-      (-(wallGeo.oy + wallPos[1] + barOffsetY - wallPad)).toFixed(1) + 'px';
+      (-(wallGeo.ox + wx - wallPad)).toFixed(1) + 'px ' +
+      (-(wallGeo.oy + wy + barOffsetY - wallPad)).toFixed(1) + 'px';
   }
   function setBlur(v) {
     if (!wallEl) return;
@@ -349,6 +356,7 @@
     var sw = p.mon[0], sh = p.mon[1];
     wallMon = [sw, sh];
     if (p.pos) wallPos = p.pos;
+    wallBar = p.bar || null;   // 主界面预览：按条左上角对齐（见变量声明处）
     if (p.blur != null) setBlur(p.blur);
     var im = new Image();
     im.onload = function () {

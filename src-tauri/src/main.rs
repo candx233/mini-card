@@ -3052,10 +3052,57 @@ async fn get_dock() -> Result<serde_json::Value, String> {
 /// Dock 的磨砂 payload（形状同卡片 get_glass）
 #[tauri::command]
 fn dock_glass(app: AppHandle) -> serde_json::Value {
-    match window_glass_payload(&app, dock_label()) {
+    if let Some(p) = window_glass_payload(&app, dock_label()) {
+        return p;
+    }
+    // 原生 Dock（0.1.3 起默认）不建 WebView 窗 → 上面那条必然落空。主界面「Dock 预览」嵌的
+    // 就是 dock.html，它同样靠 dock_glass 拿壁纸切片；拿不到只剩 9% 白纱 + 10% 描边，
+    // 浅色舞台上看就是「只有图标、没有 Dock」（用户 2026-11-16 报）。这里按 config 里的
+    // Dock 矩形合成同一份 payload。
+    match dock_glass_virtual(&app) {
         Some(p) => p,
         None => serde_json::json!({ "wall": null }),
     }
+}
+
+/// 给「没有窗口」的 Dock 合成磨砂 payload：按 `dock_window_rect`（逻辑 px）找所在显示器，
+/// 换算成 dock.html 要的 `mon`（该屏逻辑尺寸）/ `pos`（窗口相对该屏的逻辑位置）。
+///
+/// 缩放取主窗的：预览里只是一段被模糊 30px 的壁纸切片，多屏混合 DPI 下偏几十像素看不出来；
+/// 单屏（绝对多数）下与真 Dock 窗的口径完全一致。
+fn dock_glass_virtual(app: &AppHandle) -> Option<serde_json::Value> {
+    let cfg = Config::load();
+    let (x, y, w, h) = dock_window_rect(&cfg.dock);
+    let s = app
+        .get_webview_window("main")
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0) as f64;
+    let px = (x as f64 + w as f64 / 2.0) * s;
+    let py = (y as f64 + h as f64 / 2.0) * s;
+    let mon = display::monitors()
+        .into_iter()
+        .map(|(m, _)| m)
+        .find(|m| px >= m.0 as f64 && px < m.2 as f64 && py >= m.1 as f64 && py < m.3 as f64)?;
+    let mon_logical = [
+        (mon.2 - mon.0) as f64 / s,
+        (mon.3 - mon.1) as f64 / s,
+    ];
+    let pos = [x as f64 - mon.0 as f64 / s, y as f64 - mon.1 as f64 / s];
+    // 预览的 iframe 只比玻璃条高 28px（index.html 的窗口公式：条高 + 28），没有真窗上方
+    // 172px 的放大预留。真窗 payload 的 `pos` 是**窗口**位置，照它铺壁纸会整体偏上 ~144px
+    // （颜色明显偏亮）。所以附加一个 `bar`：条左上角在屏上的位置，dock.html 见到它就按条对齐。
+    let bar = [
+        (x + dock_side_reserve(&cfg.dock)) as f64 - mon.0 as f64 / s,
+        (y + dock_top_reserve()) as f64 - mon.1 as f64 / s,
+    ];
+    Some(serde_json::json!({
+        "wall": wallpaper_data_url_cached(),
+        "mon": mon_logical,
+        "pos": pos,
+        "bar": bar,
+        "blur": cfg.settings.glass_blur,
+        "alpha": cfg.settings.glass_alpha,
+    }))
 }
 
 /// Dock 配置改动后的统一收尾：同步 Dock 窗 + 把同一份 payload 推给主界面 Dock 页
