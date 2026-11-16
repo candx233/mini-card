@@ -28,7 +28,10 @@
     --stage-a: #EEF3F8;
     --stage-b: #D9E3ED;
     --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
-    --font-mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+    /* 等宽族里补 MiSans：Cascadia/Consolas 都没有中文字形，中文会掉到 generic monospace
+       → Windows 上是宋体（用户 2026-11-16 报「间距」两个字和别的字不统一）。补上后
+       拉丁/数字仍是等宽字形，中文落到 MiSans，和界面其余部分一致。 */
+    --font-mono: 'Cascadia Mono', 'Consolas', 'MiSans', ui-monospace, monospace;
     /* ─── 动效令牌（2026-10-24，与 card.html 同名同值）：交互反馈 normal+ease-out，
        颜色/描边 fast+ease-snap，位移/展开 slow+ease-out。新写的规则别再写裸数值。 ─── */
     --dur-fast: 120ms;
