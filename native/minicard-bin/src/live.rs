@@ -346,6 +346,10 @@ struct CardWin {
     slice_origin: (i32, i32),
     /// 拖动时把玻璃位图整体偏移这么多（逻辑点）——不用每帧重切/重模糊
     glass_off: (f32, f32),
+    /// 遮挡闸门：下次复查时刻 + 上次判定。整块被普通窗口盖住时画了也看不见，
+    /// 直接跳过重绘（露出来立刻补一帧）。
+    cover_at: Instant,
+    covered: bool,
 }
 
 /// Dock 自绘窗口（D0：静态条；D1 接 hover 放大）
@@ -1192,6 +1196,8 @@ pub fn run(
                 dpi,
                 slice_origin: (card.pos[0].round() as i32, card.pos[1].round() as i32),
                 glass_off: (0.0, 0.0),
+                cover_at: Instant::now(),
+                covered: false,
             });
         }
         // 磁吸参数 + 辅助线窗口
@@ -1363,7 +1369,23 @@ pub fn run(
         let mut cfg_mtime = std::fs::metadata(minicard_core::config::path())
             .and_then(|m| m.modified())
             .ok();
+        // 诊断（MC_DRAW_LOG=1）：帧循环的耗时账本，2 秒打一行 —— 用来区分
+        // 「画得太多」和「单帧太贵」。只读不改变行为。
+        let mut st_last = Instant::now();
+        let mut st_iters = 0u64;
+        let mut st_busy_us = 0u64;
+        let mut st_draws = 0u64;
+        let mut st_draw_us = 0u64;
+        let mut st_end_us = 0u64;
+        let mut st_present_us = 0u64;
+        let mut st_dock_draws = 0u64;
+        let mut st_dock_us = 0f64;
+        let mut st_kind_draws = [0u64; 10];
+        let mut st_cover_skips = 0u64;
+        let mut rects_at = Instant::now();
         loop {
+            st_iters += 1;
+            let st_iter_t0 = Instant::now();
             // 先把消息吃完
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -1999,8 +2021,11 @@ pub fn run(
                 }
             }
 
-            // 刷新邻居矩形表（磁吸用；每帧一次 GetWindowRect，9 张卡可忽略）
-            {
+            // 刷新邻居矩形表（磁吸用）：拖动时每帧刷新；平时 250ms 一次就够，
+            // 不必 60 次/秒白打 10 个 GetWindowRect。
+            let drag_now = DRAG.lock().unwrap().is_some();
+            if drag_now || now >= rects_at {
+                rects_at = if drag_now { now } else { now + Duration::from_millis(250) };
                 let mut rects = Vec::with_capacity(wins.len());
                 for win in wins.iter() {
                     let mut r = RECT::default();
@@ -2267,6 +2292,8 @@ pub fn run(
                     );
                     let _ = r;
                     dock_paint_ms = paint_t0.elapsed().as_secs_f32() * 1000.0;
+                    st_dock_draws += 1;
+                    st_dock_us += dock_paint_ms as f64;
                     dw.last_sig = sig;
                     if std::env::var("MC_DOCK_LOG").is_ok() {
                         static LAST_PAINT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
@@ -2329,7 +2356,22 @@ pub fn run(
                     }
                     continue;
                 }
+                // 遮挡闸门：整块被别的窗口盖住 → 这一拍不画（4/s 复查）。
+                // 露出来的那一拍 `covered=false`，会立刻补一帧当前状态。
+                if now >= win.cover_at {
+                    win.covered = card_fully_covered(win.hwnd, win.w, win.h);
+                    win.cover_at = now + Duration::from_millis(250);
+                }
+                if win.covered {
+                    st_cover_skips += 1;
+                    win.next_draw = now + Duration::from_millis(250);
+                    if win.next_draw < earliest {
+                        earliest = win.next_draw;
+                    }
+                    continue;
+                }
                 drawn += 1;
+                let st_draw_t0 = Instant::now();
                 let animating = draw_one(
                     win,
                     &snap,
@@ -2342,6 +2384,13 @@ pub fn run(
                     &date,
                     &lunar_txt,
                 )?;
+                st_draws += 1;
+                st_draw_us += st_draw_t0.elapsed().as_micros() as u64;
+                if let Some(g) = win.gfx.as_ref() {
+                    st_end_us += (g.t_end_raw.get() * 1000.0) as u64;
+                    st_present_us += (g.t_present.get() * 1000.0) as u64;
+                }
+                st_kind_draws[kind_index(win.kind)] += 1;
                 // 动画中按显示器节拍：短动效（待办勾选/FLIP、翻月、时钟翻位）每显示帧一步；
                 // 连续补间（性能/网络条、音乐播放、番茄钟进度）按 max(1,floor(hz/60)) 帧抽帧
                 // （保证 ≥60fps，别让常驻卡白烧 CPU）；静置按卡片自己的 refresh。
@@ -2381,10 +2430,48 @@ pub fn run(
                     LAST.store(ms, Ordering::Relaxed);
                     CNT.store(0, Ordering::Relaxed);
                 }
+                // 2 秒一行的耗时账本：迭代率 / 画卡率 / 单帧拆分 / 循环忙时
+                let since = st_last.elapsed();
+                if since >= Duration::from_secs(2) {
+                    let s = since.as_secs_f64();
+                    let d = st_draws.max(1) as f64;
+                    let dock_avg = if st_dock_draws > 0 {
+                        st_dock_us / st_dock_draws as f64
+                    } else {
+                        0.0
+                    };
+                    minicard_shell::mlog!(
+                        "stat {s:.1}s：iter {:.0}/s busy {:.0} ms/s（{:>4.1}%）| 卡 {:.1}/s 单帧 {:.2} ms（EndDraw {:.2} + Present {:.2}）合计 {:.0} ms/s | dock {:.1}/s 单帧 {:.2} ms | 遮挡跳过 {:.0}/s | 分布 {:?}",
+                        st_iters as f64 / s,
+                        st_busy_us as f64 / (s * 1000.0),
+                        st_busy_us as f64 / (s * 10_000.0),
+                        st_draws as f64 / s,
+                        st_draw_us as f64 / d / 1000.0,
+                        st_end_us as f64 / d / 1000.0,
+                        st_present_us as f64 / d / 1000.0,
+                        st_draw_us as f64 / (s * 1000.0),
+                        st_dock_draws as f64 / s,
+                        dock_avg,
+                        st_cover_skips as f64 / s,
+                        st_kind_draws
+                    );
+                    st_last = Instant::now();
+                    st_iters = 0;
+                    st_busy_us = 0;
+                    st_draws = 0;
+                    st_draw_us = 0;
+                    st_end_us = 0;
+                    st_present_us = 0;
+                    st_dock_draws = 0;
+                    st_dock_us = 0.0;
+                    st_kind_draws = [0u64; 10];
+                    st_cover_skips = 0;
+                }
             }
             // 注意：DComp 桌面层窗的 Present(1) **不等 vblank**（实测不睡会跑成 200fps），
             // 所以节拍必须自己用 deadline 控；`dock_painted` 只用来决定卡片要不要让路。
 
+            st_busy_us += st_iter_t0.elapsed().as_micros() as u64;
             let now2 = Instant::now();
             if earliest > now2 {
                 let wait = (earliest - now2).min(Duration::from_millis(100));
@@ -3611,6 +3698,58 @@ fn debug_click_msg() -> u32 {
     *MSG.get_or_init(|| unsafe { RegisterWindowMessageW(w!("MiniCardDebugClick")) })
 }
 
+/// 诊断用：把卡型映射到固定下标（`st_kind_draws` 的分布列）。
+fn kind_index(k: CardKind) -> usize {
+    match k {
+        CardKind::Performance => 0,
+        CardKind::Disks => 1,
+        CardKind::Clock => 2,
+        CardKind::Weather => 3,
+        CardKind::NetRate => 4,
+        CardKind::Pomodoro => 5,
+        CardKind::Music => 6,
+        CardKind::Calendar => 7,
+        CardKind::Todo => 8,
+        CardKind::Notify => 9,
+    }
+}
+
+/// 这张卡是不是**整块**被别的窗口盖住了（5 点采样：中心 + 四角内缩）。
+///
+/// 桌面层的卡被普通窗口盖住时，画出来的像素用户一行也看不到 —— 继续按 60fps 重绘
+/// 纯属白烧 CPU 和 GPU。这里只做「看不看得见」的粗判：5 个点全都落在别的窗口上
+/// 才算盖住；有一个点还是自己 → 当作可见（宁可多画，不要漏画）。
+fn card_fully_covered(hwnd: HWND, w: f32, h: f32) -> bool {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::{IsChild, WindowFromPoint};
+    let w = w.round() as i32;
+    let h = h.round() as i32;
+    if w <= 2 || h <= 2 {
+        return false;
+    }
+    let inset = 6.min(w / 4).max(1);
+    let inset_y = 6.min(h / 4).max(1);
+    let pts = [
+        (w / 2, h / 2),
+        (inset, inset_y),
+        (w - inset, inset_y),
+        (inset, h - inset_y),
+        (w - inset, h - inset_y),
+    ];
+    for (x, y) in pts {
+        let mut p = POINT { x, y };
+        if !unsafe { ClientToScreen(hwnd, &mut p) }.as_bool() {
+            return false;
+        }
+        let under = unsafe { WindowFromPoint(p) };
+        if under == hwnd || unsafe { IsChild(hwnd, under) }.as_bool() {
+            return false;
+        }
+    }
+    true
+}
+
 /// 动画重绘间隔（显示同步后）：短动效每个显示帧一步，连续补间按整数帧抽帧。
 ///
 /// 短动效（待办勾选/FLIP、时钟翻位、日历翻月）只有 200~420ms，60fps 在 200Hz 屏上会明显跳，
@@ -3627,11 +3766,12 @@ fn anim_step(
         return refresh;
     }
     match kind {
+        // 时钟：每秒翻一次位，是**周期性**短动效 —— 200Hz 屏上每帧一步等于每秒白画
+        // ~40 帧。收到 60fps 足够（一次翻位 200~420ms，仍有 12~25 帧）。
+        CardKind::Clock => timing.frame_step().max(Duration::from_nanos(16_666_666)),
         // 通知卡的到达/删除/hover/滚动/清除/状态淡入都是短交互（120~180ms）：
         // 与翻月/勾选同一档，每显示帧一步（B 案 2026-11-09）
-        CardKind::Todo | CardKind::Clock | CardKind::Calendar | CardKind::Notify => {
-            timing.frame_step()
-        }
+        CardKind::Todo | CardKind::Calendar | CardKind::Notify => timing.frame_step(),
         _ => timing.ambient_step(),
     }
 }
@@ -3841,9 +3981,10 @@ mod tests {
             anim_step(CardKind::Todo, true, idle, &t200),
             Duration::from_micros(5_000)
         );
+        // 时钟是周期性翻位：200Hz 屏也收到 60fps 上限（别每秒白画 40 帧）
         assert_eq!(
             anim_step(CardKind::Clock, true, idle, &t200),
-            Duration::from_micros(5_000)
+            Duration::from_nanos(16_666_666)
         );
         assert_eq!(
             anim_step(CardKind::Calendar, true, idle, &t200),
@@ -3866,6 +4007,11 @@ mod tests {
         // 60Hz 屏：短动效 16.6667ms；补间不抽帧也是 16.6667ms
         assert_eq!(
             anim_step(CardKind::Todo, true, idle, &t60),
+            Duration::from_nanos(16_666_666)
+        );
+        // 时钟在 60Hz 屏上本来就只有 60fps，不再额外降档
+        assert_eq!(
+            anim_step(CardKind::Clock, true, idle, &t60),
             Duration::from_nanos(16_666_666)
         );
         assert_eq!(
@@ -4084,6 +4230,8 @@ mod gfx_tests {
             dpi,
             slice_origin: (0, 0),
             glass_off: (0.0, 0.0),
+            cover_at: Instant::now(),
+            covered: false,
         })
     }
 
