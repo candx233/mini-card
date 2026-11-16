@@ -518,6 +518,14 @@ pub fn font_set(font: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
+    // Dock 点图标走 ShellExecuteW 起子进程，子进程**原样继承**本进程的环境变量
+    // （ShellExecuteW 没有「带自定义 env」的入口）。从终端 / IDE 里启动 mini-card 时，
+    // 壳里可能带着 `ELECTRON_RUN_AS_NODE=1`（VS Code、DSH 这类宿主用它把 Electron 当 node 跑），
+    // 于是 Dock 点开的 Hermes / DeepSeek Harness 全退化成 node 模式：秒退、无窗口、日志零行，
+    // 用户看到的就是「点了没反应」。启动器不该把宿主内部开关传给被启动的应用。
+    // 取证脚本：docs/verify/verify_hermes_start.ps1
+    std::env::remove_var("ELECTRON_RUN_AS_NODE");
+
     let t0 = Instant::now();
     minicard_shell::log::init(&std::env::temp_dir().join("minicard-native.log"));
     let args = Args::parse();
@@ -542,6 +550,20 @@ fn main() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(args.hold_ms));
         }
         std::process::exit(if ok { 0 } else { 3 });
+    }
+
+    // 验收钩子：跑一次 Dock 点击的**同一个**动作（`appwin::click`），不建窗口、不画卡。
+    // 用来复现「点开的应用秒退」这类**环境变量继承**问题：探针进程的环境 =
+    // 被点开应用继承到的环境，所以这里是唯一能在不点鼠标的情况下复刻现场的地方。
+    // 取证脚本：docs/verify/verify_hermes_start.ps1
+    if args.probe.as_deref() == Some("click-app") {
+        let app = args.app.clone().unwrap_or_default();
+        let r = appwin::click(&app, "");
+        mlog!("probe click-app: app={app} -> {r}");
+        if args.hold_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(args.hold_ms));
+        }
+        std::process::exit(if r.starts_with("launch-failed") { 3 } else { 0 });
     }
 
     // 验收钩子：只查「这条通知点开会做什么」，不执行激活、不打印 URI（隐私）

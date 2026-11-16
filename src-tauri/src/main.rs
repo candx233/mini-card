@@ -3579,6 +3579,13 @@ unsafe fn set_exact_window_icons(hwnd: windows_sys::Win32::Foundation::HWND) {
 }
 
 fn main() {
+    // 网页版 Dock（native=false）在**本进程**里 ShellExecuteW 起图标应用，子进程继承本进程环境。
+    // 从终端 / IDE 启动 mini-card 时壳里的 `ELECTRON_RUN_AS_NODE=1`（VS Code、DSH 把 Electron
+    // 当 node 用的开关）会一起传下去 —— 被点开的 Hermes / DeepSeek Harness 会安静地秒退。
+    // 原生 Dock 那条路（minicard-bin）在它自己的 main 里也清了一遍。
+    // 取证脚本：docs/verify/verify_hermes_start.ps1
+    std::env::remove_var("ELECTRON_RUN_AS_NODE");
+
     ensure_single_instance();
     update::cleanup_old_exes();   // 清掉上一轮自更新留下的 mini-card.old*.exe
     let snap = data::spawn_sampler();
