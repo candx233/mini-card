@@ -5,7 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -326,6 +326,198 @@ impl CoverFlip<'_> {
     /// 是否已经翻完
     pub fn done(&self) -> bool {
         self.age >= FLIP_OUT_S + FLIP_IN_S
+    }
+}
+
+/// 换曲 → 换封面的「跨拍」判定（2026-11-15 用户报：「有时候专辑翻转没生效，直接换专辑封面」）。
+///
+/// SMTC 的「歌名/歌手」与「缩略图」是两组独立的异步属性：歌名先到、缩略图晚 0.5~2s 是常态
+/// （`minicard_core::media` 侧的封面观察窗就是为它开的）。旧实现只在「歌名变了的那一拍
+/// 封面也正好变了」时才起翻 → 晚到的封面只能原地换图，看上去就是「没翻，直接换封面」。
+///
+/// 这里把「换曲」和「换图」解耦：换曲时记一笔「待翻」，新封面哪一拍到就在哪一拍起翻；
+/// 等超过 [`FLIP_WAIT`] 还没新图就作废，之后有图也只换不翻（免得一首歌播到一半突然翻一下）。
+/// 只在**屏上确实有旧图**时才待翻：占位（无封面样张）→ 真封面是「出现」，不该翻。
+pub struct FlipPlan {
+    /// 当前曲目 key（`title|artist`）；空串或只有分隔符 = 元数据空档帧，不算换曲
+    track: String,
+    /// 换曲后等新封面的起点；None = 没在等
+    wait_from: Option<Instant>,
+}
+
+/// 换曲后最多等多久的新封面（数据层观察窗 10s，这里留够余量）。
+pub const FLIP_WAIT: Duration = Duration::from_secs(15);
+
+/// [`FlipPlan::step`] 的判定结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlipStep {
+    /// 不动
+    Idle,
+    /// 屏上没图 / 等超时：直接换成这张，不翻
+    Show(String),
+    /// 屏上有旧图且新图到了：翻（`waited` = 换曲后等了多久，日志/取证用）
+    Flip { url: String, waited: Duration },
+    /// 清成占位（这首歌确实没封面）
+    Clear,
+    /// 换曲后等超时仍没新图（屏上还是上一张）——状态已清，日志/取证用
+    GaveUp,
+}
+
+impl FlipPlan {
+    pub fn new() -> Self {
+        Self { track: String::new(), wait_from: None }
+    }
+
+    /// 喂一拍。`shown` = 屏上**已经画着**的封面 dataURL（"" = 占位），由绘制侧持有。
+    pub fn step(&mut self, track_key: &str, cover: &str, shown: &str, now: Instant) -> FlipStep {
+        if is_track_key(track_key) && track_key != self.track {
+            self.track.clear();
+            self.track.push_str(track_key);
+            // 屏上已有旧图才值得翻；占位 → 新图直接出现
+            self.wait_from = if shown.is_empty() { None } else { Some(now) };
+        }
+        if let Some(t0) = self.wait_from {
+            if now.saturating_duration_since(t0) > FLIP_WAIT {
+                self.wait_from = None; // 等太久：这首就不翻了
+                if cover == shown {
+                    return FlipStep::GaveUp;
+                }
+            }
+        }
+        if cover == shown {
+            return FlipStep::Idle;
+        }
+        if cover.is_empty() {
+            self.wait_from = None;
+            return FlipStep::Clear;
+        }
+        let url = cover.to_string();
+        match self.wait_from.take() {
+            Some(t0) => FlipStep::Flip {
+                url,
+                waited: now.saturating_duration_since(t0),
+            },
+            None => FlipStep::Show(url),
+        }
+    }
+}
+
+impl Default for FlipPlan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `title|artist` 这种 key 里「有真内容」：空串 / 只有 '|' = 元数据空档
+/// （播放器换曲瞬间会闪一下空属性，不能当成换曲把待翻状态打乱）
+fn is_track_key(k: &str) -> bool {
+    !k.trim_matches('|').trim().is_empty()
+}
+
+#[cfg(test)]
+mod flip_plan_tests {
+    use super::*;
+
+    const A: &str = "data:image/png;base64,AAA";
+    const B: &str = "data:image/png;base64,BBB";
+    const C: &str = "data:image/png;base64,CCC";
+    const TA: &str = "歌A|歌手A";
+    const TB: &str = "歌B|歌手B";
+    const TC: &str = "歌C|歌手C";
+
+    fn show(s: &str) -> FlipStep {
+        FlipStep::Show(s.into())
+    }
+    fn flip(s: &str, ms: u64) -> FlipStep {
+        FlipStep::Flip { url: s.into(), waited: Duration::from_millis(ms) }
+    }
+
+    /// 首帧（占位 → 有图）是「出现」不翻；换曲与换图同一拍 → 立刻翻、等待 0
+    #[test]
+    fn 换曲同拍换图_立刻翻() {
+        let t0 = Instant::now();
+        let mut p = FlipPlan::new();
+        assert_eq!(p.step(TA, A, "", t0), show(A));
+        assert_eq!(p.step(TB, B, A, t0 + Duration::from_secs(1)), flip(B, 0));
+    }
+
+    /// **用户报的「翻转没生效，直接换封面」**：歌名先变、缩略图晚到两拍 → 到图那拍补翻
+    #[test]
+    fn 换曲后封面晚到_仍然补翻() {
+        let t0 = Instant::now();
+        let mut p = FlipPlan::new();
+        assert_eq!(p.step(TA, A, "", t0), show(A));
+        // 换曲这一拍数据层给的还是上一首的图（观察窗内）→ 不能原地换、也不能提前翻
+        assert_eq!(p.step(TB, A, A, t0 + Duration::from_millis(500)), FlipStep::Idle);
+        // 两拍后真封面到 → 补翻，等待时长可查
+        assert_eq!(
+            p.step(TB, B, A, t0 + Duration::from_millis(1500)),
+            flip(B, 1000)
+        );
+        // 同一首再来的图（数据层重读同图不会走到这；真变了也只换不翻）
+        assert_eq!(p.step(TB, C, B, t0 + Duration::from_secs(3)), show(C));
+    }
+
+    /// 同一首晚到的封面（起播没图、后来才读到）只换图，不翻
+    #[test]
+    fn 同一首晚到的封面_只换图不翻() {
+        let t0 = Instant::now();
+        let mut p = FlipPlan::new();
+        assert_eq!(p.step(TA, "", "", t0), FlipStep::Idle);
+        assert_eq!(p.step(TA, A, "", t0 + Duration::from_secs(3)), show(A));
+        assert_eq!(p.step(TA, B, A, t0 + Duration::from_secs(5)), show(B));
+    }
+
+    /// 换曲后一直没新图：超时作废并报一次「放弃」，之后有图也只换不翻（不打断听歌）
+    #[test]
+    fn 换曲后等超时_之后有图只换不翻() {
+        let t0 = Instant::now();
+        let mut p = FlipPlan::new();
+        assert_eq!(p.step(TA, A, "", t0), show(A));
+        let tb = t0 + Duration::from_secs(1);
+        assert_eq!(p.step(TB, A, A, tb), FlipStep::Idle);
+        let late = tb + FLIP_WAIT + Duration::from_millis(1);
+        assert_eq!(p.step(TB, A, A, late), FlipStep::GaveUp, "超时要报一次放弃（日志用）");
+        assert_eq!(p.step(TB, B, A, late + Duration::from_secs(1)), show(B));
+    }
+
+    /// 元数据空档帧（title/artist 都空）不算换曲，也不该把「待翻」冲掉
+    #[test]
+    fn 元数据空档帧不算换曲() {
+        let t0 = Instant::now();
+        let mut p = FlipPlan::new();
+        assert_eq!(p.step(TA, A, "", t0), show(A));
+        let t1 = t0 + Duration::from_millis(500);
+        assert_eq!(p.step("|", A, A, t1), FlipStep::Idle);
+        // 空档后回到同一首：还是同曲，不能翻
+        assert_eq!(p.step(TA, A, A, t1), FlipStep::Idle);
+        // 真换曲照翻
+        assert_eq!(p.step(TB, B, A, t1), flip(B, 0));
+    }
+
+    /// 新曲确实没封面 → 清占位，别把上一首的图一直挂着（用户：「卡着，封面根本没换」）
+    #[test]
+    fn 换曲后这歌没封面_清成占位() {
+        let t0 = Instant::now();
+        let mut p = FlipPlan::new();
+        assert_eq!(p.step(TA, A, "", t0), show(A));
+        assert_eq!(p.step(TB, A, A, t0 + Duration::from_millis(500)), FlipStep::Idle);
+        assert_eq!(p.step(TB, "", A, t0 + Duration::from_secs(2)), FlipStep::Clear);
+    }
+
+    /// 快速连切：只有一次翻——从屏上那张直接翻到最终拿到的新图
+    #[test]
+    fn 连续快切只翻一次() {
+        let t0 = Instant::now();
+        let mut p = FlipPlan::new();
+        assert_eq!(p.step(TA, A, "", t0), show(A));
+        assert_eq!(p.step(TB, A, A, t0 + Duration::from_millis(200)), FlipStep::Idle);
+        assert_eq!(p.step(TC, A, A, t0 + Duration::from_millis(400)), FlipStep::Idle);
+        assert_eq!(
+            p.step(TC, C, A, t0 + Duration::from_millis(900)),
+            flip(C, 500)
+        );
+        assert_eq!(p.step(TC, C, C, t0 + Duration::from_secs(2)), FlipStep::Idle);
     }
 }
 

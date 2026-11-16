@@ -36,22 +36,72 @@ pub struct MusicSnap {
 }
 
 static SNAP: Mutex<Option<MusicSnap>> = Mutex::new(None);
-/// 封面缓存：键 + dataURL + 换曲观察窗（2026-10-13）。
-/// 切歌那一拍读到的缩略图常常还是上一首的（实测约半数切歌撞上），只读一次会把旧图缓存住；
-/// 观察窗内每拍重读，读到不同图就换上，窗口过完仍没读到本首的图才清成占位。
+/// 换曲后追封面的观察窗（2026-11-15：3s → 10s，且「读到旧图」不再算拿到）。
+///
+/// 两个已知坑都来自 SMTC 的异步属性：
+///  1. 换曲那一拍读到的缩略图常常还是上一首的（实测约半数切歌撞上）→ 观察窗内每拍重读；
+///  2. 缩略图可能比歌名晚好几秒（QQ 音乐实测），旧实现 3s 到点、且「读到一张图就算拿到」，
+///     之后再也不重读 → 卡片会一直挂着上一首的封面（2026-11-15 用户：「卡着，封面根本没换」）。
+/// 现在：只有「读到一张跟换曲前不一样的图」才算拿到并提前收窗；到点一张图都没读到才清占位。
+const COVER_WATCH_MS: u64 = 10_000;
+
+#[derive(Default)]
 struct CoverState {
+    /// 当前曲目 key（`app|title|artist`）
     key: Option<String>,
+    /// 对外给的封面 dataURL（"" = 这歌没封面）
     data: String,
-    settle_until: Option<Instant>,
-    /// 本曲是否读到过图（窗口结束时判「这歌确实没封面」用）
-    got: bool,
+    /// 换曲前那张图：观察窗里读到的还是它 = 缩略图大概率没更新，继续追
+    prev: String,
+    /// 观察窗截止；None = 已封存，不再重读
+    watch_until: Option<Instant>,
+    /// 观察窗里是否读到过任何非空图（到点仍没有 → 这歌确实没封面）
+    read_ok: bool,
 }
 static COVER: Mutex<CoverState> = Mutex::new(CoverState {
     key: None,
     data: String::new(),
-    settle_until: None,
-    got: false,
+    prev: String::new(),
+    watch_until: None,
+    read_ok: false,
 });
+
+impl CoverState {
+    /// 一拍开始时调用：处理换曲（开观察窗）与到点封存；返回这一拍要不要去读缩略图。
+    fn begin(&mut self, key: &str, now: Instant) -> bool {
+        if self.key.as_deref() != Some(key) {
+            self.key = Some(key.to_owned());
+            // 上一首的图继续当「屏上那张」显示（`data` 不动），另存一份用来判断读到的图有没有换
+            self.prev = self.data.clone();
+            self.watch_until = Some(now + std::time::Duration::from_millis(COVER_WATCH_MS));
+            self.read_ok = false;
+        }
+        if self.watch_until.is_some_and(|t| now >= t) {
+            self.watch_until = None;
+            if !self.read_ok {
+                // 整窗一张图都没读到 = 这歌确实没封面：清成占位，别把上一首的图一直挂着
+                self.data.clear();
+            }
+        }
+        // 观察窗内每拍重读；没封面时也每拍重试（QQ 音乐等刚启动/刚换曲时缩略图会比元数据晚）
+        self.watch_until.is_some() || self.data.is_empty()
+    }
+
+    /// 回填一拍读到的缩略图（"" = 没读到/读失败）。
+    /// 跟换曲前**不一样**的图 = 新封面真的到了 → 提前收窗，不再每拍重读。
+    fn accept(&mut self, cov: String) {
+        if cov.is_empty() {
+            return;
+        }
+        self.read_ok = true;
+        if cov != self.data {
+            self.data = cov;
+        }
+        if self.data != self.prev {
+            self.watch_until = None;
+        }
+    }
+}
 
 fn status_name(s: PlayStatus) -> &'static str {
     if s == PlayStatus::Playing {
@@ -407,39 +457,31 @@ fn read_snap(mgr: &SessionManager) -> Option<MusicSnap> {
         }
     };
 
-    // 封面：换曲读一次 + 观察窗内每拍重读（缩略图常比元数据晚到、或读到上一首的图）；
+    // 封面：换曲读一次 + 观察窗内每拍重读（缩略图常比元数据晚到、或读到上一首的图）。
     // **读空也要重试**——QQ 音乐等刚启动时缩略图比元数据晚到 1~2 秒（2026-10-09）。
+    // 换曲瞬间 title/artist 会同时变空（元数据空档帧）：这一拍不动封面，免得闪一下占位。
     let cover = {
         let now = Instant::now();
         let mut st = COVER.lock().unwrap();
-        let changed_now = st.key.as_deref() != Some(key.as_str());
-        if changed_now {
-            st.key = Some(key.clone());
-            st.settle_until = Some(now + std::time::Duration::from_millis(3000));
-            st.got = false;
-        }
-        let settling = st.settle_until.map(|t| now < t).unwrap_or(false);
-        if !settling && !st.got && !st.data.is_empty() {
-            // 观察窗过完仍没读到本曲的图（这歌确实没封面）→ 清成占位，别把上一首的图一直挂着
-            st.data.clear();
-        }
-        if changed_now || st.data.is_empty() || settling {
-            let mut cov = String::new();
-            if let Ok(thumb) = props.Thumbnail() {
-                if let Ok(bytes) = read_thumb(&thumb) {
-                    if !bytes.is_empty() {
-                        cov = format!("data:image/png;base64,{}", crate::base64_encode(&bytes));
+        if title.is_empty() && artist.is_empty() {
+            st.data.clone()
+        } else {
+            if st.begin(&key, now) {
+                let mut cov = String::new();
+                if let Ok(thumb) = props.Thumbnail() {
+                    if let Ok(bytes) = read_thumb(&thumb) {
+                        if !bytes.is_empty() {
+                            cov = format!(
+                                "data:image/png;base64,{}",
+                                crate::base64_encode(&bytes)
+                            );
+                        }
                     }
                 }
+                st.accept(cov);
             }
-            if !cov.is_empty() {
-                if cov != st.data {
-                    st.data = cov;
-                }
-                st.got = true;
-            }
+            st.data.clone()
         }
-        st.data.clone()
     };
 
     Some(MusicSnap {
@@ -671,4 +713,92 @@ impl Default for Sampler {
 
 /// 推送给窗口的节拍（外壳照它睡）
 pub const TICK_MS: u64 = 500;
+
+#[cfg(test)]
+mod cover_watch_tests {
+    use super::*;
+
+    const A: &str = "data:image/png;base64,AAA";
+    const B: &str = "data:image/png;base64,BBB";
+    const K1: &str = "QQMusic.exe|歌1|歌手1";
+    const K2: &str = "QQMusic.exe|歌2|歌手2";
+
+    fn at(t0: Instant, ms: u64) -> Instant {
+        t0 + std::time::Duration::from_millis(ms)
+    }
+
+    /// 换曲那一拍拍到的还是上一首的图：不能算「拿到」，观察窗继续开着，下一拍还读
+    #[test]
+    fn 换曲读到旧图不算拿到_继续重读() {
+        let t0 = Instant::now();
+        let mut st = CoverState::default();
+        // 第一首拿到封面 A
+        assert!(st.begin(K1, t0));
+        st.accept(A.to_owned());
+        assert_eq!(st.data, A);
+        assert!(!st.begin(K1, at(t0, 500)), "稳态不该每拍重读");
+        // 换曲：数据层给的仍是 A（缩略图没更新）
+        assert!(st.begin(K2, at(t0, 1000)), "换曲要开观察窗");
+        st.accept(A.to_owned());
+        assert!(st.watch_until.is_some(), "读到旧图不算拿到，必须继续追");
+        assert!(st.begin(K2, at(t0, 1500)), "观察窗内每拍重读");
+        // 真封面到了 → 提前收窗，不再重读
+        st.accept(B.to_owned());
+        assert_eq!(st.data, B);
+        assert!(st.watch_until.is_none(), "拿到新图后应提前收窗");
+        assert!(!st.begin(K2, at(t0, 2000)));
+    }
+
+    /// 到点还是只有旧图：保留旧图（同专辑/播放器没更新无法区分），但不再每拍重读
+    #[test]
+    fn 观察窗到点仍读到旧图_保留旧图并封存() {
+        let t0 = Instant::now();
+        let mut st = CoverState::default();
+        st.begin(K1, t0);
+        st.accept(A.to_owned());
+        st.begin(K2, at(t0, 1000));
+        for ms in [1500, 2000, 2500] {
+            assert!(st.begin(K2, at(t0, ms)));
+            st.accept(A.to_owned());
+        }
+        // 窗口到点：不再读、也别清图（清了会把同专辑的封面闪没）
+        assert!(!st.begin(K2, at(t0, 1000 + COVER_WATCH_MS)));
+        assert_eq!(st.data, A);
+        assert!(!st.begin(K2, at(t0, 1000 + COVER_WATCH_MS + 500)));
+    }
+
+    /// 新曲确实没封面（整窗读不到图）：到点清成占位，别一直挂着上一首的图
+    #[test]
+    fn 新曲没封面_到点清占位() {
+        let t0 = Instant::now();
+        let mut st = CoverState::default();
+        st.begin(K1, t0);
+        st.accept(A.to_owned());
+        assert!(st.begin(K2, at(t0, 1000)));
+        st.accept(String::new());
+        assert_eq!(st.data, A, "观察窗内先沿用上一首的图");
+        // 到点：读不到任何图 → 清占位
+        st.begin(K2, at(t0, 1000 + COVER_WATCH_MS));
+        assert!(st.data.is_empty(), "确认没封面就该清掉旧图");
+    }
+
+    /// 观察窗内播放器比歌名晚 6s 才更新缩略图：必须还能追到（旧实现 3s 就封存了）
+    #[test]
+    fn 缩略图晚六秒_仍能追到() {
+        let t0 = Instant::now();
+        let mut st = CoverState::default();
+        st.begin(K1, t0);
+        st.accept(A.to_owned());
+        // 换曲，前 6s 每拍都只读到旧图
+        for ms in (1000..=7000).step_by(500) {
+            assert!(st.begin(K2, at(t0, ms)), "{ms}ms 观察窗内该继续重读");
+            st.accept(A.to_owned());
+        }
+        // 6.5s 时真图到了
+        assert!(st.begin(K2, at(t0, 7500)));
+        st.accept(B.to_owned());
+        assert_eq!(st.data, B);
+        assert!(st.watch_until.is_none());
+    }
+}
 

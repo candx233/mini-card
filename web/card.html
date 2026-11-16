@@ -818,6 +818,8 @@
   var wsnap = null, wAt = 0;   // 天气自成一路：30 分钟一刷，与 1s 快照无关
   var msnap = null, mAt = 0, mKey = null;   // 音乐：SMTC 1s 推送（事件 + 首帧拉取），10s 无更新算异常；mKey = 歌名|歌手（切歌动画判定）
   var mDir = 1;   // 下一次切歌的封面翻转方向：1=下一首（默认）/ -1=上一首（卡上按 ⏮/⏭ 时更新，翻完复位）
+  var mFlipAt = 0;   // 换曲后「等新封面再翻」的起点（0=没在等）。缩略图常比歌名晚一拍（2026-11-15 用户报）
+  var MFLIP_WAIT = 15000;   // 等新封面的上限：过点还没图就不翻了，之后有图按淡入处理
   var mBase = null;   // 进度外推基准 {pos,dur,playing,at}（2026-10-09 三轮：200ms 走表，修正「比声音慢一秒」）
   var mAbsentAt = 0;  // 会话 present:false 首次出现时刻：宽限 4s 再切示例样张（防短暂断流闪回整卡重建）
   var curState = 'boot';   // boot=首帧前, empty, normal, error
@@ -1506,10 +1508,14 @@
             '</div>';
           }
 
-  /* ── 音乐卡的增量更新 + 切歌封面旋转动画（2026-10-09）──
+  /* ── 音乐卡的增量更新 + 切歌封面旋转动画（2026-10-09 / 2026-11-15 重做判定）──
      数据每秒推送但只有「歌名|歌手」变化才算切歌；切歌走 coverFlip（整块封面转出 90° →
      在侧立的瞬间换图 → 从 −90° 转回，读起来像卡面连续翻过一面）。其余更新走路更新
-     （musicPaint），不重建 DOM —— 否则动画会被每秒的 innerHTML 打断。 */
+     （musicPaint），不重建 DOM —— 否则动画会被每秒的 innerHTML 打断。
+     ⚠️ 翻转**要等新封面到了再翻**：SMTC 的缩略图常比歌名晚一拍（QQ 音乐实测）。
+     旧实现在歌名变的那拍就翻，转的是上一首的图；新图下一拍到达再从正面换上来
+     → 用户 2026-11-15 报「翻转没生效，直接换专辑封面」/「卡着，封面根本没换」。
+     现在歌名变只记 mFlipAt，哪一拍真拿到了新图才起翻（超时 MFLIP_WAIT 则放弃）。 */
   function paintCover() {
     var cv = bodyEl.querySelector('.mc-cover'); if (!cv) return;
     var art = bodyEl.querySelector('.mc-art'); if (!art) return;
@@ -1536,7 +1542,14 @@
       cv.style.transform = 'rotateY(0deg)';
     }, 220);
   }
-  function musicPaint() {
+  // 换曲后新封面终于到了（或同一拍就带上了）：文字先更新，封面留到 90° 那一刻换
+  function startCoverFlip() {
+    mFlipAt = 0;
+    musicPaint(false);
+    coverFlip(mDir);
+    mDir = 1;   // 方向提示用完复位（默认下一首）
+  }
+  function musicPaint(withCover) {
     if (curState !== 'normal') return;
     if (!bodyEl.querySelector('.mc-body')) return;
     var m = msnap || {};
@@ -1559,18 +1572,30 @@
       btn.setAttribute('aria-label', playing ? '暂停' : '播放');
       btn.innerHTML = playing ? I_PAUSE : I_PLAY;
     }
-    // 封面：晚到 / 换新都在这里补 + 轻淡入 —— 原来只看「空没空」，切歌那一拍缓存了旧图就再不换
-    // （2026-10-13：Rust 侧换曲后有 3s 观察窗重读；这里按 dataset 记「已画的是哪张」比对）
+    // 封面：晚到 / 换新都在这里补 + 轻淡入 —— 按 dataset 记「已画的是哪张」比对。
+    // 切歌那一拍传 withCover=false：换图要留到 coverFlip 转到 90° 的那一刻，
+    // 否则新图先在正面出现，翻转看上去就「没生效、直接换封面」（2026-11-15 用户报）。
     var art = bodyEl.querySelector('.mc-art');
-    if (art && m.cover && art.dataset.src !== m.cover) {
-      art.dataset.src = m.cover;
-      var cvc = bodyEl.querySelector('.mc-cover');
-      if (cvc) cvc.style.backgroundImage = 'url("' + m.cover + '")';   // 边框底层同步（防蓝圈）
-      art.style.transition = 'opacity 0.25s ease';
-      art.style.opacity = '0';
-      art.style.backgroundImage = 'url("' + m.cover + '")';
-      void art.offsetWidth;
-      art.style.opacity = '1';
+    if (art && withCover !== false) {
+      var want = m.cover || '';
+      if (!want) {
+        // 数据层明确给空串 = 这歌确实没封面：清掉上一首的图，回渐变 + 音符
+        if (art.dataset.src) {
+          art.dataset.src = '';
+          art.style.backgroundImage = '';
+          var cv0 = bodyEl.querySelector('.mc-cover');
+          if (cv0) cv0.style.backgroundImage = '';
+        }
+      } else if (art.dataset.src !== want) {
+        art.dataset.src = want;
+        var cvc = bodyEl.querySelector('.mc-cover');
+        if (cvc) cvc.style.backgroundImage = 'url("' + want + '")';   // 边框底层同步（防蓝圈）
+        art.style.transition = 'opacity 0.25s ease';
+        art.style.opacity = '0';
+        art.style.backgroundImage = 'url("' + want + '")';
+        void art.offsetWidth;
+        art.style.opacity = '1';
+      }
     }
     musicMarquee();   // 长文本滚动（每次走更后复查；文本没变不重置动画）
   }
@@ -1650,7 +1675,7 @@
     if (p && msnap && !('cover' in p)) p.cover = msnap.cover;
     var key = (p && p.present) ? ((p.title || '') + '|' + (p.artist || '')) : null;
     // 切歌 = 前有真歌名、现在有真歌名、且变了；中场空元数据帧（key='|'）不算、也不重置基准
-    var flip = !!(mKey && key && key !== '|' && mKey !== key);
+    var trackChanged = !!(mKey && key && key !== '|' && mKey !== key);
     if (key && key !== '|') mKey = key;
     msnap = p || null; mAt = Date.now();
     // 时间外推基准（Rust 已按 LastUpdatedTime 补偿过推送值 → 这里 ≈ 推送时刻的真实进度；
@@ -1661,11 +1686,19 @@
       playing: !!(p && p.status === 'playing'),
       at: performance.now()
     };
-    if (flip && curState === 'normal' && bodyEl.querySelector('.mc-body')) {
-      musicPaint();
-      coverFlip(mDir);
-      mDir = 1;   // 方向提示用完复位（默认下一首）
-    } else render();
+    if (trackChanged) {
+      mFlipAt = nowT;   // 先记「待翻」：真起翻要等新封面（见文件头 2026-11-15 注释）
+      // 歌名/进度立刻跟手：render() 有 RATE 节流，切歌这一拍不能被压到 1s 后才更新
+      musicPaint(false);
+    }
+    if (!msnap || !msnap.present) mFlipAt = 0;   // 会话没了：待翻作废（马上回示例样张）
+    if (mFlipAt && curState === 'normal' && bodyEl.querySelector('.mc-body')) {
+      var artEl = bodyEl.querySelector('.mc-art');
+      var want = (msnap && msnap.cover) || '';
+      if (want && (!artEl || artEl.dataset.src !== want)) { startCoverFlip(); return; }
+      if (nowT - mFlipAt > MFLIP_WAIT) mFlipAt = 0;   // 等太久：不翻了，之后有图按淡入处理
+    }
+    render();
   }
   window.__musicPush = onMusic;   // 诊断钩子：CDP 注入假快照测切歌动画/晚到封面（2026-10-09）
 

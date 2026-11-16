@@ -474,17 +474,23 @@ enum State {
     /// 天气卡的 refresh_ms 被钳到 60s，光等节拍最多要 60s 才看到新天气。
     Weather { seen_at: i64 },
     Music {
-        /// (封面 dataURL, 位图)；换曲才重解码
+        /// (封面 dataURL, 位图)：**屏上正在显示的那张**；换图才重解码
         cover: Option<(String, ID2D1Bitmap1)>,
-        /// 翻转中的旧封面 + 起始时刻（0.22s 转出 + 0.26s 转回）
+        /// 翻转中的旧封面（屏上换下来那张）+ 起始时刻（0.22s 转出 + 0.26s 转回）
         prev: Option<ID2D1Bitmap1>,
         flip_t0: Option<Instant>,
-        /// +1 = 下一首（向左翻），−1 = 上一首
+        /// 下一次翻转要用的方向：+1 = 下一首（向左翻），−1 = 上一首。
+        /// 由卡上 ⏮/⏭ 点击写入，**起翻那一刻**才用掉并复位 —— 不能每帧复位：
+        /// 新封面可能晚到 1~2s，复位早了方向就丢了（0.1.3 前的老问题）。
         flip_dir: f32,
+        /// 正在跑的那次翻转的方向（起翻时从 `flip_dir` 拷贝，动画期间不再变）
+        flip_dir_run: f32,
         /// 仅 `MC_FLIP_DEMO=1` 用：下一次自动翻转的时刻（没有真换曲时也能看动画）
         demo_t0: Option<Instant>,
-        /// 上一次的 (title|artist)：只有换曲才翻卡，同曲晚到的封面只换图不翻
-        last_track: String,
+        /// 换曲 → 换图判定：缩略图常比歌名晚到，晚到时要补翻（2026-11-15 用户报）
+        plan: music::FlipPlan,
+        /// 解码/上传失败过的封面 URL：同一张别每帧重试（下一首/换图自然会清）
+        bad_cover: Option<String>,
     },
     Calendar(calendar::Calendar, i32, u32),
 }
@@ -1138,7 +1144,16 @@ pub fn run(
                         .map(|s| s.at)
                         .unwrap_or(i64::MIN),
                 },
-                CardKind::Music => State::Music { cover: None, prev: None, flip_t0: None, flip_dir: 1.0, demo_t0: None, last_track: String::new() },
+                CardKind::Music => State::Music {
+                    cover: None,
+                    prev: None,
+                    flip_t0: None,
+                    flip_dir: 1.0,
+                    flip_dir_run: 1.0,
+                    demo_t0: None,
+                    plan: music::FlipPlan::new(),
+                    bad_cover: None,
+                },
                 CardKind::Calendar => {
                     let (y, m, d, _, _, _) = now_parts();
                     State::Calendar(calendar_of(y, m, d), 0, d)
@@ -2563,7 +2578,7 @@ fn draw_one(
             *seen_at = ws.as_ref().map(|s| s.at).unwrap_or(i64::MIN);
             false
         }
-        (State::Music { cover, prev, flip_t0, flip_dir, demo_t0, last_track }, _) => {
+        (State::Music { cover, prev, flip_t0, flip_dir, flip_dir_run, demo_t0, plan, bad_cover }, _) => {
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) if s.present => music::Music {
@@ -2583,45 +2598,70 @@ fn draw_one(
                 },
             };
             let mk = music::Tokens::music(win.w, win.h);
-            let track_key = m
-                .as_ref()
-                .filter(|s| s.present)
-                .map(|s| format!("{}|{}", s.title, s.artist))
-                .unwrap_or_default();
-            let track_changed = track_key != *last_track;
-            if track_changed {
-                *last_track = track_key;
-            }
-            // 封面：换曲/首次才解码（data URL → 缩到封面尺寸 → 圆角烘 alpha → 上传）
+            // 封面：换曲 → 换图判定交给 `music::FlipPlan`（缩略图常比歌名晚到一拍，
+            // 旧实现只在「同拍」才起翻 → 晚到的封面直接换图 = 用户所见「翻转没生效，直接换封面」）。
             if let Some(s) = m.as_ref().filter(|s| s.present) {
-                if s.cover.is_empty() {
-                    // 这歌确实没封面：别把上一首的图一直挂着（浏览器回落渐变+音符）
-                    *cover = None;
-                    *prev = None;
-                } else if cover.as_ref().map(|(u, _)| u.as_str()) != Some(s.cover.as_str()) {
-                    match minicard_draw::image::decode_data_url(&s.cover) {
-                        Ok(img) => {
-                            let px = (win.h - 2.0 * mk.pad) * win.dpi / 96.0;
-                            let side = px.round().max(1.0) as u32;
+                let px = (win.h - 2.0 * mk.pad) * win.dpi / 96.0;
+                let cover_r = mk.cover_r * win.dpi / 96.0;
+                let shown = cover.as_ref().map(|(u, _)| u.as_str()).unwrap_or("");
+                let step = plan.step(
+                    &format!("{}|{}", s.title, s.artist),
+                    &s.cover,
+                    shown,
+                    now,
+                );
+                // 先处理「不动 / 放弃 / 清占位」，再把「要换的那张」交给统一的解码分支
+                let to_show = match step {
+                    music::FlipStep::Idle => None,
+                    music::FlipStep::GaveUp => {
+                        minicard_shell::mlog!(
+                            "music cover: 换曲后 {}s 没等到新封面（沿用上一张）",
+                            music::FLIP_WAIT.as_secs()
+                        );
+                        None
+                    }
+                    music::FlipStep::Clear => {
+                        // 这歌确实没封面：别把上一首的图一直挂着（回落渐变 + 音符）
+                        *cover = None;
+                        *prev = None;
+                        None
+                    }
+                    music::FlipStep::Show(url) => Some((url, false, Duration::ZERO)),
+                    music::FlipStep::Flip { url, waited } => Some((url, true, waited)),
+                };
+                if let Some((url, flip, waited)) = to_show {
+                    // 解码失败过的那张别每帧重试（一帧 60 次解码会把卡拖死）
+                    if bad_cover.as_deref() != Some(url.as_str()) {
+                        let side = px.round().max(1.0) as u32;
+                        let made = minicard_draw::image::decode_data_url(&url).and_then(|img| {
                             let mut small = minicard_draw::image::resize_cover(&img, side, side);
-                            minicard_draw::image::bake_round_alpha(
-                                &mut small,
-                                mk.cover_r * win.dpi / 96.0,
-                            );
-                            match gfx.bitmap_from_bgra(&small.bgra, small.w, small.h) {
-                                Ok(b) => {
-                                    // 换曲才翻；同一首晚到的封面只换图（不二次翻卡）
-                                    if cover.is_some() && track_changed {
-                                        minicard_shell::mlog!("music flip start（dir {}）", *flip_dir);
-                                        *prev = cover.take().map(|(_, b)| b);
-                                        *flip_t0 = Some(now);
-                                    }
-                                    *cover = Some((s.cover.clone(), b))
+                            minicard_draw::image::bake_round_alpha(&mut small, cover_r);
+                            gfx.bitmap_from_bgra(&small.bgra, small.w, small.h)
+                        });
+                        match made {
+                            Ok(b) => {
+                                if flip && cover.is_some() {
+                                    *prev = cover.take().map(|(_, b)| b);
+                                    *flip_t0 = Some(now);
+                                    *flip_dir_run = *flip_dir;   // 用掉方向提示（下次翻默认下一首）
+                                    *flip_dir = 1.0;
+                                    minicard_shell::mlog!(
+                                        "music flip start（dir {}，封面晚到 {}ms）",
+                                        *flip_dir_run,
+                                        waited.as_millis()
+                                    );
                                 }
-                                Err(e) => minicard_shell::mlog!("封面上传失败: {e:?}"),
+                                *cover = Some((url, b));
+                                *bad_cover = None;
+                            }
+                            Err(e) => {
+                                minicard_shell::mlog!(
+                                    "封面解码/上传失败: {e:?}（dataURL {} 字节）",
+                                    url.len()
+                                );
+                                *bad_cover = Some(url);
                             }
                         }
-                        Err(e) => minicard_shell::mlog!("封面解码失败: {e:?}"),
                     }
                 }
             } else {
@@ -2634,12 +2674,14 @@ fn draw_one(
                 let due = demo_t0.map(|t| now >= t).unwrap_or(true);
                 if due && flip_t0.is_none() {
                     *flip_t0 = Some(now);
+                    *flip_dir_run = *flip_dir;
+                    *flip_dir = 1.0;
                     *demo_t0 = Some(now + Duration::from_millis(2000));
                 }
             }
             let flip = flip_t0.map(|t0| music::CoverFlip {
                 age: (now - t0).as_secs_f32(),
-                dir: *flip_dir,
+                dir: *flip_dir_run,
                 old: prev.as_ref().or(cover.as_ref().map(|(_, b)| b)),
                 new: cover.as_ref().map(|(_, b)| b),
             });
@@ -2659,8 +2701,8 @@ fn draw_one(
                 .unwrap_or(false);
             if !flipping {
                 *flip_t0 = None;
-                // 方向提示用完复位（默认下一首）；否则点过一次「上一首」后整场都反着翻
-                *flip_dir = 1.0;
+                // 方向在起翻那一刻就用掉了（见上方 flip_dir_run），这里别再复位：
+                // 否则新封面晚到时方向等不到翻开就被清掉
             }
             mw.playing || flipping || music::marquee_animating()
         }
@@ -2815,8 +2857,7 @@ fn click(
                 c.roll_header(prev_title, prev_holiday, dir);
             }
         }
-        State::Music { cover, prev, flip_t0, flip_dir, demo_t0, last_track } => {
-            let _ = (&cover, &prev, &flip_t0, &flip_dir, &demo_t0, &last_track);
+        State::Music { flip_dir, .. } => {
             let m = media::snapshot();
             let mw = match &m {
                 Some(s) => music::Music {
