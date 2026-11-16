@@ -1010,12 +1010,24 @@ pub fn run(
         });
     }
 
-    // SMTC 音乐：core 的 Sampler 每拍更新内部快照，这里只负责起线程 + 读
+    // SMTC 音乐：core 的 Sampler 每拍更新内部快照，这里只负责起线程 + 读。
+    // 音乐卡不可见时降到 5s 一拍（SMTC 的 WinRT 查询不便宜）；200ms 一片的短睡保证
+    // 「切回桌面」那拍 200ms 内就补一次，不会挂着上一首。
     std::thread::spawn(|| {
         let mut s = media::Sampler::new();
+        let mut last = Instant::now() - Duration::from_secs(60);
         loop {
-            let _ = s.tick();
-            std::thread::sleep(Duration::from_millis(500));
+            let visible = minicard_core::util::kind_visible(CardKind::Music);
+            let interval = if visible {
+                Duration::from_millis(media::TICK_MS)
+            } else {
+                Duration::from_secs(5)
+            };
+            if last.elapsed() >= interval {
+                let _ = s.tick();
+                last = Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(200));
         }
     });
 
@@ -2410,6 +2422,17 @@ pub fn run(
                         fps.reset();
                     }
                 }
+            }
+
+            // 可见性位图：采样/轮询线程据此降频（卡片全被盖住时没必要 500ms 查一次 WinRT/PDH）
+            {
+                let mut vis = 0u64;
+                for w in wins.iter() {
+                    if !w.covered {
+                        vis |= 1u64 << (w.kind as u64);
+                    }
+                }
+                minicard_core::util::set_visible_mask(vis);
             }
 
             // Dock 的唤醒时刻也要算进等待（否则放大动画会被 100ms 的睡眠掐成 10fps）

@@ -18,7 +18,7 @@ use std::fmt;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::UI::Notifications::Management::{
     UserNotificationListener, UserNotificationListenerAccessStatus,
@@ -30,6 +30,11 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 pub const MAX_ITEMS: usize = 20;
 /// 轮询节拍（未打包进程实测 500ms 延迟 131–504ms；D1 探针 500ms 足够）。
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// 通知卡**不可见**时的轮询节拍：被普通窗口盖住时没人看这一列，500ms 一次 WinRT
+/// 查询纯属白烧（2026-11-16 实测：这一条能吃掉 3–6% 单核）。可见性由绘制进程写
+/// `util::set_visible_mask`；露出来的那拍 `kind_visible` 翻真、elapsed 早已超 500ms，
+/// 下一片 200ms 睡眠内立刻补一次，不会出现「切回桌面还是旧列表」。
+pub const POLL_INTERVAL_IDLE: Duration = Duration::from_secs(5);
 /// 会话正文单行上限（防超长 toast 把内存/绘制拖垮；卡面单行省略，不需要全文）。
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_BODY_CHARS: usize = 400;
@@ -154,6 +159,8 @@ fn worker(shared: Arc<RwLock<NotifySnapshot>>, rx: Receiver<Cmd>) {
     let mut listener: Option<UserNotificationListener> = None;
     let mut last_access = NotifyAccess::Unspecified;
     let mut access_requested = false;
+    // 上一拍轮询时刻：可见性闸门按它决定这一拍要不要真查 WinRT
+    let mut last_poll = Instant::now() - POLL_INTERVAL;
 
     loop {
         while let Ok(cmd) = rx.try_recv() {
@@ -176,6 +183,18 @@ fn worker(shared: Arc<RwLock<NotifySnapshot>>, rx: Receiver<Cmd>) {
                 }
             }
         }
+
+        // 可见性闸门：通知卡被盖住 → 5s 一拍；200ms 一片的短睡只为了「露出来立刻补查」。
+        let interval = if crate::util::kind_visible(crate::config::CardKind::Notify) {
+            POLL_INTERVAL
+        } else {
+            POLL_INTERVAL_IDLE
+        };
+        if last_poll.elapsed() < interval {
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        last_poll = Instant::now();
 
         if listener.is_none() {
             match UserNotificationListener::Current() {

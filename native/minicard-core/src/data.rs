@@ -162,7 +162,15 @@ fn run(out: SharedSnap) {
             at: unix_ms(),
         };
 
-        thread::sleep(Duration::from_millis(1000));
+        // 可见性闸门：性能/磁盘/网络卡全被盖住时没人读这份快照，采样降到 2s 一拍。
+        // 缓存里仍是最近一次采样，露出来第一帧最多旧 2s，下一拍就对齐。
+        let wanted = {
+            use crate::config::CardKind;
+            crate::util::kind_visible(CardKind::Performance)
+                || crate::util::kind_visible(CardKind::Disks)
+                || crate::util::kind_visible(CardKind::NetRate)
+        };
+        thread::sleep(Duration::from_millis(if wanted { 1000 } else { 2000 }));
     }
 }
 
