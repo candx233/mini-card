@@ -155,8 +155,13 @@ impl Tokens {
             badge_lh: 0.75 * r,
             badge_h: 0.8125 * r,
             badge_pad: 0.3125 * r,
-            time_fs: 0.625 * r,
-            time_lh: 0.8125 * r,
+            // 组头右侧「N 分钟前」：2026-11-15 用户两轮反馈后定为 12/15（0.75r / 0.9375r），
+            // 字色另由 `time_color()` 提亮一档。1× 屏上 11→12 只多 1px 墨迹，提亮才是
+            // 让「前」的笔画缝隙不糊在一起的关键。行高 15 仍远低于 group_gh=24 →
+            // 组头高与 3 组/4 条容量不动；应用名 grow 槽位少约 8px（实测「59 分钟前」
+            // 54px 时应用名仍余 106px）。
+            time_fs: 0.75 * r,
+            time_lh: 0.9375 * r,
             title_fs: 0.84375 * r,
             title_lh: 1.03125 * r,
             item_h: 2.375 * r,
@@ -1271,6 +1276,19 @@ fn text_node_aligned(s: &str, size: f32, lh: f32, weight: u16, id: u32, align: u
     .id(id)
 }
 
+/// 组头相对时间字色：`muted` 往 `fg` 提亮一档（0.6 档；深色主题更亮、浅色主题更深）。
+/// 1× 屏上的 12px 小字靠它拉开「笔画 vs 缝隙」的对比 —— 只放大字号不够（2026-11-15 A/B 第 4 行）。
+fn time_color(pal: &Palette) -> D2D1_COLOR_F {
+    const T: f32 = 0.6;
+    let mix = |m: f32, f: f32| m + (f - m) * T;
+    D2D1_COLOR_F {
+        r: mix(pal.muted.r, pal.fg.r),
+        g: mix(pal.muted.g, pal.fg.g),
+        b: mix(pal.muted.b, pal.fg.b),
+        a: 1.0,
+    }
+}
+
 /// 相对时间的基准（毫秒）：每次 paint 取一次，和旧实现 `now_ms` 参数同口径。
 fn unix_ms_now() -> u64 {
     std::time::SystemTime::now()
@@ -1657,7 +1675,11 @@ fn paint_tree(
             ID_COUNT | ID_HINT => pal.muted,
             _ => {
                 if let Some(gidx) = group_of(pl.id) {
-                    if pl.id - id_group(gidx) >= 4 {
+                    // 5 = 相对时间（tree 里的 gid + 5）：提亮一档；药丸数字仍 muted。
+                    let off = pl.id - id_group(gidx);
+                    if off == 5 {
+                        time_color(pal)
+                    } else if off >= 4 {
                         pal.muted
                     } else {
                         pal.fg
@@ -2554,6 +2576,97 @@ mod tests {
         let count_node = find_node(&pl, ID_COUNT).expect("计数节点");
         let s = count_node.text().expect("计数是文字").s.as_str();
         assert!(!s.contains('·'), "B 案不应再有分页页标：{s}");
+    }
+
+    /// 组头右侧相对时间：字号 12/15（0.75r / 0.9375r）且字色由 muted 提亮一档。
+    /// 1× 屏上 11→12 只多 1px 墨迹 → 提亮才是「前」不糊的关键（用户 2026-11-15 选的 A/B 第 4 行）。
+    /// 行高仍远小于 group_gh=24 → 组头高与 3 组/4 条容量不动；最长「59 分钟前」
+    /// 也不许挤掉应用名、不许与计数药丸重叠。
+    #[test]
+    fn group_time_label_grows_to_12px_and_brightens_without_squeezing_app_name() {
+        let t = Tokens::notify(240.0, 300.0);
+        assert!(
+            (t.time_fs - 12.0).abs() < 0.01,
+            "相对时间字号应为 0.75r=12，实际 {}",
+            t.time_fs
+        );
+        assert!(
+            (t.time_lh - 15.0).abs() < 0.01,
+            "行高应同步为 0.9375r=15，实际 {}",
+            t.time_lh
+        );
+        assert!(
+            t.time_lh < t.group_gh,
+            "行高 {} 必须小于组头 {}，否则组头/容量会被撑大",
+            t.time_lh,
+            t.group_gh
+        );
+
+        // 字色：muted → fg 提亮一档；深色主题更亮、浅色主题更深（都是「更清楚」），
+        // 但都不许越过 fg（应用名/标题仍是最高一级）。
+        let lum = |c: D2D1_COLOR_F| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        let dark = Palette::new(30.0, false);
+        let tc = time_color(&dark);
+        assert!(
+            lum(tc) > lum(dark.muted) + 0.02,
+            "深色主题时间应比 muted 亮：{} vs {}",
+            lum(tc),
+            lum(dark.muted)
+        );
+        assert!(lum(tc) < lum(dark.fg), "时间不应亮过 fg（要低于应用名）");
+        let light = Palette::new(30.0, false).with_theme(false);
+        let tc = time_color(&light);
+        assert!(
+            lum(tc) < lum(light.muted) - 0.02,
+            "浅色主题时间应比 muted 深：{} vs {}",
+            lum(tc),
+            lum(light.muted)
+        );
+        assert!(lum(tc) > lum(light.fg), "时间不应深过 fg");
+
+        // 现文案里最长的一档「59 分钟前」；应用名给一个长且常见的值
+        let created = unix_ms_now().saturating_sub(59 * 60_000);
+        let snap = snap_of(vec![item(1, "Microsoft Edge", "edge", created, true)]);
+        let motion = Motion::new();
+        let now = Instant::now();
+        let node = tree_hook(&t, Some(&snap), Options::default(), &motion, now);
+        let pl = layout_of(&node, &t);
+
+        let row = find_rect(&pl, id_group(0)).expect("首组头");
+        let name = find_rect(&pl, id_group(0) + 2).expect("应用名");
+        let badge = find_rect(&pl, id_group(0) + 3).expect("计数药丸");
+        let time = find_rect(&pl, id_group(0) + 5).expect("相对时间");
+
+        assert!(
+            (row.h - t.group_gh).abs() < 0.01,
+            "组头高应仍为 group_gh=24，实际 {}",
+            row.h
+        );
+        assert!(
+            (time.h - t.time_lh).abs() < 0.01,
+            "相对时间应单行：行高 {} != {}",
+            time.h,
+            t.time_lh
+        );
+        // 竖直居中：文字行盒中心贴在组头中心上（±0.51 容忍 f32 半像素）
+        assert!(
+            ((time.y + time.h / 2.0) - (row.y + row.h / 2.0)).abs() < 0.51,
+            "相对时间未在组头内竖直居中：{time:?} in {row:?}"
+        );
+        // 右对齐：贴内容右缘
+        assert!(
+            ((time.x + time.w) - (row.x + row.w)).abs() < 0.01,
+            "相对时间应右对齐到 {}，实际 {}",
+            row.x + row.w,
+            time.x + time.w
+        );
+        assert!(badge.x >= name.x + name.w - 0.01, "药丸与应用名重叠");
+        assert!(time.x >= badge.x + badge.w - 0.01, "时间与药丸重叠");
+        assert!(
+            name.w > 3.0 * t.app_fs,
+            "应用名词槽被时间挤到不足 3 字宽：{}",
+            name.w
+        );
     }
 
     /// 正常态：抬头与首组头之间恰好一条 1px 分割线（id=9006），
