@@ -88,7 +88,7 @@
   .nav-item:hover { color: #3B4048; background: #E4E6EA; }
   .nav-item.sel { color: var(--accent-strong); }
   .rail .sp { flex: 1; }
-  .rver { font-family: var(--font-mono); font-size: 11.5px; color: #5F636B; }
+  .rver { font-family: var(--font-mono); font-size: 12.5px; color: #5F636B; }
 
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
 
@@ -274,7 +274,7 @@
   .cardwrap iframe { border: 0; display: block; transform-origin: 0 0; background: transparent; }
   .cardwrap.off { opacity: .55; }
   .deck-empty { text-align: center; font-size: 13.5px; color: var(--muted); line-height: 1.9; }
-  .deck-empty span { font-size: 12px; color: var(--muted-2); }
+  .deck-empty span { font-size: 12.5px; color: var(--muted-2); }
   .cap2 { margin-top: 10px; text-align: center; font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
 
   .right2 { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
@@ -296,9 +296,11 @@
   /* 位置（2026-10-24）：X/Y 各一行「轴标 + 数值 + 滑条」，取代原来的缩略图。
      量程由 desk_geometry 的虚拟桌面并集给（见 paintPos），副屏/负坐标的卡也有行程。 */
   .posctl { padding: 10px 16px 12px; }
-  .axis-row { display: grid; grid-template-columns: 26px 82px 1fr; align-items: center; gap: 11px; padding-top: 8px; }
+  /* 轴标列 26→34px：12px 时「间距」两中文字宽 25px 几乎撑满 26px 列（实测 before_geometry.json），
+     又带 .04em 字距 → 顶到数值框、显挤。13px + 去字距 + 列宽 34px 后两字有呼吸，X/Y 仍居中。 */
+  .axis-row { display: grid; grid-template-columns: 34px 82px 1fr; align-items: center; gap: 11px; padding-top: 8px; }
   .axis-row:first-child { padding-top: 1px; }
-  .axis-k { font-family: var(--font-mono); font-size: 12px; color: var(--muted); text-align: center; letter-spacing: .04em; }
+  .axis-k { font-family: var(--font-mono); font-size: 13px; color: var(--muted); text-align: center; }
   .axis-num { width: 100%; height: 30px; padding: 0 9px; font-family: var(--font-mono); font-size: 12.5px; }
   .axis-num::-webkit-inner-spin-button, .axis-num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   .axis-range { margin: 0; }   /* 全局 range 有 11px 上边距，这里靠 grid 的 gap 排 */
@@ -421,12 +423,12 @@
   .city-row .cr-sub { font-size: 12.5px; color: var(--muted); }
   .sctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
   .kbd-row { display: inline-flex; gap: 5px; align-items: center; }
-  .kbd-row .plus { font-size: 12px; line-height: 24px; color: #8A909A; }
+  .kbd-row .plus { font-size: 12.5px; line-height: 24px; color: #8A909A; }
   .kbd.caret { animation: kbdPulse 1.1s ease-in-out infinite; }
   @keyframes kbdPulse { 50% { opacity: .42; } }
   #hk-item.off .kbd-row { opacity: .45; }
   #hk-item.off .kbd { background: #F2F3F5; color: #9AA0A8; }
-  .kbd { min-width: 24px; height: 24px; padding: 0 7px; display: inline-grid; place-items: center; border-radius: 5px; border: 1px solid #DDE0E6; border-bottom-width: 2px; background: #FAFBFC; font-family: var(--font-mono); font-size: 12px; color: #323840; }
+  .kbd { min-width: 24px; height: 24px; padding: 0 7px; display: inline-grid; place-items: center; border-radius: 5px; border: 1px solid #DDE0E6; border-bottom-width: 2px; background: #FAFBFC; font-family: var(--font-mono); font-size: 12.5px; color: #323840; }
   .upd-bar { width: 172px; height: 6px; border-radius: 999px; background: #E7E9ED; overflow: hidden; }
   .upd-bar i { display: block; height: 100%; width: 0; background: var(--accent-strong); }
 
@@ -479,6 +481,31 @@
   }
   .accent-fill .btn-primary:hover { background: color-mix(in oklab, var(--accent) 88%, #000); }
   .accent-fill .switch.on { background: var(--accent); }
+
+  /* ════════════════════════════════════════════════════════════════════
+     暴力清晰度档（2026-11-18，用户拍板「得暴力，不然字发虚」）
+     真机 A/B：docs/verify/mainui-text-clarity/final_compare.png
+       开关说明区深色像素：现役 1088 → 本档 3209（+195%）。
+     依据：Chromium/Skia 灰阶栅格改不动（A/B 已证透明窗非主因）、
+       换雅黑的 hinting 收益被 Skia 吃掉（font_ab_compare.png），
+       唯一见效的杠杆 = 墨量：字号 +1px / 字重 500 / 灰字加深。
+     整档撤销 = 删掉这一段，即回到 MiSans / 400 / 12.5px / #4F5865。
+     ⚠ 代价：雅黑随 Windows 版本像素不一致；无 500 真面（落 Regular/合成）。
+     ════════════════════════════════════════════════════════════════════ */
+  :root {
+    --font-body: 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif !important;
+    --font-mono: 'Microsoft YaHei', 'Consolas', ui-monospace, monospace !important;
+    --muted: #39414D !important;
+    --muted-2: #4F5865 !important;
+  }
+  body { font-size: 15px !important; font-weight: 500 !important; }
+  button { font-weight: 500 !important; }
+  .top h1 { font-size: 18px !important; }
+  .top .sub { font-size: 14.5px !important; font-weight: 500 !important; }
+  .btn, .input, .opt { font-size: 14.5px !important; }
+  .sitem .meta, .tpl-body p, .chips-label span, .snote { font-size: 13.5px !important; font-weight: 500 !important; }
+  .prow .hint, .dinfo .meta, .city-row .cr-sub { font-size: 13.5px !important; font-weight: 500 !important; }
+  .axis-k, .axis-num, .cap2, .kbd, .rver { font-size: 13.5px !important; }
 </style>
 </head>
 <body>
