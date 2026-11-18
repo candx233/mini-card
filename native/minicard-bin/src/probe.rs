@@ -991,3 +991,230 @@ pub fn menu_sheet(
     crate::menu::paint(g, te, pal, &items, hover, 208.0, 108.0, None, 0.0)
 }
 
+// ── 通知卡动效探针：合成时间轴 + `--dump-seq` 逐帧落盘 ────────────────────
+//
+// `--probe notify` 只出**一道**静止样张；这条把「事件 → 动效」摊成一串**确定性帧**：
+// 第 n 帧的 `now = t0 + n × frame_ms`，与墙钟无关（动效求值本来就全走 `Instant`），
+// 所以同一份代码每次出同一组帧，可以逐帧抠像素、算进度，不靠录屏也不受机器负载影响。
+//
+// 用法（240×300、2× 超采样、60fps 合成时间轴）：
+//   minicard-bin.exe --probe notify-motion --w 240 --h 300 --ss 2 ^
+//     --dump-seq docs\verify\_notify_motion_20261116\arrive --exit-after 2200
+//
+// 环境变量：
+//   MC_NOTIFY_MOTION    arrive | arrive-group | remove | scroll | state | clear（默认 arrive）
+//   MC_NOTIFY_FRAME_MS  每帧步长（默认 1000/60 ≈ 16.667）
+//   MC_NOTIFY_PRE_MS    事件发生的合成时刻（默认 200；此前都是静止帧，用来当基线）
+
+struct NMotion {
+    scenario: String,
+    t0: std::time::Instant,
+    frame_ms: f32,
+    at_ms: f32,
+    fired: bool,
+    motion: minicard_cards::notify::Motion,
+    before: minicard_core::notify::NotifySnapshot,
+    after: minicard_core::notify::NotifySnapshot,
+    remove_id: u32,
+}
+
+static NMOTION: std::sync::Mutex<Option<NMotion>> = std::sync::Mutex::new(None);
+
+/// 固定样张（2 组 3 条）：微信 2 条 + 邮件 1 条，与 `--probe notify` 同口径。
+fn nm_base(now_ms: u64) -> Vec<minicard_core::notify::NotifyItem> {
+    use minicard_core::notify::NotifyItem;
+    let mk = |id: u32, app: &str, aumid: &str, title: &str, body: &str, ago_ms: u64, unread: bool| NotifyItem {
+        id,
+        app: app.into(),
+        aumid: aumid.into(),
+        title: title.into(),
+        body: body.into(),
+        created_ms: now_ms.saturating_sub(ago_ms),
+        unread,
+    };
+    vec![
+        mk(1101, "微信", "WeChat", "张三：晚上一起吃饭吗？", "在吗？在吗？在吗？", 90_000, true),
+        mk(1102, "微信", "WeChat", "设计组", "新卡片稿发群里了，看下", 3 * 60_000, false),
+        mk(1201, "邮件", "Mail", "GitHub", "新的 issue 需要处理 · repos…", 12 * 60_000, false),
+    ]
+}
+
+/// 溢出样张（6 组 × 2 条 = 12 条）：用来拍连续滚动。
+fn nm_many(now_ms: u64) -> Vec<minicard_core::notify::NotifyItem> {
+    use minicard_core::notify::NotifyItem;
+    let apps = [
+        ("微信", "WeChat"),
+        ("邮件", "Mail"),
+        ("QQ", "QQ"),
+        ("记事本", "Notepad"),
+        ("截图工具", "ScreenSketch"),
+        ("资源管理器", "Explorer"),
+    ];
+    let mut out = Vec::new();
+    for (g, (app, aumid)) in apps.iter().enumerate() {
+        for j in 0..2u32 {
+            out.push(NotifyItem {
+                id: 3000 + g as u32 * 10 + j,
+                app: (*app).into(),
+                aumid: (*aumid).into(),
+                title: format!("{app} 通知 {}", j + 1),
+                body: "这是一条用于动效取证的假正文，长度足够触发省略号".into(),
+                created_ms: now_ms.saturating_sub((g as u64 * 10 + j as u64) * 60_000),
+                unread: j == 0,
+            });
+        }
+    }
+    out
+}
+
+impl NMotion {
+    fn new() -> Self {
+        use minicard_core::notify::{NotifyAccess, NotifySnapshot};
+        let scenario = std::env::var("MC_NOTIFY_MOTION").unwrap_or_else(|_| "arrive".into());
+        let frame_ms: f32 = std::env::var("MC_NOTIFY_FRAME_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000.0 / 60.0);
+        let at_ms: f32 = std::env::var("MC_NOTIFY_PRE_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(200.0);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut before = nm_base(now_ms);
+        let mut after = before.clone();
+        let mut remove_id = 0u32;
+        match scenario.as_str() {
+            "arrive" => after.insert(
+                0,
+                minicard_core::notify::NotifyItem {
+                    id: 1100,
+                    app: "微信".into(),
+                    aumid: "WeChat".into(),
+                    title: "李四：会议改到 3 点".into(),
+                    body: "记得带电脑 · 会议室 B203".into(),
+                    created_ms: now_ms,
+                    unread: true,
+                },
+            ),
+            "arrive-group" => after.insert(
+                0,
+                minicard_core::notify::NotifyItem {
+                    id: 1301,
+                    app: "设计组".into(),
+                    aumid: "Designer".into(),
+                    title: "刘一：卡片稿 v3 已上传".into(),
+                    body: "下次评审前看一遍".into(),
+                    created_ms: now_ms,
+                    unread: true,
+                },
+            ),
+            "remove" => {
+                remove_id = 1101;
+                after.retain(|i| i.id != 1101);
+            }
+            "scroll" => {
+                before = nm_many(now_ms);
+                after = before.clone();
+            }
+            "state" => after.clear(),
+            "clear" => {}
+            "clear-all" => {
+                // 快照故意保持原样：真机上 Windows 异步删除 ≤1.5s 才收敛，
+                // 用旧快照验证 suppress 压住 + 本地塌缩不会闪回。
+                after = before.clone();
+            }
+            other => {
+                minicard_shell::mlog!("MC_NOTIFY_MOTION={other} 不认识，按 arrive 出图");
+                after.insert(
+                    0,
+                    minicard_core::notify::NotifyItem {
+                        id: 1100,
+                        app: "微信".into(),
+                        aumid: "WeChat".into(),
+                        title: "李四：会议改到 3 点".into(),
+                        body: "记得带电脑 · 会议室 B203".into(),
+                        created_ms: now_ms,
+                        unread: true,
+                    },
+                );
+            }
+        }
+        minicard_shell::mlog!(
+            "notify-motion: scenario={} frame_ms={:.2} at={:.0}ms items {}→{}",
+            scenario,
+            frame_ms,
+            at_ms,
+            before.len(),
+            after.len()
+        );
+        let at = now_ms + at_ms as u64;
+        Self {
+            scenario,
+            t0: std::time::Instant::now(),
+            frame_ms,
+            at_ms,
+            fired: false,
+            motion: minicard_cards::notify::Motion::new(),
+            before: NotifySnapshot { access: NotifyAccess::Allowed, items: before, at_ms: now_ms },
+            after: NotifySnapshot { access: NotifyAccess::Allowed, items: after, at_ms: at },
+            remove_id,
+        }
+    }
+}
+
+/// 通知卡动效探针：每调一次画一帧（配 `--dump-seq` 就是逐帧序列）。
+pub fn notify_motion_sheet(
+    g: &Gfx,
+    te: &TextEngine,
+    pal: &minicard_draw::color::Palette,
+    frame: u32,
+    w: f32,
+    h: f32,
+) -> Result<()> {
+    use minicard_cards::notify::{self, Tokens};
+
+    let mut guard = NMOTION.lock().unwrap_or_else(|e| e.into_inner());
+    let tl = guard.get_or_insert_with(NMotion::new);
+    let now = tl.t0 + std::time::Duration::from_secs_f64(frame as f64 * tl.frame_ms as f64 / 1000.0);
+    let t_ms = frame as f32 * tl.frame_ms;
+    let t = Tokens::notify(w, h);
+    // clear：事件帧才切到 armed（第一次点「清除」）；
+    // clear-all：事件前 armed（用户已确认），事件帧回落到「清除」并触发整列退场。
+    let armed = (tl.scenario == "clear" && tl.fired)
+        || (tl.scenario == "clear-all" && t_ms < tl.at_ms);
+    let opts = notify::Options { clear_armed: armed, ..Default::default() };
+
+    if !tl.fired && t_ms >= tl.at_ms {
+        tl.fired = true;
+        match tl.scenario.as_str() {
+            "remove" => tl.motion.mark_removed(tl.remove_id, now),
+            "clear-all" => tl.motion.mark_cleared(&tl.after.items, now),
+            "scroll" => {
+                let max = notify::max_scroll_px(&t, Some(&tl.after), opts, &tl.motion);
+                tl.motion.scroll_by(notify::wheel_step_px(&t), max, now);
+            }
+            _ => {}
+        }
+    }
+
+    let snap = if t_ms >= tl.at_ms { &tl.after } else { &tl.before };
+    let icons: std::collections::HashMap<String, ID2D1Bitmap1> = std::collections::HashMap::new();
+    let out = notify::paint(g, te, pal, &t, Some(snap), &icons, opts, &mut tl.motion, now, None);
+    // 取证钩子：MC_NOTIFY_DUMP_FRAME=13 时把这一帧的布局树打进日志（核对组头/行高）
+    if std::env::var("MC_NOTIFY_DUMP_FRAME")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        == Some(frame)
+    {
+        let tr = notify::tree_hook(&t, Some(snap), opts, &tl.motion, now);
+        let mut m: &TextEngine = te;
+        let placed = minicard_draw::layout::layout(&tr, (t.w, t.h), &mut m);
+        notify::dump_layout(&placed, 0);
+    }
+    out
+}
+

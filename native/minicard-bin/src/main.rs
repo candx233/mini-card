@@ -314,7 +314,7 @@ impl App {
 
     fn animating(&self) -> bool {
         // 连拍探针要按 60fps 跑满（否则帧循环停在等消息上、只出零星几帧）
-        if self.probe.as_deref() == Some("motion") {
+        if matches!(self.probe.as_deref(), Some("motion") | Some("notify-motion")) {
             return true;
         }
         let now = Instant::now();
@@ -326,7 +326,7 @@ impl App {
         if let Some(name) = self.probe.clone() {
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
-                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar" || name == "dock" || name == "cal-flip" || name == "menu" || name == "menu-hover" || name == "notify" || name == "notify-live"
+                || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar" || name == "dock" || name == "cal-flip" || name == "menu" || name == "menu-hover" || name == "notify" || name == "notify-live" || name == "notify-motion"
             {
                 let r = match name.as_str() {
                     "shapes" => probe::shapes(&self.gfx, &self.te, self.tokens.w, self.tokens.h),
@@ -383,6 +383,14 @@ impl App {
                         &self.te,
                         &self.pal,
                         self.debug_layout,
+                        self.tokens.w,
+                        self.tokens.h,
+                    ),
+                    "notify-motion" => probe::notify_motion_sheet(
+                        &self.gfx,
+                        &self.te,
+                        &self.pal,
+                        self.frames,
                         self.tokens.w,
                         self.tokens.h,
                     ),
@@ -693,6 +701,7 @@ fn main() -> Result<()> {
             Some("calendar") => live::radius_of(minicard_core::config::CardKind::Calendar, args.w, args.h),
             Some("notify") => live::radius_of(minicard_core::config::CardKind::Notify, args.w, args.h),
             Some("notify-live") => live::radius_of(minicard_core::config::CardKind::Notify, args.w, args.h),
+            Some("notify-motion") => live::radius_of(minicard_core::config::CardKind::Notify, args.w, args.h),
             Some("dock") => minicard_cards::dock::RADIUS,
             _ => tokens.radius,
         };

@@ -3081,6 +3081,9 @@ fn click(
                         let armed = clear_armed
                             .is_some_and(|t| t.elapsed() < Duration::from_secs(3));
                         if armed {
+                            // 立即本地退场：所有行同一帧进入 180ms 塌缩 + suppress（不等
+                            // Windows 异步删除 / 下一次快照收敛的 ≤1.5s，见 AC1）
+                            motion.mark_cleared(&snap.items, Instant::now());
                             // Windows 没有可靠的 ClearNotifications（0x80070490）→ 逐条 Remove
                             let svc = notify_service();
                             for it in &snap.items {

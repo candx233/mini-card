@@ -19,7 +19,7 @@
 //! 尺寸口径：BASE = 240×180（k = 1）算字号；双行骨架按 240×240 排版，字号不随大卡放大。
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use minicard_core::notify::{relative_time, NotifyAccess, NotifyItem, NotifySnapshot};
 use minicard_draw::color::Palette;
@@ -353,12 +353,19 @@ pub fn capacity(t: &Tokens) -> (usize, usize) {
 const ENTER_ROW_MS: f32 = 180.0;
 /// 新组组头入场（ms）
 const ENTER_GROUP_MS: f32 = 120.0;
-/// 本地删除的退出塌缩（ms）
+/// 本地删除 / 清除的退场时长（ms）
 const EXIT_MS: f32 = 180.0;
+/// 纯右滑退场（单条删除 / 清除全部）：整段只做水平平移，满高、满不透明；
+/// 滑出卡外的那一帧直接塌掉（下方行瞬间顶上），**没有独立的「收高度补位」尾动画**。
+/// 配额挤出等数据驱动的退出走旧的同拍塌缩（见 ExitRow.slide），不受此形态影响。
+
 /// 滚轮连续滚动补间（ms）
 const SCROLL_MS: f32 = 180.0;
 /// 清除 / 确认两段文字交叉淡化（ms）
 const CLEAR_SWAP_MS: f32 = 120.0;
+/// 清除全部时相邻两行右滑出场的错开间隔（ms）：自下而上，第 i 行（i=0 最新/最顶）
+/// 的 t0 = now + (n-1-i)×60ms —— 最底（i=n-1）先滑、最顶（i=0）最后。
+const CLEAR_STAGGER_MS: f32 = 60.0;
 /// 空 / 授权 / 不可用态内容淡入（ms）
 const STATE_FADE_MS: f32 = 160.0;
 /// 行 hover 底色 / × 淡入淡出（ms）
@@ -374,6 +381,42 @@ fn ease_out_quart(u: f32) -> f32 {
     let u = u.clamp(0.0, 1.0);
     let inv = 1.0 - u;
     1.0 - inv * inv * inv * inv
+}
+
+/// 标准减速曲线 `cubic-bezier(0.4, 0, 0.2, 1)`（Material / Fluent 的 standard 同款）：
+/// 起步软、中段快、尾段长减速。**行高 / 位移 / 组头高度**用它——
+/// `easeOutQuart` 在 180ms 的第一帧就吃掉 32% 距离（38px 的行一帧跳 12px），
+/// 之后 8 帧只爬剩下的 4%，看起来是「弹一下再挪」，不是「滑进去」。
+/// 这条第 1 帧只走 ~2%、半程 ~78%，位移摊在整段时间里。
+fn ease_standard(u: f32) -> f32 {
+    const X1: f32 = 0.4;
+    const Y1: f32 = 0.0;
+    const X2: f32 = 0.2;
+    const Y2: f32 = 1.0;
+    let u = u.clamp(0.0, 1.0);
+    if u <= 0.0 {
+        return 0.0;
+    }
+    if u >= 1.0 {
+        return 1.0;
+    }
+    let cx = 3.0 * X1;
+    let bx = 3.0 * (X2 - X1) - cx;
+    let ax = 1.0 - cx - bx;
+    let cy = 3.0 * Y1;
+    let by = 3.0 * (Y2 - Y1) - cy;
+    let ay = 1.0 - cy - by;
+    // 牛顿法解 x(t) = u（单调区间内 6~8 次足够收敛到 1e-5）
+    let mut t = u;
+    for _ in 0..8 {
+        let x = ((ax * t + bx) * t + cx) * t - u;
+        let dx = (3.0 * ax * t + 2.0 * bx) * t + cx;
+        if dx.abs() < 1e-6 {
+            break;
+        }
+        t = (t - x / dx).clamp(0.0, 1.0);
+    }
+    ((ay * t + by) * t + cy) * t
 }
 
 /// 线性进度 0..1（曲线在调用处再套）。
@@ -404,10 +447,14 @@ impl HoverTween {
     }
 }
 
-/// 正在退出的条目：留着数据才能在 180ms 里把这一行画成「高度塌缩 + 淡出」。
+/// 正在退出的条目：留着数据才能在 180ms 里把这一行画完退场。
 struct ExitRow {
     item: NotifyItem,
     t0: Instant,
+    /// true = 纯水平右滑（单条删除 / 清除全部）：满高满透明滑出后再收空位；
+    /// false = 旧的同拍塌缩（配额挤出 / 系统侧消失）：必须与入场行一增一减严格抵消，
+    /// 否则整组高度会在交换中途鼓起来、下面那组先跳一下。
+    slide: bool,
 }
 
 /// 通知卡动效状态机（B 案）。live 只持有一个，跨帧传引用：
@@ -435,6 +482,12 @@ pub struct Motion {
     suppressed: HashMap<u32, Instant>,
     /// 正在退出（塌缩）的条目：id → (数据, 起始时刻)
     exiting: HashMap<u32, ExitRow>,
+    /// 清除确认时各组组头的右滑起点（组 key → t0，取本组最后一条的错开 t0）。
+    /// 记在 Motion 而非每帧从「整组都在退」重算：清除窗内同组来了新消息时，
+    /// 组头仍按原 t0 滑完，不会 dx 瞬移回 0 + 重新淡入（闪烁）。
+    group_header_exit: HashMap<String, Instant>,
+    /// 上一帧**进过配额**的条目 id（被新行顶出去的旧行要从这里比对出来，再走塌缩）
+    selected: HashSet<u32>,
     /// `mark_removed` 早于 `observe`（拿不到条目数据）时的兜底：下一次 observe 补上
     exit_pending: HashMap<u32, Instant>,
     /// hover 补间：条目 id → 透明度（120ms）
@@ -466,6 +519,8 @@ impl Motion {
             group_enter: HashMap::new(),
             suppressed: HashMap::new(),
             exiting: HashMap::new(),
+            group_header_exit: HashMap::new(),
+            selected: HashSet::new(),
             exit_pending: HashMap::new(),
             hover: HashMap::new(),
             clear_armed: false,
@@ -533,7 +588,7 @@ impl Motion {
                 self.exit_pending.iter().map(|(&k, &v)| (k, v)).collect();
             for (id, t0) in pending {
                 if let Some(it) = items.iter().find(|i| i.id == id) {
-                    self.exiting.entry(id).or_insert(ExitRow { item: it.clone(), t0 });
+                    self.exiting.entry(id).or_insert(ExitRow { item: it.clone(), t0, slide: true });
                     self.exit_pending.remove(&id);
                 }
             }
@@ -561,15 +616,24 @@ impl Motion {
             }
         }
         for (id, item) in vanished {
-            self.exiting.insert(id, ExitRow { item, t0: now });
+            self.exiting.insert(id, ExitRow { item, t0: now, slide: false });
             self.enter.remove(&id);
         }
 
         // ⑥ 新组组头 → 120ms 入场（组消失后再出现也要重新入场）
+        // 清除退场期：整组条目都被 suppress，但退出行还在 180ms 右滑。若此刻同组来了新消息，
+        // 不能把该组当「新组」重播入场（组头会 dx 瞬移回 0 + 重新淡入，闪烁）。把还在退场的
+        // 行所属组 key 也算进 keys，保住 seen_groups，让新消息在同一组里正常入场。
         let keys: HashSet<String> = items
             .iter()
             .filter(|i| !self.suppressed.contains_key(&i.id))
             .map(group_key)
+            .chain(
+                self.exiting
+                    .values()
+                    .filter(|e| ms_since(now, e.t0) < EXIT_MS)
+                    .map(|e| group_key(&e.item)),
+            )
             .collect();
         self.seen_groups.retain(|k| keys.contains(k));
         for k in &keys {
@@ -690,11 +754,91 @@ impl Motion {
         self.suppressed.insert(id, now);
         self.enter.remove(&id);
         if let Some(item) = self.last_items.iter().find(|i| i.id == id).cloned() {
-            self.exiting.insert(id, ExitRow { item, t0: now });
+            self.exiting.insert(id, ExitRow { item, t0: now, slide: true });
         } else {
             // 还没 observe 过这一版：先记下，下次 observe 从快照里补条目数据
             self.exit_pending.insert(id, now);
         }
+    }
+
+    /// 清除确认：所有当前可见行**立即**本地退场，不等 Windows 异步删除 / 下一次快照收敛
+    /// （≤1.5s）。先放进 suppress（快照没更新前行不会闪回、命中也不认），再放进 exiting
+    /// 走右滑出场（整行全程满高满不透明水平平移出卡外、不淡出；滑完瞬间塌掉、下方立即补位，
+    /// 没有独立的收高度补位尾动画）。
+    ///
+    /// 「一个个」用**未来 t0** 实现，`linear_progress` 在到点前恒为 0（行原地不动），
+    /// 到点后才滑出。`animating` / `prune` 对未来 t0 的 `ms_since` 饱和为 0，因此自动覆盖
+    /// 整段错开窗口，无需额外字段。行数据取 `items`（live 传当前快照），这样即使 `last_items`
+    /// 还是旧版也能拿到正确的时间序位置。
+    ///
+    /// **顺序：自下而上**（用户拍板）。items 按新→旧排列（i=0 最新=视觉最上），
+    /// 第 i 行的错开序号 = n-1-i —— 最旧（视觉最底）序号 0 → t0=now 先滑，最新（最顶）
+    /// 序号 n-1 → t0=now+(n-1)×60ms 最后滑。每行都是整段满高右滑、滑完瞬间补位（无尾巴）。
+    ///
+    /// 快照收敛后 `observe` 把 id 从 suppress 摘掉，但退出动画继续跑完，避免行闪一下消失；
+    /// >2s 没收敛则按既有 suppress 回滚机制重放入场。
+    pub fn mark_cleared(&mut self, items: &[NotifyItem], now: Instant) {
+        if items.is_empty() {
+            return; // 空快照无可退场内容，别白烧错开窗口 + 60fps 续帧
+        }
+        let n = items.len();
+        for (i, it) in items.iter().enumerate() {
+            if self.suppressed.contains_key(&it.id) {
+                continue;
+            }
+            self.suppressed.insert(it.id, now);
+            self.enter.remove(&it.id);
+            // 自下而上：i=0（最新/最顶）最后，i=n-1（最旧/最底）最先
+            let order = n - 1 - i;
+            let start = now + Duration::from_secs_f32(order as f32 * CLEAR_STAGGER_MS / 1000.0);
+            // 组头起点 = 本组最后一条（snapshot 下标最大）的错开时刻；记在 Motion 里，
+            // 清除窗内同组来了新消息也不重算（避免组头 dx 瞬移 + 重新淡入）。
+            let key = group_key(it);
+            let last = self.group_header_exit.entry(key).or_insert(start);
+            if start > *last {
+                *last = start;
+            }
+            self.exiting.insert(it.id, ExitRow { item: it.clone(), t0: start, slide: true });
+        }
+    }
+
+    /// 配额挤出的行：上一帧进了可见配额、这一帧被新行顶掉的条目（还在快照里、只是排不进
+    /// `per_app` 配额）。它们必须走和删除同一条 180ms 塌缩——否则会在入场那一帧瞬消，
+    /// 整列先上跳一格（38 DIP）再随新行长高滑回来。`--probe notify-motion` 实测过这个抖动。
+    ///
+    /// 返回 `true` 表示这次新认领了退出行，调用方要重算一次 `build_groups`。
+    fn adopt_squeezed(
+        &mut self,
+        groups: &[GroupView],
+        snap: Option<&NotifySnapshot>,
+        now: Instant,
+    ) -> bool {
+        let Some(snap) = snap else {
+            self.selected.clear();
+            return false;
+        };
+        let mut selected: HashSet<u32> = HashSet::new();
+        for g in groups {
+            for r in &g.rows {
+                if r.exit.is_none() {
+                    selected.insert(r.uid);
+                }
+            }
+        }
+        let mut changed = false;
+        for id in self.selected.difference(&selected).copied().collect::<Vec<u32>>() {
+            if self.exiting.contains_key(&id) || self.suppressed.contains_key(&id) {
+                continue;
+            }
+            let Some(item) = snap.items.iter().find(|i| i.id == id).cloned() else {
+                continue;
+            };
+            self.enter.remove(&id);
+            self.exiting.insert(id, ExitRow { item, t0: now, slide: false });
+            changed = true;
+        }
+        self.selected = selected;
+        changed
     }
 
     /// 清除按钮「清除 ↔ 确认」状态变化（live 在 3s 确认窗开关时调用；paint 也会按
@@ -781,6 +925,21 @@ impl Motion {
         self.group_enter
             .retain(|_, t0| ms_since(now, *t0) < ENTER_GROUP_MS);
         self.exiting.retain(|_, e| ms_since(now, e.t0) < EXIT_MS);
+        // 组头退场记录保留到「最后一个错开 t0 + EXIT_MS」之后；同组新消息在窗内到达也不会
+        // 让组头闪回。到点时若该组仍有活动行（seen_groups 里），让它走一次正常 120ms 组头
+        // 入场淡入，避免组头从「已滑出（alpha≈0）」一帧满血复位到 alpha=1 的突兀跳变。
+        let expired: Vec<String> = self
+            .group_header_exit
+            .iter()
+            .filter(|(_, t0)| ms_since(now, **t0) >= EXIT_MS)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in expired {
+            self.group_header_exit.remove(&key);
+            if self.seen_groups.contains(&key) {
+                self.group_enter.insert(key, now);
+            }
+        }
         self.exit_pending.retain(|_, t0| ms_since(now, *t0) < SUPPRESS_MS);
         self.hover.retain(|_, h| h.to > 0.0 || h.active(now));
         if self
@@ -886,14 +1045,17 @@ enum RowRef {
     Exit(u32),
 }
 
+#[derive(Clone, Copy)]
 struct RowView {
     r: RowRef,
     /// 条目 id（hover / 命中都按它对齐）
     uid: u32,
     /// 入场起始时刻（180ms）
     enter: Option<Instant>,
-    /// 退出起始时刻（180ms 塌缩）
+    /// 退出起始时刻（180ms）
     exit: Option<Instant>,
+    /// 退出形态：纯右滑（单条删除 / 清除全部） vs 同拍塌缩（配额挤出 / 系统消失）
+    exit_slide: bool,
 }
 
 /// 视口里的一组：组头 + 若干行（组顺序 / 行配额与旧 `group_items_limit` 同口径）。
@@ -904,6 +1066,12 @@ struct GroupView {
     newest_ms: u64,
     total: usize,
     rows: Vec<RowView>,
+    /// 组头（应用图标 + 名字）的右滑退场起点：取本组**最后一条**退出行的 t0。
+    /// 只有整组所有行都在退出时才 Some —— 单条删除时组还在，组头不动。
+    /// 这样组头随本组最后一条消息一起滑出，不会「消息没了、图标名字留到最后才清」。
+    header_exit: Option<Instant>,
+    /// 组头退场形态：随本组最后一条（slide）一起纯右滑；配额挤出等则同拍塌缩。
+    header_exit_slide: bool,
 }
 
 fn resolve_row<'a>(
@@ -933,6 +1101,7 @@ fn build_groups(
         r: RowRef,
         enter: Option<Instant>,
         exit: Option<Instant>,
+        exit_slide: bool,
     }
 
     let mut list: Vec<Entry> = Vec::new();
@@ -940,12 +1109,16 @@ fn build_groups(
         if motion.suppressed.contains_key(&it.id) {
             continue;
         }
+        // 正在退场的行（删除 / 被配额挤出）：即使还在快照里也按退出行画
+        let ex = motion.exiting.get(&it.id);
+        let exit = ex.map(|e| e.t0);
         list.push(Entry {
             uid: it.id,
             created: it.created_ms,
-            r: RowRef::Snap(idx),
+            r: if exit.is_some() { RowRef::Exit(it.id) } else { RowRef::Snap(idx) },
             enter: motion.enter.get(&it.id).copied(),
-            exit: None,
+            exit,
+            exit_slide: ex.map(|e| e.slide).unwrap_or(false),
         });
     }
 
@@ -967,6 +1140,7 @@ fn build_groups(
             r: RowRef::Exit(id),
             enter: None,
             exit: Some(e.t0),
+            exit_slide: e.slide,
         };
         let pos = if ent.created == 0 {
             None
@@ -1000,6 +1174,7 @@ fn build_groups(
             uid: e.uid,
             enter: e.enter,
             exit: e.exit,
+            exit_slide: e.exit_slide,
         };
         match accs.get_mut(&key) {
             Some(acc) => {
@@ -1060,56 +1235,107 @@ fn build_groups(
         .take(n)
         .zip(take)
         .filter(|(_, take)| *take > 0)
-        .map(|(mut acc, take)| {
-            acc.rows.truncate(take);
+        .map(|(acc, take)| {
+            // 配额内的行 + 配额外**正在塌缩**的行（被新行顶掉的旧行）：后者留在末尾把
+            // 180ms 走完，整组高度在交换期间保持恒定，下面的组不会被顶得先上跳再回落。
+            let mut rows: Vec<RowView> = acc.rows.iter().take(take).copied().collect();
+            for r in acc.rows.iter().skip(take) {
+                if r.exit.is_some() {
+                    rows.push(*r);
+                }
+            }
+            // 组头退场：本组**所有**可见行都在退出时，组头随「最后一条（错开最晚）」一起右滑。
+            // 用最大 t0（错开最晚 = 视觉最末那条）；单条删除仍有活动行 → 组头保持不动。
+            // 注意退场行按 created_ms 从新到旧排序，视觉上第一条在最上，错开 t0 最小。
+            // 组头退场：优先用 Motion 里记录的 clear 起点（清除窗内来了新消息也不变，避免闪回）；
+            // 否则（单条删除删光了最后一行）按「整组都在退 → 取最大 t0」现算。
+            let recorded = motion.group_header_exit.get(&acc.key).copied();
+            let header_exit = recorded.or_else(|| {
+                if !rows.is_empty() && rows.iter().all(|r| r.exit.is_some()) {
+                    rows.iter().filter_map(|r| r.exit).max()
+                } else {
+                    None
+                }
+            });
+            // Motion 里记录的 clear 起点一律是纯右滑；现算的（单删最后一条 / 系统消失）
+            // 则跟本组退出行的形态：全是 slide 才让组头也 slide，否则同拍塌缩。
+            let header_exit_slide = recorded.is_some()
+                || (!rows.is_empty() && rows.iter().all(|r| r.exit.is_some() && r.exit_slide));
             GroupView {
                 key: acc.key,
                 app: acc.app,
                 aumid: acc.aumid,
                 newest_ms: acc.newest_ms,
                 total: acc.total,
-                rows: acc.rows,
+                rows,
+                header_exit,
+                header_exit_slide,
             }
         })
         .collect()
 }
 
-/// 一行的瞬时几何：高度 / 透明度 / 位移 / 收尾时的负底边距。
-/// 入场：0 → item_h、-4 → 0；退出：item_h → 0，同时底边距 0 → -item_gap ——
-/// 这样最后一帧的「行高 + 间距」和被删掉后的布局严格对齐（不会在 180ms 收尾跳 3px），
-/// 而且 `measure()` 对容器只看子节点高度，底边距能让下一组的 y 跟着连续上移。
+/// 一行的瞬时几何：高度 / 透明度 / 水平位移 / 垂直位移 / 收尾时的负底边距。
+/// 入场：h 0→item_h、alpha 0→1、dy -4→0；
+/// 退出（右滑）：dx 0→卡片宽（整行全程满高、满不透明地滑出卡外）；滑出结束的那一帧
+/// h 直接归 0、底边距直接 -item_gap（下方瞬间补位，不播补位动画）。
+/// alpha 全程为 1：观感是「一根整行平移出去后消失」，不是淡出、也不是缩高擦掉。
 #[derive(Clone, Copy)]
 struct RowAnim {
     h: f32,
     alpha: f32,
+    dx: f32,
     dy: f32,
     mar_b: f32,
 }
 
 fn row_anim(t: &Tokens, row: &RowView, now: Instant) -> RowAnim {
     if let Some(t0) = row.exit {
-        let e = 1.0 - ease_out_quart(linear_progress(now, t0, EXIT_MS));
+        let p = linear_progress(now, t0, EXIT_MS);
+        if row.exit_slide {
+            // 纯右滑（单条删除 / 清除全部）：整段满高、满不透明，只把整行水平平移出卡外。
+            // 滑出结束（p>=1）的那一帧才直接塌掉 h + 吃行间距，下方瞬间补位——不再有
+            // 独立的「收高度补位」尾动画。alpha 全程为 1（不淡出）。
+            let e = ease_standard(p);
+            let done = p >= 1.0;
+            return RowAnim {
+                h: if done { 0.0 } else { t.item_h },
+                alpha: 1.0,
+                dx: t.w * e,
+                dy: 0.0,
+                mar_b: if done { -t.item_gap } else { 0.0 },
+            };
+        }
+        // 同拍塌缩（配额挤出 / 系统侧消失）：h 与 alpha 用 e（和入场行增长同曲线），
+        // 保证一增一减严格抵消，下面那组不会先跳再滑。这类行不水平移动。
+        let e = ease_standard(p);
         return RowAnim {
-            h: t.item_h * e,
-            alpha: e,
+            h: t.item_h * (1.0 - e),
+            alpha: 1.0 - e,
+            dx: 0.0,
             dy: 0.0,
-            mar_b: -t.item_gap * (1.0 - e),
+            mar_b: -t.item_gap * e,
         };
     }
     if let Some(t0) = row.enter {
-        let e = ease_out_quart(linear_progress(now, t0, ENTER_ROW_MS));
+        let e = ease_standard(linear_progress(now, t0, ENTER_ROW_MS));
         if e < 1.0 {
             return RowAnim {
                 h: t.item_h * e,
                 alpha: e,
+                dx: 0.0,
                 dy: -ENTER_DY * (1.0 - e),
-                mar_b: 0.0,
+                // 入场行也吃掉自己的行间距：h 与 (-gap) 一起从 0 长到 item_h，组高随 e 线性
+                // 变化。少了这一项，插入行会在第一帧多顶出一个 gap（3px）——被配额顶掉的
+                // 旧行同时塌缩时就会看到整列先上跳 3px 再落回。
+                mar_b: -t.item_gap * (1.0 - e),
             };
         }
     }
     RowAnim {
         h: t.item_h,
         alpha: 1.0,
+        dx: 0.0,
         dy: 0.0,
         mar_b: 0.0,
     }
@@ -1117,9 +1343,39 @@ fn row_anim(t: &Tokens, row: &RowView, now: Instant) -> RowAnim {
 
 fn group_enter_alpha(motion: &Motion, key: &str, now: Instant) -> f32 {
     match motion.group_enter.get(key) {
-        Some(&t0) => ease_out_quart(linear_progress(now, t0, ENTER_GROUP_MS)),
+        Some(&t0) => ease_standard(linear_progress(now, t0, ENTER_GROUP_MS)),
         None => 1.0,
     }
+}
+
+/// 组头（应用图标 + 名字）的瞬时几何：入场缩放 + 退场右滑，二者相乘。
+/// 退场用本组最后一条消息的 t0（错开最晚）：图标/名字和最后一条消息同帧滑出，
+/// 不再「消息先没、图标名字留到最后」。单条删除时 header_exit=None → 只走入场。
+struct HeaderAnim {
+    h: f32,     // 0..1，组头高度/子节点高度的比例（入场 ge × 退场 (1-e)）
+    alpha: f32, // 0..1
+    dx: f32,    // 右滑位移 0→卡片宽
+}
+
+fn header_anim(t: &Tokens, vg: &GroupView, motion: &Motion, now: Instant) -> HeaderAnim {
+    let ge = group_enter_alpha(motion, &vg.key, now);
+    let (exit_scale, alpha_scale, dx) = match vg.header_exit {
+        Some(t0) => {
+            let p = linear_progress(now, t0, EXIT_MS);
+            if vg.header_exit_slide {
+                // 纯右滑：整段满高满透明只水平平移；滑出结束那一帧直接收高（下方瞬间补位），
+                // 不播「收高度补位」的尾动画。
+                let e = ease_standard(p);
+                (if p >= 1.0 { 0.0 } else { 1.0 }, 1.0, t.w * e)
+            } else {
+                // 同拍塌缩（配额挤出等）：和以前一样高度/透明度一起收，不平移。
+                let e = ease_standard(p);
+                (1.0 - e, 1.0 - e, 0.0)
+            }
+        }
+        None => (1.0, 1.0, 0.0),
+    };
+    HeaderAnim { h: ge * exit_scale, alpha: ge * alpha_scale, dx }
 }
 
 fn alpha_color(c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
@@ -1138,7 +1394,15 @@ pub fn paint(
     now: Instant,
     glass: Option<(&ID2D1Bitmap1, D2D_RECT_F)>,
 ) -> Result<()> {
-    let state = display_state(snap);
+    let mut state = display_state(snap);
+    // 快照在错开窗内提前收敛到空时，若立刻切 Empty，tree() 会画空态占位、把还在右滑的
+    // 尾部行整帧抹掉（弹出而非滑出）。只要还有退出行在动，就暂缓进空态，让它们滑完；
+    // 下一帧退出清空后自然切 Empty → 空态 160ms 从 0 淡入，收尾干净。
+    if state == CardState::Empty
+        && motion.exiting.values().any(|e| ms_since(now, e.t0) < EXIT_MS)
+    {
+        state = CardState::Normal;
+    }
     // 数据 diff / 四态 / suppress 收敛都在这里收口（live 提前调用 observe 也幂等）
     motion.observe(snap, state, now);
     motion.set_clear_armed(opts.clear_armed, now);
@@ -1150,6 +1414,13 @@ pub fn paint(
     motion.scroll = scroll;
 
     let groups = build_groups(snap, opts, motion, now);
+    // 被配额顶掉的旧行：走同一条 180ms 塌缩（不然入场那一帧整列先上跳一格再滑回来）。
+    // 认领到新退出行时要重算一次分组，让它在**这一帧**就以塌缩态出现。
+    let groups = if state == CardState::Normal && motion.adopt_squeezed(&groups, snap, now) {
+        build_groups(snap, opts, motion, now)
+    } else {
+        groups
+    };
     let content_h = content_height(t, snap, opts);
     let tr = tree(t, snap, state, &groups, content_h, opts, motion, now);
     let mut m: &TextEngine = te;
@@ -1398,8 +1669,10 @@ fn tree(
     for (g, vg) in groups.iter().enumerate() {
         let gid = id_group(g);
         // 新组组头：高度 group_gh*e + 透明度 e（120ms）；静止时 e=1，和旧布局完全一致。
-        let ge = group_enter_alpha(motion, &vg.key, now);
-        let header_h = t.group_gh * ge;
+        // 子节点高度也跟着 header_h 收（取 min(自然高, header_h)）：layout 的 measure 对容器
+        // 只看子节点，不跟着缩的话组头一进场就按「最高的子节点」占满 20px，下面的组会被顶下去。
+        let ha = header_anim(t, vg, motion, now);
+        let header_h = t.group_gh * ha.h;
         let mut header_row = Node::new(Dir::Row)
             .id(gid)
             .style(move |s| {
@@ -1410,42 +1683,50 @@ fn tree(
             .child(
                 Node::new(Dir::Row)
                     .id(gid + 1)
-                    .style(move |s| s.size(Dim::Px(t.tile), Dim::Px(t.tile))),
+                    .style(move |s| {
+                        s.size(Dim::Px(t.tile), Dim::Px(header_h.min(t.tile)))
+                    }),
             )
             .child(
                 text_node(&vg.app, t.app_fs, t.app_lh, 500, gid + 2)
-                    .style(|s| s.grow(1.0).basis(0.0)),
+                    .style(move |s| {
+                        s.grow(1.0)
+                            .basis(0.0)
+                            .size(Dim::Auto, Dim::Px(header_h.min(t.app_lh)))
+                    }),
             );
 
         let badge = Node::new(Dir::Row)
             .id(gid + 3)
             .style(move |s| {
-                s.size(Dim::Auto, Dim::Px(t.badge_h))
+                s.size(Dim::Auto, Dim::Px(header_h.min(t.badge_h)))
                     .pad([0.0, t.badge_pad, 0.0, t.badge_pad])
                     .align(Align::Center)
                     .justify(Justify::Center)
             })
-            .child(text_node(
-                &vg.total.to_string(),
-                t.badge_fs,
-                t.badge_lh,
-                400,
-                gid + 4,
-            ));
+            .child(
+                text_node(&vg.total.to_string(), t.badge_fs, t.badge_lh, 400, gid + 4)
+                    .style(move |s| s.size(Dim::Auto, Dim::Px(header_h.min(t.badge_lh)))),
+            );
         header_row = header_row.child(badge);
 
         let time = relative_time(vg.newest_ms, now_ms);
-        header_row = header_row.child(text_node_aligned(
-            &time,
-            t.time_fs,
-            t.time_lh,
-            400,
-            gid + 5,
-            1,
-        ));
+        header_row = header_row.child(
+            text_node_aligned(&time, t.time_fs, t.time_lh, 400, gid + 5, 1).style(move |s| {
+                s.size(Dim::Auto, Dim::Px(header_h.min(t.time_lh)))
+            }),
+        );
 
         let mut group_col = Node::new(Dir::Column)
-            .style(move |s| s.gap(t.item_gap).align(Align::Stretch))
+            .style(move |s| {
+                // 新组进场 / 退场都把「组间 gap」吃掉：组高从 0 长起 / 收到 0 时 gap 却立刻出现，
+                // 不抵消的话下面的组第一帧被顶下去 / 最后收尾留 7px 空档。
+                // ha.h = ge×(1-退场进度)，故 1-ha.h 正好是「该吃掉的组间距」比例。
+                let gap_eat = 1.0 - ha.h;
+                s.gap(t.item_gap)
+                    .align(Align::Stretch)
+                    .mar([0.0, 0.0, -t.group_gap * gap_eat, 0.0])
+            })
             .child(header_row);
 
         for (i, row) in vg.rows.iter().enumerate() {
@@ -1557,27 +1838,40 @@ fn paint_tree(
         return paint_viewport(g, te, pal, t, ctx, pl);
     }
 
-    // ── 新组组头：整行裁在自身矩形内、120ms 淡入（图标/药丸/时间一起，不做单独动效）──
+    // ── 组头（应用图标 + 名字 + 角标 + 时间）：整行裁在自身矩形内，入场 120ms 淡入、
+    //    退场随本组最后一条消息右滑出卡外（图标/名字与消息同帧消失，不留到最后）──
     if let Some(gidx) = group_of(pl.id) {
         if pl.id == id_group(gidx) {
-            let e = ctx
+            let ha = ctx
                 .groups
                 .get(gidx)
-                .map(|vg| group_enter_alpha(ctx.motion, &vg.key, ctx.now))
-                .unwrap_or(1.0);
-            if e < 0.9999 {
-                let r = clip_rect(rect(pl));
-                if e <= 0.001 || (r.bottom - r.top) <= 0.1 {
-                    return Ok(());
+                .map(|vg| header_anim(t, vg, ctx.motion, ctx.now));
+            if let Some(ha) = ha {
+                if ha.h < 0.9999 || ha.dx.abs() > 0.001 {
+                    let r = clip_rect(rect(pl));
+                    if ha.alpha <= 0.001 || (r.bottom - r.top) <= 0.1 {
+                        return Ok(());
+                    }
+                    g.push_clip_round(r, 0.0)?;
+                    // 大 contentBounds 的不透明度层：滚动变换下 Gfx 自带的 push_opacity
+                    // 只有卡面 bounds，会把滚到卡外的组头裁掉。
+                    let layer = minicard_draw::paint::push_opacity(g, ha.alpha)?;
+                    let mut old = windows_numerics::Matrix3x2::default();
+                    let shifted = ha.dx.abs() > 0.001;
+                    if shifted {
+                        unsafe { g.d2d.GetTransform(&mut old) };
+                        let m = windows_numerics::Matrix3x2 {
+                            M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0,
+                            M31: ha.dx, M32: 0.0,
+                        } * old;
+                        unsafe { g.d2d.SetTransform(&m) };
+                    }
+                    let out = paint_children(g, te, pal, t, ctx, pl);
+                    if shifted { unsafe { g.d2d.SetTransform(&old) }; }
+                    drop(layer);
+                    g.pop_clip_round();
+                    return out;
                 }
-                g.push_clip_round(r, 0.0)?;
-                // 用大 contentBounds 的层（paint::push_opacity）：滚动变换下 Gfx 自带的
-                // push_opacity 只有卡面 bounds，会把滚到卡外的行裁掉。
-                let layer = minicard_draw::paint::push_opacity(g, e)?;
-                let out = paint_children(g, te, pal, t, ctx, pl);
-                drop(layer);
-                g.pop_clip_round();
-                return out;
             }
         }
     }
@@ -1733,8 +2027,10 @@ fn paint_row(
     if anim.alpha <= 0.001 || anim.h <= 0.1 {
         return Ok(());
     }
-    let animated =
-        anim.alpha < 0.9999 || (anim.h - t.item_h).abs() > 0.001 || anim.dy.abs() > 0.001;
+    let animated = anim.alpha < 0.9999
+        || (anim.h - t.item_h).abs() > 0.001
+        || anim.dy.abs() > 0.001
+        || anim.dx.abs() > 0.001;
     if !animated {
         if hover > 0.001 {
             set_color(g, alpha_color(pal.fg_soft, hover))?;
@@ -1749,15 +2045,17 @@ fn paint_row(
     // 卡面 bounds 会把它裁掉。
     let layer = minicard_draw::paint::push_opacity(g, anim.alpha)?;
     let mut old = windows_numerics::Matrix3x2::default();
-    let shifted = anim.dy.abs() > 0.001;
+    let shifted = anim.dy.abs() > 0.001 || anim.dx.abs() > 0.001;
     if shifted {
         unsafe { g.d2d.GetTransform(&mut old) };
+        // 行向量口径：M31 = 水平右移、M32 = 垂直位移，叠在现有基础变换（含 --ss 缩放）上。
+        // clip 已在变换前按行矩形压下，右滑的内容在卡内右缘被干净裁掉，不溢出到卡外。
         let m = windows_numerics::Matrix3x2 {
             M11: 1.0,
             M12: 0.0,
             M21: 0.0,
             M22: 1.0,
-            M31: 0.0,
+            M31: anim.dx,
             M32: anim.dy,
         } * old;
         unsafe { g.d2d.SetTransform(&m) };
@@ -3205,17 +3503,19 @@ mod tests {
             "删除中的行不可命中"
         );
 
-        // 90ms：行高介于 0..item_h
-        let pl = layout_of(
-            &tree_hook(&t, Some(&snap), opts, &motion, t0 + Duration::from_millis(90)),
-            &t,
-        );
-        let mid = find_rect(&pl, id_item(0, 0)).expect("塌缩中的行");
-        assert!(
-            mid.h > 0.0 && mid.h < t.item_h,
-            "90ms 时退出中的行高应在 (0, item_h)，实际 {}",
-            mid.h
-        );
+        // 90ms / 150ms：整段只右移，整行保持满高不塌缩（没有补位尾动画）
+        for ms in [90u64, 150] {
+            let pl = layout_of(
+                &tree_hook(&t, Some(&snap), opts, &motion, t0 + Duration::from_millis(ms)),
+                &t,
+            );
+            let row = find_rect(&pl, id_item(0, 0)).expect("退出中的行");
+            assert!(
+                (row.h - t.item_h).abs() < 0.01,
+                "{ms}ms 行高应仍是满 38（无补位尾动画），实际 {}",
+                row.h
+            );
+        }
 
         // 数据侧 100ms 就收敛（比 180ms 塌缩快）：撤销 suppress，但塌缩动画仍要跑完
         let fast = snap_of(vec![
@@ -3251,8 +3551,8 @@ mod tests {
         );
     }
 
-    /// 退出塌缩时后面的组也要连续上移（靠行高 + 负底边距同时缩小，layout 的 measure 才跟得上），
-    /// 180ms 收尾后与「这一行被删掉」的最终布局严格对齐（不跳 item_gap）。
+    /// 纯右滑退场：下方组在整段滑出过程中保持不动（退出行满高占位）；滑出结束那一帧
+    /// 高度直接塌掉、下方瞬间补位到「这一行被删掉」的最终布局（不跳 item_gap、不播尾动画）。
     #[test]
     fn exit_collapse_moves_following_groups_smoothly() {
         let t = Tokens::notify(240.0, 300.0);
@@ -3271,19 +3571,385 @@ mod tests {
         assert!((y0 - 146.0).abs() < 0.01, "静止时第二组 y=146，实际 {y0}");
 
         motion.mark_removed(6, t0);
-        let y30 = group_y(&motion, 30);
-        let y60 = group_y(&motion, 60);
-        let y150 = group_y(&motion, 150);
-        let y179 = group_y(&motion, 179);
-        assert!(
-            y0 > y30 && y30 >= y60 && y60 >= y150 && y150 >= y179 - 0.001,
-            "删除中的组间位移应单调上移：{y0} → {y30} → {y60} → {y150} → {y179}"
-        );
+        // 纯右滑：整段（<180ms）退出行满高占位，下方组保持不动。
+        for ms in [30u64, 90, 150, 179] {
+            let y = group_y(&motion, ms);
+            assert!((y - y0).abs() < 0.01, "滑出中下方组不该动：{y0} → {y}（{ms}ms）");
+        }
+        // 滑出结束那一帧直接塌掉，下方瞬间补位到最终布局；之后不再移动。
+        let y180 = group_y(&motion, 180);
         let final_y = group_y(&motion, 200);
         assert!(
-            (y179 - final_y).abs() < 0.2,
-            "180ms 末帧应与删除后的最终布局对齐：{y179} vs {final_y}"
+            (y180 - final_y).abs() < 0.2,
+            "180ms 滑完应已与删除后的最终布局对齐：{y180} vs {final_y}"
         );
+    }
+
+    /// 标准减速曲线：起步软、终点准、全程单调。
+    /// 旧曲线 easeOutQuart 在 180ms/11 帧里第一帧就走掉 32% 距离（38px 的行一帧跳 12px），
+    /// 这条第 1 帧只走 ~2%、半程 ~78%，位移摊在整段时间里，收尾也不会「爬帧」。
+    #[test]
+    fn ease_standard_is_soft_at_start_and_exact_at_end() {
+        assert_eq!(ease_standard(0.0), 0.0);
+        assert!((ease_standard(1.0) - 1.0).abs() < 1e-6);
+        let first = ease_standard(1.0 / 11.0);
+        assert!(first < 0.06, "首帧进度要小（软起步），实际 {first}");
+        let mid = ease_standard(0.5);
+        assert!((0.72..0.84).contains(&mid), "半程应在 72~84%，实际 {mid}");
+        let mut prev = 0.0;
+        for i in 0..=200 {
+            let v = ease_standard(i as f32 / 200.0);
+            assert!(v >= prev - 1e-5, "曲线必须单调：{v} < {prev}");
+            prev = v;
+        }
+        // 半程之后必须一直领先线性（减速段的形状），且不越过 1
+        for i in 51..100 {
+            let u = i as f32 / 100.0;
+            let v = ease_standard(u);
+            assert!(v > u && v <= 1.0, "u={u} v={v}");
+        }
+    }
+
+    /// 配额挤出的行要跟着塌缩，不能在入场那一帧瞬消——否则下面整列先上跳一格再滑回来
+    /// （240×300 实测 -38 DIP 抖动，见 docs/verify/_notify_motion_20261116）。
+    #[test]
+    fn squeezed_row_collapses_so_following_group_does_not_jump() {
+        let t = Tokens::notify(240.0, 300.0);
+        let opts = Options::default(); // per_app = 2
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        // 微信 3 条（配额 2 → 只显示 2 条）+ 邮件 1 条
+        let before = snap_of(vec![
+            item(3, "微信", "wechat", 3000, true),
+            item(2, "微信", "wechat", 2000, false),
+            item(1, "微信", "wechat", 1000, false),
+            item(9, "邮件", "mail", 900, false),
+        ]);
+        motion.observe(Some(&before), CardState::Normal, t0);
+        let groups = build_groups(Some(&before), opts, &motion, t0);
+        assert!(
+            !motion.adopt_squeezed(&groups, Some(&before), t0),
+            "静止首帧不该认领任何退出行"
+        );
+        let mail_y = |motion: &Motion, snap: &NotifySnapshot, at: Instant| {
+            let node = tree_hook(&t, Some(snap), opts, motion, at);
+            let pl = layout_of(&node, &t);
+            find_rect(&pl, id_group(1)).expect("邮件组头").y
+        };
+        let y0 = mail_y(&motion, &before, t0);
+
+        // 新通知（id=4）插到最前：配额把 id=2 顶出去
+        let at = t0 + Duration::from_millis(200);
+        let after = snap_of(vec![
+            item(4, "微信", "wechat", 4000, true),
+            item(3, "微信", "wechat", 3000, true),
+            item(2, "微信", "wechat", 2000, false),
+            item(1, "微信", "wechat", 1000, false),
+            item(9, "邮件", "mail", 900, false),
+        ]);
+        motion.observe(Some(&after), CardState::Normal, at);
+        let groups = build_groups(Some(&after), opts, &motion, at);
+        assert!(
+            motion.adopt_squeezed(&groups, Some(&after), at),
+            "被配额顶掉的行应被认领成退出行"
+        );
+        assert!(motion.exiting.contains_key(&2), "被顶掉的是最旧的 id=2");
+
+        // 交换期间（新行 0→38 长、旧行 38→0 塌缩 + 负底边距）组高恒定 → 邮件组一动不动
+        for ms in [0u64, 16, 60, 120, 179, 200] {
+            let y = mail_y(&motion, &after, at + Duration::from_millis(ms));
+            assert!(
+                (y - y0).abs() < 0.2,
+                "{ms}ms 时下面那组不该动：{y} vs {y0}"
+            );
+        }
+    }
+
+    /// 清除全部：每组图标+名字随该组最后一条消息一起右滑，不留在最后才清。
+    /// 单条删除：组里还有消息 → 组头不动（header_exit=None）。
+    #[test]
+    fn group_header_exits_with_its_last_message() {
+        let t = Tokens::notify(240.0, 300.0);
+        let opts = Options::default();
+        let snap = snap_of(sample_four()); // 微信[6,4] 邮件[3] QQ[1]
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        motion.observe(Some(&snap), CardState::Normal, t0);
+        let at = t0 + Duration::from_millis(200);
+
+        // 单条删除微信第一条（id=6）：微信组仍有 id=4 → 组头不退出
+        motion.mark_removed(6, at);
+        let groups = build_groups(Some(&snap), opts, &motion, at);
+        let wx = groups.iter().find(|g| g.key.contains("微信") || g.app == "微信").unwrap();
+        assert!(wx.header_exit.is_none(), "组里还有消息，组头不该退出");
+
+        // 清除全部：各组组头退出 t0 = 本组最后一条（错开最晚）的 t0
+        motion.mark_cleared(&snap.items, at);
+        let groups = build_groups(Some(&snap), opts, &motion, at);
+        assert_eq!(groups.len(), 3, "3 组");
+        for g in &groups {
+            let row_max = g.rows.iter().filter_map(|r| r.exit).max();
+            assert_eq!(g.header_exit, row_max, "组 {} 组头应随最后一条消息退场", g.app);
+            assert!(g.header_exit.is_some());
+        }
+        // 注意本测试先前已 mark_removed(6) 单删了微信最新那条（t0=at 无错开），mark_cleared
+        // 跳过它。自下而上（n=4）：QQ(i=3)→0、邮件(i=2)→60、微信剩下的 id4(i=1)→120。
+        // 组头取本组最晚退场那条：QQ=0 最先、邮件=60、微信=120 最后。
+        let qq = groups.iter().find(|g| g.app == "QQ").unwrap();
+        let d = ms_since(qq.header_exit.unwrap(), at);
+        assert!((-1.0..=1.0).contains(&d), "QQ 组头（最底）t0≈at+0ms 最先，实际 {d}");
+        let mail = groups.iter().find(|g| g.app == "邮件").unwrap();
+        let d = ms_since(mail.header_exit.unwrap(), at);
+        assert!((59.0..=61.0).contains(&d), "邮件组头 t0≈at+60ms，实际 {d}");
+        let wx = groups.iter().find(|g| g.app == "微信").unwrap();
+        let wx_hd = wx.header_exit.unwrap();
+        assert!((119.0..=121.0).contains(&ms_since(wx_hd, at)), "微信组头（最顶，剩 id4）t0≈at+120ms 最后，实际 {:?}", ms_since(wx_hd, at));
+
+        // 纯右滑整段：组头满高满透明、只水平平移（无补位尾动画）
+        let wx_base = ms_since(wx_hd, at) as u64;
+        let wx_mid = header_anim(&t, wx, &motion, at + Duration::from_millis(wx_base + 60));
+        assert!(wx_mid.dx > 0.0 && wx_mid.dx < t.w, "组头应正在右滑：dx={}", wx_mid.dx);
+        assert!((wx_mid.h - 1.0).abs() < 0.01 && (wx_mid.alpha - 1.0).abs() < 1e-5,
+            "滑出中组头应满高满透明（不淡出）：h={} a={}", wx_mid.h, wx_mid.alpha);
+        // t0+180ms：组头随最后一条一起滑完收掉，dx 到卡宽
+        let wx_done = header_anim(&t, wx, &motion, at + Duration::from_millis(wx_base + 180));
+        assert!(wx_done.h < 0.01 && (wx_done.dx - t.w).abs() < 0.5,
+            "最后一条滑完时组头也收完：h={} dx={}", wx_done.h, wx_done.dx);
+    }
+
+    /// 清除错开期内同组来了新消息：组头保持原退场 t0 继续滑，不 dx 瞬移回 0 / 不重新淡入。
+    #[test]
+    fn new_message_mid_clear_does_not_flicker_group_header() {
+        let opts = Options::default();
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        let snap = snap_of(sample_four());
+        motion.observe(Some(&snap), CardState::Normal, t0);
+        let at = t0 + Duration::from_millis(200);
+        motion.mark_cleared(&snap.items, at);
+        let wx_t0 = *motion.group_header_exit.get("aumid:wechat").unwrap();
+
+        // 110ms 后同组（微信）来一条新消息
+        let mid = at + Duration::from_millis(110);
+        let mut items = snap.items.clone();
+        items.insert(0, item(99, "微信", "wechat", 9_000, true));
+        motion.observe(Some(&snap_of(items)), CardState::Normal, mid);
+        // 组头退场起点不变（Motion 里钉住），不会因新消息重算而闪回
+        assert_eq!(*motion.group_header_exit.get("aumid:wechat").unwrap(), wx_t0);
+        let groups = build_groups(Some(&snap_of(vec![item(99, "微信", "wechat", 9_000, true)])), opts, &motion, mid);
+        let wx = groups.iter().find(|g| g.app == "微信").unwrap();
+        assert_eq!(wx.header_exit, Some(wx_t0), "同组新消息不该重置组头退场");
+        // seen_groups 保住该组 → 不触发组头重新入场（避免重新淡入闪烁）
+        assert!(motion.seen_groups.contains("aumid:wechat"));
+
+        // 退场窗过后：记录被清，但该组仍有活动行 → 走 120ms 重新入场（alpha 从 0 淡入），
+        // 不是一帧满血复位（透明→满不透明）
+        let end = at + Duration::from_millis(400);
+        motion.prune(end);
+        assert!(!motion.group_header_exit.contains_key("aumid:wechat"));
+        assert!(motion.group_enter.contains_key("aumid:wechat"), "仍存活的组应重新入场淡入");
+        let ge = group_enter_alpha(&motion, "aumid:wechat", end);
+        assert!(ge < 0.01, "重新入场首帧 alpha 应接近 0（不是满血）：{ge}");
+        let ge_later = group_enter_alpha(&motion, "aumid:wechat", end + Duration::from_millis(120));
+        assert!((ge_later - 1.0).abs() < 0.01, "120ms 后淡入完成：{ge_later}");
+    }
+
+    /// 清除确认：所有行立即 suppress，但按快照顺序错开 60ms 依次右滑；卡框/分割线/抬头不动（AC2/AC4）。
+    #[test]
+    fn clear_all_staggers_rows_right_without_moving_chrome() {
+        let t = Tokens::notify(240.0, 300.0);
+        let opts = Options::default();
+        let snap = snap_of(sample_four()); // 微信 2 + 邮件 1 + QQ 1 = 4 条
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        motion.observe(Some(&snap), CardState::Normal, t0);
+        let at = t0 + Duration::from_millis(200);
+
+        motion.mark_cleared(&snap.items, at);
+        let n = snap.items.len();
+        for (i, it) in snap.items.iter().enumerate() {
+            assert!(motion.exiting.contains_key(&it.id), "id={} 应进退出", it.id);
+            assert!(motion.suppressed.contains_key(&it.id), "id={} 应被抑制", it.id);
+            // 自下而上：i=0（最新/顶）最后 (n-1)×60，i=n-1（最旧/底）最先 0
+            let order = n - 1 - i;
+            let want = at + Duration::from_secs_f32(order as f32 * CLEAR_STAGGER_MS / 1000.0);
+            assert_eq!(motion.exiting[&it.id].t0, want, "第 {i} 行应错开 {}ms（自下而上）", order * 60);
+        }
+        // 最底行（i=n-1）t0=now 先滑，最顶行（i=0）t0=+(n-1)×60 最后
+        assert_eq!(motion.exiting[&snap.items[n - 1].id].t0, at, "最底行应先滑");
+        assert_eq!(motion.exiting[&snap.items[0].id].t0,
+            at + Duration::from_secs_f32((n - 1) as f32 * CLEAR_STAGGER_MS / 1000.0), "最顶行应最后滑");
+        // 错开窗口：最后一行 3×60=180ms 起滑，再 180ms 滑完 → 360ms 才停
+        assert!(motion.animating(at), "起始应续帧");
+        assert!(motion.animating(at + Duration::from_millis(300)), "错开窗口内应续帧");
+        assert!(!motion.animating(at + Duration::from_millis(370)), "错开全结束应停");
+
+        let cells: [(usize, usize); 4] = [(0, 0), (0, 1), (1, 0), (2, 0)];
+        fn measure(t: &Tokens, snap: &NotifySnapshot, opts: Options, m: &Motion, cells: &[(usize, usize)], now: Instant) -> (Vec<f32>, (Option<f32>, Option<(f32, f32)>)) {
+            let node = tree_hook(t, Some(snap), opts, m, now);
+            let pl = layout_of(&node, t);
+            let rows: Vec<f32> = cells
+                .iter()
+                .map(|&(g, i)| find_rect(&pl, id_item(g, i)).map(|r| r.h).unwrap_or(0.0))
+                .collect();
+            let chrome = (
+                find_rect(&pl, ID_DIVIDER).map(|r| r.y),
+                find_rect(&pl, ID_HEADER).map(|r| (r.y, r.h)),
+            );
+            (rows, chrome)
+        }
+        let (_, base_chrome) = measure(&t, &snap, opts, &motion, &cells, at);
+        // 头两行（i=0/1）在 0..180ms 各自滑出：整段满高；卡框/分割线/抬头不动
+        for ms in [0u64, 45, 90, 135, 179] {
+            let (rows, chrome) = measure(&t, &snap, opts, &motion, &cells, at + Duration::from_millis(ms));
+            assert!(rows[0] <= t.item_h + 0.5 && rows[1] <= t.item_h + 0.5);
+            assert_eq!(chrome, base_chrome, "{ms}ms 卡框/分割线/抬头不该动");
+        }
+        // 全部错开结束后所有行高归零
+        motion.prune(at + Duration::from_millis(400));
+        let (rows, _) = measure(&t, &snap, opts, &motion, &cells, at + Duration::from_millis(400));
+        assert!(rows.iter().all(|&h| h < 0.5), "错开结束后所有行应塌完：{rows:?}");
+    }
+
+    /// 单条删除 = 整行全程满高满不透明右滑出卡外，滑完瞬间补位（无收高度尾动画）。
+    #[test]
+    fn single_remove_swipes_right_with_following_rows_filling_in() {
+        let t = Tokens::notify(240.0, 300.0);
+        let opts = Options::default();
+        let snap = snap_of(sample_four());
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        motion.observe(Some(&snap), CardState::Normal, t0);
+        let at = t0 + Duration::from_millis(200);
+        // 下面那组（邮件）组头 y 作为「下方补位」的观测点
+        fn mail_y(t: &Tokens, snap: &NotifySnapshot, opts: Options, m: &Motion, now: Instant) -> f32 {
+            let node = tree_hook(t, Some(snap), opts, m, now);
+            let pl = layout_of(&node, t);
+            find_rect(&pl, id_group(1)).map(|r| r.y).unwrap_or(0.0)
+        }
+        let y0 = mail_y(&t, &snap, opts, &motion, at);
+        motion.mark_removed(6, at); // 删掉微信第一条（id=6）
+        let exit_t0 = motion.exiting[&6].t0;
+        fn anim_row(t: &Tokens, exit_t0: Instant, now: Instant) -> RowAnim {
+            row_anim(t, &RowView { r: RowRef::Exit(6), uid: 6, enter: None, exit: Some(exit_t0), exit_slide: true }, now)
+        }
+        let mut prev_dx = -1.0;
+        // 整段 [0,180ms)：满高、满不透明，只有 dx 单调右移——没有「收高度补位」段
+        for ms in [0u64, 30, 60, 90, 120, 150, 179] {
+            let a = anim_row(&t, exit_t0, at + Duration::from_millis(ms));
+            assert!((a.h - t.item_h).abs() < 0.01, "{ms}ms 行高应满 38（无尾动画），实际 {}", a.h);
+            assert!((a.alpha - 1.0).abs() < 1e-5, "{ms}ms 不该淡出，实际 {}", a.alpha);
+            assert!(a.dx >= prev_dx - 0.01, "{ms}ms dx 不该回退：{} vs {}", a.dx, prev_dx);
+            prev_dx = a.dx;
+        }
+        let end = anim_row(&t, exit_t0, at + Duration::from_millis(180));
+        assert!((end.dx - t.w).abs() < 0.5, "180ms dx 应到卡片宽：{}", end.dx);
+        assert!(end.h < 0.5, "180ms 滑完直接塌掉（瞬间补位）：{}", end.h);
+        assert_eq!(end.alpha, 1.0, "全程不淡出，末帧 alpha 仍为 1");
+        // 下方补位：整段滑出过程中邮件组头 y 不动（整行还占着位），滑完瞬间到位
+        for ms in [0u64, 30, 90, 150, 179] {
+            let y = mail_y(&t, &snap, opts, &motion, at + Duration::from_millis(ms));
+            assert!((y - y0).abs() < 0.5, "{ms}ms 滑出中下方组不该动：{y} vs {y0}");
+        }
+        let y_done = mail_y(&t, &snap, opts, &motion, at + Duration::from_millis(180));
+        assert!(y_done < y0 - 30.0, "滑完瞬间下方组上移补位：{y0} → {y_done}");
+    }
+
+    /// 退场期间系统快照还没更新（Windows 异步 ≤1.5s）：行不能闪回；快照清空后 suppress 收敛（AC2）。
+    #[test]
+    fn clear_all_survives_stale_snapshot_then_converges_to_empty() {
+        let t = Tokens::notify(240.0, 300.0);
+        let opts = Options::default();
+        let snap = snap_of(sample_four());
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        motion.observe(Some(&snap), CardState::Normal, t0);
+        let at = t0 + Duration::from_millis(200);
+        motion.mark_cleared(&snap.items, at);
+
+        // 500ms 后快照还是旧的：suppress 仍压住 4 条，不能重播入场
+        let stale = at + Duration::from_millis(500);
+        motion.observe(Some(&snap), CardState::Normal, stale);
+        assert_eq!(motion.suppressed.len(), 4, "旧快照里的 4 条仍应被压住");
+        assert!(motion.enter.is_empty(), "不能因为旧快照就重播入场");
+        let node = tree_hook(&t, Some(&snap), opts, &motion, stale);
+        let pl = layout_of(&node, &t);
+        assert!(find_rect(&pl, id_item(0, 0)).is_none(), "旧快照里也不该闪回行");
+
+        // 快照清空 → suppress 收敛 + 空态 160ms
+        let empty = snap_of(vec![]);
+        let done = at + Duration::from_millis(900);
+        motion.observe(Some(&empty), CardState::Empty, done);
+        assert!(motion.suppressed.is_empty(), "收敛后 suppress 应清空");
+        assert!(motion.animating(done), "空态 160ms 应续帧");
+        assert!(!motion.animating(done + Duration::from_millis(160)));
+    }
+
+    /// 清除错开期内到达的新通知按正常入场（A2）：不闪回、不被旧 clear 机制压住。
+    #[test]
+    fn new_arrival_during_clear_staggers_enters_normally() {
+        let t = Tokens::notify(240.0, 300.0);
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        let base = snap_of(sample_four());
+        motion.observe(Some(&base), CardState::Normal, t0);
+        let at = t0 + Duration::from_millis(200);
+        motion.mark_cleared(&base.items, at);
+
+        // 50ms 后一条新通知到达（旧 4 条仍在 suppress）
+        let mid = at + Duration::from_millis(50);
+        let with_new = snap_of({
+            let mut v = base.items.clone();
+            v.insert(0, item(99, "微信", "wechat", 9_000, true));
+            v
+        });
+        motion.observe(Some(&with_new), CardState::Normal, mid);
+        assert!(motion.enter.contains_key(&99), "新行应正常入场，不被压住");
+        assert!(!motion.suppressed.contains_key(&99));
+        let a = row_anim(&t, &RowView {
+            r: RowRef::Snap(0), uid: 99, enter: Some(mid), exit: None, exit_slide: false,
+        }, mid);
+        assert!(a.h < 0.5, "入场首帧新行高度应接近 0，实际 {}", a.h);
+    }
+
+    /// 独立评审 V1：快照在错开窗口内提前收敛到空时，尾部未起滑的行不能被瞬间抹掉。
+    #[test]
+    fn empty_snapshot_mid_stagger_keeps_rendering_until_swipe_finishes() {
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        let snap = snap_of(sample_four());
+        motion.observe(Some(&snap), CardState::Normal, t0);
+        let at = t0 + Duration::from_millis(200);
+        motion.mark_cleared(&snap.items, at);
+        let empty = snap_of(vec![]);
+        // 50ms 后快照就空了（模拟 Windows 异步删除比错开窗口更快）
+        let mid = at + Duration::from_millis(50);
+        motion.observe(Some(&empty), CardState::Empty, mid);
+        // paint 的渲染态 override：原始 display_state 是 Empty，但还有退出行在动 → 暂缓进 Empty
+        let state = display_state(Some(&empty));
+        assert_eq!(state, CardState::Empty);
+        let exit_active = motion.exiting.values().any(|e| ms_since(mid, e.t0) < EXIT_MS);
+        assert!(exit_active, "错开窗内应有退出行在动");
+        let render_state = if state == CardState::Empty && exit_active { CardState::Normal } else { state };
+        assert_eq!(render_state, CardState::Normal, "渲染态应暂缓进 Empty，让尾行滑完");
+        // 错开全部结束后：exiting 被 prune 清空 → 正常切空态
+        motion.prune(at + Duration::from_millis(400));
+        assert!(motion.exiting.is_empty(), "错开结束后退出行应清空");
+        let exit_active2 = motion.exiting.values().any(|e| ms_since(at + Duration::from_millis(400), e.t0) < EXIT_MS);
+        assert!(!exit_active2);
+        let render_state2 = if CardState::Empty == CardState::Empty && exit_active2 { CardState::Normal } else { CardState::Empty };
+        assert_eq!(render_state2, CardState::Empty, "退出清空后应允许切 Empty");
+    }
+
+    /// 空快照误调 mark_cleared 不该触发无意义续帧。
+    #[test]
+    fn mark_cleared_on_empty_snapshot_is_noop() {
+        let mut motion = Motion::new();
+        let t0 = Instant::now();
+        motion.observe(Some(&snap_of(vec![])), CardState::Empty, t0);
+        motion.mark_cleared(&[], t0);
+        assert!(!motion.animating(t0));
+        assert!(!motion.animating(t0 + Duration::from_millis(50)));
     }
 
     /// suppress 2s 还没收敛 → 撤销抑制、重放一次 180ms 入场。
