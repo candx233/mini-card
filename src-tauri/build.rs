@@ -23,11 +23,6 @@ fn main() {
     let release = env::var("PROFILE").unwrap_or_default() == "release";
 
     let bin = root.join("native/minicard-bin/target/release/minicard-bin.exe");
-    let fonts = [
-        ("FONT_REGULAR", root.join("native/assets/fonts/MiSans-Regular.ttf")),
-        ("FONT_MEDIUM", root.join("native/assets/fonts/MiSans-Medium.ttf")),
-        ("FONT_SEMIBOLD", root.join("native/assets/fonts/MiSans-Semibold.ttf")),
-    ];
 
     let mut generated = String::new();
 
@@ -38,36 +33,20 @@ fn main() {
                 bin.display()
             );
         }
-        let missing: Vec<String> = fonts
-            .iter()
-            .filter(|(_, p)| !p.exists())
-            .map(|(_, p)| p.display().to_string())
-            .collect();
-        if !missing.is_empty() {
-            panic!(
-                "release 构建缺少字体文件：{}\n先跑 native/assets/fonts/build_misans_ttf.py",
-                missing.join(", ")
-            );
-        }
-
-        let entries = std::iter::once(("NATIVE_BIN", bin))
-            .chain(fonts.iter().map(|(n, p)| (*n, p.clone())));
-        for (name, src) in entries {
-            println!("cargo:rerun-if-changed={}", src.display());
-            let dst = native_dir.join(src.file_name().expect("文件名"));
-            fs::copy(&src, &dst).unwrap_or_else(|e| {
-                panic!("复制 {} 到 OUT_DIR 失败：{e}", src.display());
-            });
-            let file = dst.file_name().unwrap().to_string_lossy();
-            generated.push_str(&format!(
-                "pub const {name}: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/native/{file}\"));\n"
-            ));
-        }
+        // 2026-11-19 全栈换系统字体（雅黑/Segoe UI）：不再把 MiSans TTF 编进 exe，
+        // 发布包去掉 ~49 MiB 无用字体。绘制进程用系统字体集，无需随包携带字体文件。
+        let src = bin;
+        println!("cargo:rerun-if-changed={}", src.display());
+        let dst = native_dir.join(src.file_name().expect("文件名"));
+        fs::copy(&src, &dst).unwrap_or_else(|e| {
+            panic!("复制 {} 到 OUT_DIR 失败：{e}", src.display());
+        });
+        let file = dst.file_name().unwrap().to_string_lossy();
+        generated.push_str(&format!(
+            "pub const NATIVE_BIN: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/native/{file}\"));\n"
+        ));
     } else {
         generated.push_str("pub const NATIVE_BIN: &[u8] = &[];\n");
-        for (name, _) in &fonts {
-            generated.push_str(&format!("pub const {name}: &[u8] = &[];\n"));
-        }
     }
 
     fs::write(native_dir.join("assets.rs"), generated).expect("写 native/assets.rs");

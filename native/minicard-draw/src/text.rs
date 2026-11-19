@@ -74,6 +74,11 @@ pub fn small_embold() -> bool {
 }
 
 /// 400 → 500 的落点：只补 `weight <= 400` 的正文档；标题（500/600）本来就在更重的面上。
+///
+/// 2026-11-19 全栈换雅黑后这条补墨**自然失效**：雅黑无 500 面，`css_weight(500)`
+/// 回到 400（Regular），升 500 等于没升。这是无害降级——雅黑自带 hinting + 笔画更实，
+/// 小字掉墨已被部分抵消；且 500 声明档不会触发 DWrite 合成加粗（500 与 400 同一字面）。
+/// 保留逻辑供 MiSans 历史稿/回退场景（`MC_SMALL_EMBOLD` 语义不变）。
 #[inline]
 fn embold_weight(size: f32, weight: u16) -> u16 {
     if weight <= 400 && size <= SMALL_EMBOLD_MAX_PX && small_embold() {
@@ -198,10 +203,73 @@ impl TextEngine {
         }
     }
 
+    /// 用**系统字体集**加载 family（2026-11-19 全栈换微软默认字体，见
+    /// `.engineering/font-swap-ms-default`）。与 [`Self::new_weights`] 的私有字集
+    /// （AddFontFile 自建、无系统回退）不同，系统字体集自带 DWrite 的字体回退链：
+    /// 字形缺失时由系统 fallback 映射，不再出豆腐块（历史文档多次建议、换系统字体后天然获得）。
+    ///
+    /// 字重：系统雅黑字面为标准 OS/2 值（Light 200 / Regular 400 / Bold 700），
+    /// [`declared_css_weight`] 原样返回，[`Self::css_weight`] 按 CSS Fonts 4 选面：
+    /// 400→Regular、500→Regular（雅黑无 500 真面，与浏览器一致）、600→Bold。
+    pub fn from_system(family: &str) -> Result<Self> {
+        unsafe {
+            let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let mut collection: Option<IDWriteFontCollection> = None;
+            factory.GetSystemFontCollection(&mut collection, false)?;
+            let collection = collection.ok_or_else(|| {
+                windows::core::Error::new(
+                    windows::Win32::Foundation::E_FAIL,
+                    "系统字体集为空",
+                )
+            })?;
+            // family 兜底：目标字体不存在（英文版 / 精简版 / Server Core 无雅黑）时
+            // 逐级回退，绝不因为找不到字体让绘制进程启动失败、九张卡全没（复核 D2）。
+            // 顺序：调用方指定 → Microsoft YaHei UI（同样有中文字形，度量基准不会落到无 CJK 的字体）
+            // → Segoe UI → Arial → 系统首个 family。
+            let mut candidates: Vec<String> = vec![family.to_string()];
+            for fb in ["Microsoft YaHei UI", "Segoe UI", "Arial"] {
+                if !candidates.iter().any(|c| c.eq_ignore_ascii_case(fb)) {
+                    candidates.push(fb.to_string());
+                }
+            }
+            let mut last_err = None;
+            for fam in &candidates {
+                match Self::from_collection(factory.clone(), collection.clone(), fam) {
+                    Ok(te) => return Ok(te),
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            // 终极兜底：用系统字体集里第一个 family（几乎不可能走到）
+            let n = collection.GetFontFamilyCount();
+            if n > 0 {
+                if let Ok(fam_obj) = collection.GetFontFamily(0) {
+                    if let Ok(names) = fam_obj.GetFamilyNames() {
+                        let mut buf = [0u16; 256];
+                        if names.GetString(0, &mut buf).is_ok() {
+                            let name = String::from_utf16_lossy(
+                                &buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())],
+                            );
+                            if let Ok(te) = Self::from_collection(factory, collection, &name) {
+                                return Ok(te);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(last_err.unwrap_or_else(|| {
+                windows::core::Error::new(
+                    windows::Win32::Foundation::E_FAIL,
+                    "系统字体集里找不到可用字体",
+                )
+            }))
+        }
+    }
+
     /// 注册**多个字重**的字体文件（Regular / Medium / Semibold …）到同一个私有字集。
     ///
     /// 时钟的 4.5rem 时间用 600（Semibold）、歌名/日历标题也是 600；只装 Regular 时
     /// DWrite 会「合成加粗」（smear），字形与浏览器差一截，所以按字重装真字面。
+    /// 2026-11-19 起产品不再走这条（改用 [`Self::from_system`]）；保留供历史稿与单测夹具。
     pub fn new_weights(files: &[&Path], family: &str) -> Result<Self> {
         unsafe {
             let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
@@ -336,9 +404,19 @@ impl TextEngine {
         weight: u16,
     ) -> Result<IDWriteTextFormat> {
         unsafe {
-            let face_w = self.css_weight(embold_weight(size, weight));
+            // 小字补墨（D4 处置）：只有「升 500 会真的落到更重的面」才升档。
+            // 雅黑无 500 真面（css_weight(500)==css_weight(400)==400），升档是空操作
+            // （真机 A/B：MC_SMALL_EMBOLD=0/1 两档 dump 逐字节相同、墨量差 0），
+            // 故显式跳过；MiSans 私有集（500→380 Medium）照常升，历史稿不受影响。
+            let wanted = embold_weight(size, weight);
+            let effective = if wanted != weight && self.css_weight(wanted) == self.css_weight(weight) {
+                weight // 升档落回同一字面 → 不升
+            } else {
+                wanted
+            };
+            let face_w = self.css_weight(effective);
             if std::env::var("MC_DBG_WEIGHT").is_ok() {
-                eprintln!("want {} → face {} / 字面 {:?}", weight, face_w, self.faces);
+                eprintln!("want {} (eff {}) → face {} / 字面 {:?}", weight, effective, face_w, self.faces);
             }
             let fmt = self.factory.CreateTextFormat(
                 &self.family,
@@ -728,6 +806,69 @@ mod tests {
         assert_eq!(pic(300), 330, "CSS 300 应取 Regular(330)");
         // 往上没有更粗的面时不能反而变细
         assert!(pic(700) >= pic(600), "CSS 700 不该比 600 更细");
+    }
+
+    /// 系统字体集（雅黑）路径：字面表 = 标准 OS/2 值（Light200/Regular400/Bold700），
+    /// `declared_css_weight` 原样返回；CSS 选面 400→Regular、500→Regular（无 500 真面，
+    /// 与浏览器一致）、600→Bold。这是 2026-11-19 全栈换字体的核心字典（AC2）。
+    #[test]
+    fn 系统雅黑字面表与字重映射() {
+        let Ok(te) = TextEngine::from_system("Microsoft YaHei") else {
+            eprintln!("跳过：系统无微软雅黑（非 Windows 或精简版）");
+            return;
+        };
+        // 字面表必须含标准 400 / 700（雅黑 Regular / Bold）
+        assert!(te.faces.iter().any(|f| f.0 == 400), "雅黑应有 400 面，实得 {:?}", te.faces);
+        assert!(te.faces.iter().any(|f| f.0 == 700), "雅黑应有 700 面，实得 {:?}", te.faces);
+        // 400 → Regular(400)；500 → Regular（雅黑无 500 真面）；600 → Bold(700)
+        assert_eq!(te.css_weight(400), 400, "CSS 400 应取 Regular(400)，实得 {}", te.css_weight(400));
+        assert_eq!(te.css_weight(500), 400, "CSS 500 在雅黑应落 Regular(400)，实得 {}", te.css_weight(500));
+        assert_eq!(te.css_weight(600), 700, "CSS 600 应取 Bold(700)，实得 {}", te.css_weight(600));
+    }
+
+    /// AC4 缺字探针：20 个 GB2312 外汉字（含扩展 A/B、CJK 兼容、生僻字），
+    /// 在**系统字体集**里逐个查 glyph，要求每个字至少有一个系统字体能渲染（非 0 字形）。
+    /// 这是「换系统字体后天然解决豆腐块」的可复跑证据（旧 MiSans GB2312 子集会全部缺字）。
+    #[test]
+    fn 系统字体集覆盖_gb2312_外汉字() {
+        let factory = match unsafe { DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) } {
+            Ok(f) => f,
+            Err(_) => { eprintln!("跳过：建不了 DWrite factory"); return; }
+        };
+        let mut coll: Option<IDWriteFontCollection> = None;
+        if unsafe { factory.GetSystemFontCollection(&mut coll, false) }.is_err() {
+            eprintln!("跳过：拿不到系统字体集"); return;
+        }
+        let coll = match coll { Some(c) => c, None => { eprintln!("跳过：系统字体集为空"); return; } };
+        // 建一个「系统字体集里所有 font face」的列表（覆盖雅黑 + 宋体 + 扩展字库等）
+        let mut faces: Vec<windows::Win32::Graphics::DirectWrite::IDWriteFontFace> = Vec::new();
+        let n = unsafe { coll.GetFontFamilyCount() };
+        for fi in 0..n {
+            if let Ok(fam) = unsafe { coll.GetFontFamily(fi) } {
+                let cnt = unsafe { fam.GetFontCount() };
+                for gi in 0..cnt {
+                    if let Ok(font) = unsafe { fam.GetFont(gi) } {
+                        if let Ok(face) = unsafe { font.CreateFontFace() } {
+                            faces.push(face);
+                        }
+                    }
+                }
+            }
+        }
+        // GB2312 之外的 20 字：扩展 A（䶮/㐀）、扩展 B（𠀀）、繁体/生僻、日文/韩文汉字等
+        let chars = ['䶮','㐀','龘','靐','麤','鑫','淼','焱','垚','犇','骉','羴','鱻','掱','舙','瞐','𠀀','㙓','嘦','巭'];
+        let mut miss = Vec::new();
+        for ch in chars {
+            let cp = ch as u32;
+            let mut glyph = [0u16; 1];
+            let mut covered = false;
+            for face in &faces {
+                let ok = unsafe { face.GetGlyphIndices(&cp, 1, glyph.as_mut_ptr()) }.is_ok();
+                if ok && glyph[0] != 0 { covered = true; break; }
+            }
+            if !covered { miss.push(ch); }
+        }
+        assert!(miss.is_empty(), "系统字体集未覆盖这些 GB2312 外汉字：{:?}（共 {} faces）", miss, faces.len());
     }
 
     /// 选面的**后果**：400 的等宽数字是 Regular 的 594/1000 em（Medium 是 604）。

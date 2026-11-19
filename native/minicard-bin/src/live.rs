@@ -40,15 +40,20 @@ use minicard_shell::gfx::Gfx;
 
 use crate::display::{advance_deadline, DisplayTiming};
 
-/// 超采样倍率（环境变量控制，默认 1 = 现有行为）：`MC_SS=2` 时卡片/Dock 按 2× 像素渲染、
-/// DComp 0.5 缩放显示 —— 文字边缘多 4 倍采样。取证/对照阶段由脚本设，稳定后再改默认。
-/// 超采样倍率：默认 **2×**（0.1.3 起，文字边缘更软/台阶更少；release 实测 9 卡
-/// 只 +0.9～1.8 单核百分点、私有内存 +1.4～1.9 MB）。`MC_SS=1` 可退回 1×（A/B 对照用）。
+/// 超采样倍率（环境变量控制，默认 **1× = 原生栅格**）：`MC_SS=2` 时卡片/Dock 按 2× 像素渲染、
+/// DComp 0.5 缩放显示 —— 文字边缘多 4 倍采样，但盒式降采样会柔化小字高频细节。
+///
+/// 历史：0.1.3 起默认 2×，为的是磨掉 MiSans（无 hinting）大字的锯齿台阶；release 实测 9 卡
+/// 只 +0.9～1.8 单核百分点、私有内存 +1.4～1.9 MB。2026-11-19 全栈换系统雅黑后改回默认 1×：
+/// 雅黑自带 hinting + 笔画更实，1× 下锯齿已不明显；而 2× 的小字补墨（400→500 真 Medium）
+/// 在雅黑无 500 面时已失效、柔化代价却仍在。本机 1× vs 2× 对照见
+/// `.engineering/card-small-text-clarity/clk_ab_yahei.png`，1× 更锐。
+/// `MC_SS=2` 可显式开回 2×（A/B 对照用）。
 pub(crate) fn ss_factor() -> u32 {
     std::env::var("MC_SS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(2)
+        .unwrap_or(1)
         .clamp(1, 4)
 }
 
@@ -3921,9 +3926,9 @@ fn cal_demo_period() -> Option<Duration> {
 /// 供 `main` 调用的入口：读 config、装字体、跑循环
 pub fn start(font: &std::path::Path, blur: f32, topmost: bool, exit_after: Option<u64>) -> Result<()> {
     let cfg = Config::load();
-    let fonts = crate::font_set(font);
-    let refs: Vec<&std::path::Path> = fonts.iter().map(|p| p.as_path()).collect();
-    let te = Arc::new(TextEngine::new_weights(&refs, "MiSans")?);
+    let _ = font; // 2026-11-19 全栈换系统字体，font 路径参数保留兼容但不再使用
+    // 系统字体集（雅黑）：自带系统回退、无缺字豆腐块（.engineering/font-swap-ms-default）
+    let te = Arc::new(TextEngine::from_system("Microsoft YaHei")?);
     // 强调色/压在强调色上的字色按 config（口径同 card.html:paintOnAccent）
     let dark_theme = !matches!(cfg.settings.theme, minicard_core::config::Theme::Light);
     let pal = Palette::new(cfg.settings.glass_alpha as f32, false)
@@ -3939,6 +3944,31 @@ pub fn start(font: &std::path::Path, blur: f32, topmost: bool, exit_after: Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 默认超采样 = 1×（2026-11-19 换雅黑后从 2× 改回）；MC_SS 仍可覆盖、clamp 1–4。
+    #[test]
+    fn 默认超采样1倍且可环境变量覆盖() {
+        // RAII：断言中途 panic 也能恢复 MC_SS，不污染同进程并行测试
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => std::env::set_var("MC_SS", v),
+                    None => std::env::remove_var("MC_SS"),
+                }
+            }
+        }
+        let _guard = EnvGuard(std::env::var_os("MC_SS"));
+
+        std::env::remove_var("MC_SS");
+        assert_eq!(ss_factor(), 1, "无 MC_SS 时必须默认 1×");
+        std::env::set_var("MC_SS", "2");
+        assert_eq!(ss_factor(), 2, "MC_SS=2 必须可开回超采样");
+        std::env::set_var("MC_SS", "9");
+        assert_eq!(ss_factor(), 4, "MC_SS 必须 clamp 到 4");
+        std::env::set_var("MC_SS", "0");
+        assert_eq!(ss_factor(), 1, "MC_SS 必须 clamp 到 1");
+    }
 
     /// 0.1.3：显示器增删 / DPI 变化后，窗口位置必须夹回可见工作区（不跑丢）
     #[test]

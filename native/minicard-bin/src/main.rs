@@ -324,6 +324,19 @@ impl App {
     fn repaint(&mut self) {
         // 形状探针：只画测试图，不跑卡片视图
         if let Some(name) = self.probe.clone() {
+            // 通知卡 × hover 取证：MC_NOTIFY_HOVER="x,y" 注入卡内逻辑坐标的鼠标位置。
+            // 只在通知探针生效，不影响 live 路径与其它探针。
+            if matches!(name.as_str(), "notify" | "notify-motion") {
+                if let Ok(p) = std::env::var("MC_NOTIFY_HOVER") {
+                    let mut it = p.split(',');
+                    if let (Some(x), Some(y)) = (
+                        it.next().and_then(|s| s.trim().parse::<f32>().ok()),
+                        it.next().and_then(|s| s.trim().parse::<f32>().ok()),
+                    ) {
+                        self.gfx.hover = Some((x, y));
+                    }
+                }
+            }
             if name == "shapes" || name == "shapes2" || name == "text" || name == "image"
                 || name == "motion" || name == "disks" || name == "clock"
                 || name == "clock-roll" || name == "net" || name == "pomo" || name == "todo" || name == "weather" || name == "music" || name == "music-flip" || name == "calendar" || name == "dock" || name == "cal-flip" || name == "menu" || name == "menu-hover" || name == "notify" || name == "notify-live" || name == "notify-motion"
@@ -511,7 +524,9 @@ impl App {
     }
 }
 
-/// 同目录下的三个字面（Regular/Medium/Semibold），供 live 模式装字体用
+/// 同目录下的三个字面（Regular/Medium/Semibold）——MiSans 私有字集时代的旧辅助函数。
+/// 2026-11-19 全栈换系统字体后 live/probe 都不再调用，保留仅为兼容潜在的外部 probe 脚本。
+#[allow(dead_code)]
 pub fn font_set(font: &std::path::Path) -> Vec<std::path::PathBuf> {
     let dir = font.parent().unwrap_or(std::path::Path::new("."));
     let mut files: Vec<std::path::PathBuf> = ["MiSans-Regular.ttf", "MiSans-Medium.ttf", "MiSans-Semibold.ttf"]
@@ -801,25 +816,9 @@ fn main() -> Result<()> {
         }
         mem::log("玻璃准备后");
 
-        // 按字重装真字面：只装 Regular 时 600 是 DWrite 合成加粗，advance 与字形都会偏
-        let dir = args.font.parent().unwrap_or(std::path::Path::new("."));
-        let mut files: Vec<std::path::PathBuf> = ["MiSans-Regular.ttf", "MiSans-Medium.ttf", "MiSans-Semibold.ttf"]
-            .iter()
-            .map(|n| dir.join(n))
-            .filter(|p| p.exists())
-            .collect();
-        if files.is_empty() {
-            files.push(args.font.clone());
-        }
-        let refs: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
-        let te = TextEngine::new_weights(&refs, "MiSans")?;
-        mlog!("字体：{} 个字面", refs.len());
-        mlog!(
-            "字体 MiSans 载入：ascent {:.4}em / descent {:.4}em / upem {}",
-            te.ascent,
-            te.descent,
-            te.upem
-        );
+        // 2026-11-19 全栈换微软默认字体：走系统字体集（雅黑），自带系统回退、无缺字豆腐块
+        let te = TextEngine::from_system("Microsoft YaHei")?;
+        mlog!("字体 系统雅黑载入：ascent {:.4}em / descent {:.4}em / upem {}", te.ascent, te.descent, te.upem);
         mem::log("字体载入后");
 
         let animate_probe = args.probe.as_deref() == Some("motion");

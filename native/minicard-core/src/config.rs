@@ -622,6 +622,10 @@ pub struct Config {
     /// 通知卡双行骨架尺寸迁移（< NOTIFY_SIZE_VERSION 时把旧的 240×180 升到 240×240，只做一次）。
     #[serde(default = "notify_size_version_legacy")]
     pub notify_size_version: u32,
+    /// Dock 条目 id 唯一化迁移版本（< DOCK_ITEM_IDS_VERSION 时把空 id / 重复 id 补成确定性唯一 id，只做一次）。
+    /// 与别的版本位同理必须字段级 default：结构体级 #[serde(default)] 会拿 Default 的值补缺字段，迁移永不触发。
+    #[serde(default = "dock_item_ids_version_legacy")]
+    pub dock_item_ids_version: u32,
 }
 
 /// 老 config 缺 `size_version` 时按 0 处理（= 需要迁移一次）
@@ -644,6 +648,11 @@ fn notify_size_version_legacy() -> u32 {
     0
 }
 
+/// 老 config 缺 `dock_item_ids_version` 时按 0 处理（= 需要迁移一次）
+fn dock_item_ids_version_legacy() -> u32 {
+    0
+}
+
 /// `Dock.native` 的 serde 默认值（字段整个缺失时 = true；0.1.3 起原生 Dock 是默认路径）
 fn default_true() -> bool {
     true
@@ -660,6 +669,8 @@ pub const SIZE_VERSION: u32 = 4;
 pub const DOCK_NATIVE_VERSION: u32 = 1;
 /// 通知卡双行骨架尺寸迁移版本（0.1.3：旧 240×180/240×240 → 240×300，只做一次）
 pub const NOTIFY_SIZE_VERSION: u32 = 2;
+/// Dock 条目 id 唯一化迁移版本（空/重复 id → 确定性唯一 id，只做一次）
+pub const DOCK_ITEM_IDS_VERSION: u32 = 1;
 
 /// 主窗默认尺寸。界面字号整档上调（正文 13→14px）时，外壳/控件/间距一起放大一档，
 /// 窗口也跟着长 —— 928×628 → 992×672（+6.9%，与字号同比例）。
@@ -712,6 +723,7 @@ impl Default for Config {
             ui_version: UI_VERSION,
             dock_native_version: DOCK_NATIVE_VERSION,
             notify_size_version: NOTIFY_SIZE_VERSION,
+            dock_item_ids_version: DOCK_ITEM_IDS_VERSION,
         }
     }
 }
@@ -721,6 +733,71 @@ pub fn path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     base.join("mini-card").join("config.toml")
+}
+
+/// 确定性 64 位 FNV-1a：给 dock 条目生成 id 用。
+/// 必须确定性（同一输入 → 同一输出）：主进程与原生绘制进程都调 `Config::load()`，
+/// 若各自生成随机 id 再各自 save，会互相覆盖、内存与盘上 id 分叉。
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// 把 dock 条目的空 id / 重复 id 补成确定性唯一 id（纯内存）。返回是否有改动。
+///
+/// 算法（确定性，双进程安全）：
+/// - 先收齐**所有非空 id**作排除集：生成的候选绝不能撞上任何合法 id（无论它在前面还是后面），
+///   否则那个合法 id 会被后面的遍历误判成重复而被改掉（合法 id 必须原样保留）。
+/// - 空 id 或与前面某条目重复的 id：由该条目的 `path` + `name` 哈希出一个候选，
+///   若候选在排除集里则按序号加盐重试，直到唯一；结果落回 `item.id`。
+/// - 只改 `id`，顺序与其它字段一律不动；哈希源不含时间/随机数/进程态。
+fn normalize_dock_item_ids(cfg: &mut Config) -> bool {
+    use std::collections::HashSet;
+    // 排除集：所有非空 id（含重复值）——候选生成时一律避开，保证「合法 id 原样保留」。
+    // 它也是已生成 id 的集合（新生成的会 insert 进去），因此生成结果彼此也不冲突。
+    let mut reserved: HashSet<String> = cfg
+        .dock
+        .items
+        .iter()
+        .filter(|it| !it.id.is_empty())
+        .map(|it| it.id.clone())
+        .collect();
+    // seen：已作为「合法首次出现」放行的 id，单独记——reserved 里预填了全部 id，不能拿它判重。
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut changed = false;
+    for (i, item) in cfg.dock.items.iter_mut().enumerate() {
+        let is_empty = item.id.is_empty();
+        let is_dup = !is_empty && !seen.insert(item.id.clone());
+        if !is_empty && !is_dup {
+            continue;                       // 合法且首次出现：原样保留
+        }
+        // 候选 = FNV-1a(path + b'\0' + name + b'\0' + index + b'\0' + salt)
+        let mut salt = 0u32;
+        let candidate = loop {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(item.path.as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(item.name.as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(i.to_string().as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(salt.to_string().as_bytes());
+            let h = fnv1a64(&buf);
+            let cand = format!("{:08x}", (h ^ (h >> 32)) as u32);
+            if !reserved.contains(&cand) {
+                break cand;
+            }
+            salt = salt.saturating_add(1);
+        };
+        reserved.insert(candidate.clone()); // 生成结果也进排除集 → 彼此不冲突
+        item.id = candidate;
+        changed = true;
+    }
+    changed
 }
 
 impl Config {
@@ -765,6 +842,14 @@ impl Config {
         // Dock 原生自绘转正（只做一次）：0.1.2 的 config 把 `dock.native` 显式写成了 false，
         // serde 默认补不到 → 用版本位迁一次；迁完之后用户手改 false 仍会被尊重（回退口）。
         if cfg.migrate_dock_native() {
+            let _ = cfg.save();
+        }
+        // Dock 条目 id 唯一化（一次性）：手工编辑 config 可能留下空 id / 重复 id，
+        // 会让「按 id 定位」的面板互斥、remove/update/click/reorder 全部歧义。
+        // 算法确定性 → 主进程与原生绘制进程读同一份配置算出同一批 id，各自 save 也收敛。
+        if cfg.dock_item_ids_version < DOCK_ITEM_IDS_VERSION {
+            let _ = normalize_dock_item_ids(&mut cfg);
+            cfg.dock_item_ids_version = DOCK_ITEM_IDS_VERSION;
             let _ = cfg.save();
         }
         // 通知卡双行骨架（0.1.3）：旧 4×3（240×180）装不下双行条目 → 一次性升到 4×4（240×240）
@@ -1099,5 +1184,117 @@ main_window = [520.0, 250.0, 992.0, 672.0]
         let (bounds, maxed) = back.main_restore();
         assert_eq!(bounds, [200.0, 120.0, 992.0, 672.0], "几何是上次正常窗口的外框，不是满屏");
         assert!(maxed, "恢复计划要带最大化标记（ensure_main 据此补 maximize()）");
+    }
+
+    fn dock_cfg_with_ids(ids: &[&str]) -> Config {
+        let mut cfg = Config::default();
+        cfg.dock.items = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| DockItem {
+                id: (*id).to_string(),
+                name: format!("app{i}"),
+                path: format!("C:\\apps\\app{i}.exe"),
+                args: format!("--arg{i}"),
+                divider_before: i % 2 == 1,
+                ..DockItem::default()
+            })
+            .collect();
+        cfg
+    }
+
+    /// AC-R1/R4：空 id 与重复 id 都被换成唯一非空值；合法 id 保留；顺序与其它字段不动。
+    #[test]
+    fn dock_ids_empty_and_duplicate_become_unique() {
+        let mut cfg = dock_cfg_with_ids(&["", "good", "", "good", "dup", "dup"]);
+        let before_paths: Vec<String> = cfg.dock.items.iter().map(|it| it.path.clone()).collect();
+        assert!(normalize_dock_item_ids(&mut cfg), "应报告有改动");
+        let ids: Vec<&str> = cfg.dock.items.iter().map(|it| it.id.as_str()).collect();
+        assert!(ids.iter().all(|id| !id.is_empty()), "不能留空 id：{ids:?}");
+        let mut uniq = std::collections::HashSet::new();
+        assert!(ids.iter().all(|id| uniq.insert(*id)), "id 必须两两不同：{ids:?}");
+        assert_eq!(ids[1], "good", "首次出现的合法 id 原样保留");
+        assert_eq!(
+            cfg.dock.items.iter().map(|it| it.path.clone()).collect::<Vec<_>>(),
+            before_paths,
+            "条目顺序不能变"
+        );
+        assert_eq!(cfg.dock.items[0].args, "--arg0", "args 不能被规范化动作改掉");
+        assert!(cfg.dock.items[1].divider_before, "divider_before 不能被改掉");
+    }
+
+    /// AC-R2：确定性——同一份脏配置跑两次得到同一批 id（双进程各自 load 也收敛）。
+    #[test]
+    fn dock_ids_normalization_is_deterministic() {
+        let mut a = dock_cfg_with_ids(&["", "dup", "", "dup"]);
+        let mut b = dock_cfg_with_ids(&["", "dup", "", "dup"]);
+        assert!(normalize_dock_item_ids(&mut a));
+        assert!(normalize_dock_item_ids(&mut b));
+        let ia: Vec<&str> = a.dock.items.iter().map(|it| it.id.as_str()).collect();
+        let ib: Vec<&str> = b.dock.items.iter().map(|it| it.id.as_str()).collect();
+        assert_eq!(ia, ib, "同一输入必须得到同一批 id");
+    }
+
+    /// AC-R3：幂等——已干净的配置再跑一次不报改动、id 不动。
+    #[test]
+    fn dock_ids_normalization_is_idempotent() {
+        let mut cfg = dock_cfg_with_ids(&["id-a", "id-b", "id-c"]);
+        let before: Vec<String> = cfg.dock.items.iter().map(|it| it.id.clone()).collect();
+        assert!(!normalize_dock_item_ids(&mut cfg), "干净配置不应报改动");
+        let after: Vec<String> = cfg.dock.items.iter().map(|it| it.id.clone()).collect();
+        assert_eq!(before, after);
+        // 规范化过一次后再跑也不动
+        let mut dirty = dock_cfg_with_ids(&["", "x", "x"]);
+        assert!(normalize_dock_item_ids(&mut dirty));
+        let once: Vec<String> = dirty.dock.items.iter().map(|it| it.id.clone()).collect();
+        assert!(!normalize_dock_item_ids(&mut dirty));
+        let twice: Vec<String> = dirty.dock.items.iter().map(|it| it.id.clone()).collect();
+        assert_eq!(once, twice, "第二遍必须幂等");
+    }
+
+    /// AC-R5：老 config 缺 `dock_item_ids_version` → 按 0 处理（= 待迁移一次）。
+    #[test]
+    fn legacy_config_needs_dock_id_migration() {
+        let cfg: Config = toml::from_str("").expect("空 config 应能解析");
+        assert_eq!(cfg.dock_item_ids_version, 0, "缺字段必须按 0 = 待迁移");
+        assert!(DOCK_ITEM_IDS_VERSION > 0);
+        let fresh = Config::default();
+        assert_eq!(fresh.dock_item_ids_version, DOCK_ITEM_IDS_VERSION, "新装默认已迁移");
+    }
+
+    /// 边界（复核 O2）：后面某条目的合法 id 恰好等于前面空 id 条目会生成的哈希候选时，
+    /// 那个合法 id 必须原样保留——候选生成要避开「全部非空 id」，不能只看已遍历的。
+    #[test]
+    fn dock_ids_legit_id_equal_to_earlier_candidate_stays() {
+        // 先跑一次，拿到 item0（空 id）在只有它一条时会生成的候选值。
+        let mut probe = dock_cfg_with_ids(&[""]);
+        assert!(normalize_dock_item_ids(&mut probe));
+        let candidate0 = probe.dock.items[0].id.clone();
+        assert!(!candidate0.is_empty());
+
+        // 构造：item0 空 id，item1 的合法 id 恰为 candidate0，item2 普通。
+        // 修正前：item0 生成 candidate0 → item1 被当成重复、id 被改 → 违反「合法 id 原样保留」。
+        let mut cfg = dock_cfg_with_ids(&["", &candidate0, "tail"]);
+        assert!(normalize_dock_item_ids(&mut cfg));
+        assert_eq!(cfg.dock.items[1].id, candidate0, "后面的合法 id 不能被前面生成的候选顶掉");
+        assert_ne!(cfg.dock.items[0].id, candidate0, "空 id 条目要换用下一个盐值");
+        let mut uniq = std::collections::HashSet::new();
+        assert!(cfg.dock.items.iter().all(|it| uniq.insert(it.id.clone())), "仍须两两不同");
+    }
+
+    /// 边界：多个同 path 的条目（哈希源相同）靠 index+name 仍能生成不同 id。
+    #[test]
+    fn dock_ids_same_path_different_index_unique() {
+        let mut cfg = dock_cfg_with_ids(&["", "", ""]);
+        for it in cfg.dock.items.iter_mut() {
+            it.path = "C:\\same.exe".to_string();
+            it.name = "same".to_string();
+        }
+        assert!(normalize_dock_item_ids(&mut cfg));
+        let mut uniq = std::collections::HashSet::new();
+        for it in &cfg.dock.items {
+            assert!(!it.id.is_empty());
+            assert!(uniq.insert(it.id.clone()), "同 path 也不能撞 id：{:?}", cfg.dock.items);
+        }
     }
 }

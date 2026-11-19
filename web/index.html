@@ -5,10 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Mini Card · 桌面卡片</title>
 <style>
-  /* ─── 字体：MiSans 四档子集（GB2312 + 界面文案），缺字回退系统栈 ─── */
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 400; font-display: block; src: url("fonts/MiSans-Regular.woff2") format("woff2"); }
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 500; font-display: block; src: url("fonts/MiSans-Medium.woff2") format("woff2"); }
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 600; font-display: block; src: url("fonts/MiSans-Semibold.woff2") format("woff2"); }
+  /* ─── 字体：微软默认系统字体栈（2026-11-19 全栈换，见 .engineering/font-swap-ms-default）───
+     中文 = 微软雅黑（Microsoft YaHei），西文/数字 = Segoe UI；两者都是 Windows 自带，
+     随系统字体一起装/更新，天然覆盖 GB2312 外汉字（不再有子集缺字/豆腐块）。
+     原 MiSans 内嵌子集已停用（woff2 文件保留在 web/fonts/ 仅供历史稿，不再 @font-face 引用）。
+     字重：雅黑无 500/600 真面，CSS 声明保留，浏览器自动选面（500→Regular、600→Bold）。 ─── */
 
   :root {
     --bg: #F4F5F7;
@@ -27,11 +28,11 @@
     --danger: #C0392F;
     --stage-a: #EEF3F8;
     --stage-b: #D9E3ED;
-    --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
-    /* 等宽族里补 MiSans：Cascadia/Consolas 都没有中文字形，中文会掉到 generic monospace
-       → Windows 上是宋体（用户 2026-11-16 报「间距」两个字和别的字不统一）。补上后
-       拉丁/数字仍是等宽字形，中文落到 MiSans，和界面其余部分一致。 */
-    --font-mono: 'Cascadia Mono', 'Consolas', 'MiSans', ui-monospace, monospace;
+    --font-body: 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+    /* 等宽族：拉丁/数字优先 Segoe UI（等宽数字更稳），Cascadia/Consolas 兜底等宽；
+       中文无字形时回落 system-ui（Windows = 雅黑），和界面正文一致。
+       2026-11-19 移除原 'MiSans' 项——已全栈换系统字体。 */
+    --font-mono: 'Segoe UI', 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
     /* ─── 动效令牌（2026-10-24，与 card.html 同名同值）：交互反馈 normal+ease-out，
        颜色/描边 fast+ease-snap，位移/展开 slow+ease-out。新写的规则别再写裸数值。 ─── */
     --dur-fast: 120ms;
@@ -489,14 +490,15 @@
      依据：Chromium/Skia 灰阶栅格改不动（A/B 已证透明窗非主因）、
        换雅黑的 hinting 收益被 Skia 吃掉（font_ab_compare.png），
        唯一见效的杠杆 = 墨量：字号 +1px / 字重 500 / 灰字加深。
-     字体：2026-11-19 起回 MiSans（跨机一致 + 与卡片预览同源），只保留暴力三件套。
+     字体：2026-11-19 全栈换回微软默认（雅黑/Segoe UI，用户拍板「所有软件都用默认字体」）；
+       字号+1 / 字重500 / 灰字加深的暴力三件套继续保留（第6轮已证收益来自这三项，非字重本身）。
      整档撤销 = 删掉这一段，即回到 400 / 12.5px / #4F5865。
      ════════════════════════════════════════════════════════════════════ */
   :root {
-    /* 字体回 MiSans（用户 2026-11-19 定）：跨机像素一致，且与卡片/Dock 预览 iframe 同源。
-       暴力档的清晰度靠下面的字号+字重+灰字加深拿到，不依赖换字体（实测换雅黑hinting收益被Skia吃掉）。 */
-    --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif !important;
-    --font-mono: 'Cascadia Mono', 'Consolas', 'MiSans', ui-monospace, monospace !important;
+    /* 字体：微软默认系统栈（2026-11-19 全栈换，.engineering/font-swap-ms-default）。
+       MiSans 内嵌子集已停用；雅黑/Segoe UI 随系统更新、天然覆盖 GB2312 外汉字。 */
+    --font-body: 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif !important;
+    --font-mono: 'Segoe UI', 'Cascadia Mono', 'Consolas', ui-monospace, monospace !important;
     --muted: #39414D !important;
     --muted-2: #4F5865 !important;
   }
@@ -2569,7 +2571,9 @@
      数据源 = `get_dock` 的 payload（DOCK_PAYLOAD，条目里带图标缓存路径，与桌面 Dock 同一份）；
      设置项改动走 `dock_update`（Rust 侧会忽略 items/cx/y，防止页面旧值盖掉刚加的条目与刚拖的位置）。 */
   var DOCK_PAYLOAD = null;
-  var DOCK_OPT_OPEN = '';        // 哪个条目的设置面板是展开的（重渲染后保持）
+  var DOCK_OPT_OPEN = null;      // 哪个条目的设置面板是展开的（重渲染后保持）
+                                 // 哨兵必须是 null 而非 ''：条目 id 可能为空串（如手工加的 DSH），
+                                 // 用 '' 当「没展开」会和空 id 相等 → 面板永远展开且点按钮切不动。
   var dockPrevFrame = null, dockPrevWrap = null;
   var ARROW_UP = '<svg viewBox="0 0 24 24"><path d="M12 19V6"/><path d="M6 12l6-6 6 6"/></svg>';
   var ARROW_DOWN = '<svg viewBox="0 0 24 24"><path d="M12 5v13"/><path d="M6 12l6 6 6-6"/></svg>';
@@ -2703,7 +2707,7 @@
       row.querySelector('.d-up').addEventListener('click', function () { moveDock(i, -1); });
       row.querySelector('.d-down').addEventListener('click', function () { moveDock(i, 1); });
       row.querySelector('.d-opts').addEventListener('click', function () {
-        DOCK_OPT_OPEN = (DOCK_OPT_OPEN === it.id) ? '' : it.id;
+        DOCK_OPT_OPEN = (DOCK_OPT_OPEN === it.id) ? null : it.id;
         renderDockList();
       });
       row.querySelector('.btn-del').addEventListener('click', function () {

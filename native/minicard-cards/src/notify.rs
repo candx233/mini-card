@@ -113,6 +113,11 @@ pub struct Tokens {
     pub item_gap: f32,
     pub item_indent: f32,
     pub dot: f32,
+    /// 条目右侧 × 关闭按钮：字号与命中列宽（2026-11-19 用户反馈偏小后加大）。
+    /// 旧值硬编码在 tree() 里（0.625r / 0.875r = 10px / 14px @240）；提到 0.8125r / 1.125r
+    /// （13px / 18px）：留出字号插值到 1.25× 的余量，且命中区不被裁。
+    pub close_fs: f32,
+    pub close_w: f32,
     pub body_fs: f32,
     pub body_lh: f32,
     pub tile: f32,
@@ -168,6 +173,8 @@ impl Tokens {
             item_gap: 0.1875 * r,
             item_indent: 1.5 * r,
             dot: 0.28125 * r,
+            close_fs: 0.8125 * r,
+            close_w: 1.125 * r,
             body_fs: 0.75 * r,
             body_lh: 0.9375 * r,
             tile: 1.25 * r,
@@ -370,6 +377,8 @@ const CLEAR_STAGGER_MS: f32 = 60.0;
 const STATE_FADE_MS: f32 = 160.0;
 /// 行 hover 底色 / × 淡入淡出（ms）
 const HOVER_MS: f32 = 120.0;
+/// × 自身 hover 的字号增量比例（1.0 → 1+CLOSE_HOVER_SCALE，120ms 补间）
+const CLOSE_HOVER_SCALE: f32 = 0.25;
 /// 本地删除后快照预期 ≤1s 收敛；2s 还没收敛就撤销抑制、重放一次入场
 const SUPPRESS_MS: f32 = 2000.0;
 /// 新条目入场的初始上浮量（DIP，-4 → 0）
@@ -492,6 +501,9 @@ pub struct Motion {
     exit_pending: HashMap<u32, Instant>,
     /// hover 补间：条目 id → 透明度（120ms）
     hover: HashMap<u32, HoverTween>,
+    /// × 按钮自身的 hover 补间：条目 id → 0..1（120ms，放大/变色/底圈）。
+    /// 与整行 hover 分开存：鼠标从行内移到 × 上时，行 hover 保持 1，只有这份在补。
+    close_hover: HashMap<u32, HoverTween>,
     /// 清除 → 确认的交叉目标（false = 清除，true = 确认）
     clear_armed: bool,
     clear_from: f32,
@@ -523,6 +535,7 @@ impl Motion {
             selected: HashSet::new(),
             exit_pending: HashMap::new(),
             hover: HashMap::new(),
+            close_hover: HashMap::new(),
             clear_armed: false,
             clear_from: 0.0,
             clear_t0: None,
@@ -677,6 +690,9 @@ impl Motion {
             return true;
         }
         if self.hover.values().any(|h| h.active(now)) {
+            return true;
+        }
+        if self.close_hover.values().any(|h| h.active(now)) {
             return true;
         }
         if self
@@ -913,6 +929,41 @@ impl Motion {
         }
     }
 
+    /// 读 × 按钮自身 hover 进度（0..1）。paint 每帧先算当前鼠标是否落在 × 节点内再更新。
+    pub fn close_hover_alpha(&self, id: u32, now: Instant) -> f32 {
+        self.close_hover
+            .get(&id)
+            .map(|h| h.value(now).clamp(0.0, 1.0))
+            .unwrap_or(0.0)
+    }
+
+    /// 更新 × 的 hover 目标：进入的节点 0→1、离开的 1→0（120ms，可多行同时补）。
+    /// 与整行 hover 独立，鼠标在行内但不在 × 上时这份始终为 0。
+    pub fn update_close_hover(&mut self, target: Option<u32>, now: Instant) {
+        for (&id, h) in self.close_hover.iter_mut() {
+            if Some(id) != target && h.to != 0.0 {
+                let from = h.value(now);
+                *h = HoverTween { from, to: 0.0, t0: now };
+            }
+        }
+        if let Some(id) = target {
+            match self.close_hover.get_mut(&id) {
+                Some(h) => {
+                    if h.to != 1.0 {
+                        let from = h.value(now);
+                        *h = HoverTween { from, to: 1.0, t0: now };
+                    }
+                }
+                None => {
+                    self.close_hover.insert(
+                        id,
+                        HoverTween { from: 0.0, to: 1.0, t0: now },
+                    );
+                }
+            }
+        }
+    }
+
     /// 把过期补间清掉，并结算滚动（paint 每帧调一次；tree_hook 只读不调）。
     fn prune(&mut self, now: Instant) {
         if let Some(t0) = self.scroll_t0 {
@@ -942,6 +993,7 @@ impl Motion {
         }
         self.exit_pending.retain(|_, t0| ms_since(now, *t0) < SUPPRESS_MS);
         self.hover.retain(|_, h| h.to > 0.0 || h.active(now));
+        self.close_hover.retain(|_, h| h.to > 0.0 || h.active(now));
         if self
             .clear_t0
             .is_some_and(|t0| ms_since(now, t0) >= CLEAR_SWAP_MS)
@@ -1382,6 +1434,16 @@ fn alpha_color(c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { a: c.a * a, ..c }
 }
 
+/// 两色线性插值（× hover 时 muted → warn）
+fn mix_color(a: D2D1_COLOR_F, b: D2D1_COLOR_F, t: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
 pub fn paint(
     g: &Gfx,
     te: &TextEngine,
@@ -1429,6 +1491,9 @@ pub fn paint(
     // hover：只在视口内、按「屏幕 y + scroll」反算行；Motion 里补 120ms 透明度
     let hover = hovered_row_uid(&placed, &groups, g.hover, scroll);
     motion.update_hover(hover, now);
+    // × 自身 hover：与整行 hover 分开补间（鼠标从行内移到 × 上时行 hover 保持 1）
+    let close_hover = hovered_close_uid(&placed, &groups, g.hover, scroll);
+    motion.update_close_hover(close_hover, now);
 
     let ctx = PaintCtx {
         snap,
@@ -1760,7 +1825,7 @@ fn tree(
                 .child(
                     Node::text(TextSpec {
                         s: "×".into(),
-                        size: 0.625 * t.r,
+                        size: t.close_fs,
                         line_h: t.item_h,
                         weight: 400,
                         wrap: false,
@@ -1769,7 +1834,7 @@ fn tree(
                         spacing_em: 0.0,
                     })
                     .id(iid + 3)
-                    .style(move |s| s.size(Dim::Px(0.875 * t.r), Dim::Px(row_h))),
+                    .style(move |s| s.size(Dim::Px(t.close_w), Dim::Px(row_h))),
                 );
             group_col = group_col.child(node);
         }
@@ -1929,16 +1994,40 @@ fn paint_tree(
             3 => {
                 // ×：只在悬停到这一行时出现（默认态保持 03 稿的干净观感）
                 if hover > 0.001 {
+                    let close_ch = row
+                        .map(|r| ctx.motion.close_hover_alpha(r.uid, ctx.now))
+                        .unwrap_or(0.0);
                     if let Some(spec) = pl.text() {
+                        // × 自身 hover（120ms）：圆形底圈淡入 + 字号放大 1.0→1.25
+                        // + 字色 muted→warn。底圈以节点中心为圆心、直径 = close_w，
+                        // 不占布局空间，故其它子节点与整行 hover 几何完全不变。
+                        if close_ch > 0.001 {
+                            let cx = pl.rect.x + pl.rect.w / 2.0;
+                            let cy = pl.rect.y + pl.rect.h / 2.0;
+                            let d = t.close_w;
+                            set_color(g, alpha_color(pal.fg_soft, close_ch * hover))?;
+                            fill_round(
+                                g,
+                                D2D_RECT_F {
+                                    left: cx - d / 2.0,
+                                    top: cy - d / 2.0,
+                                    right: cx + d / 2.0,
+                                    bottom: cy + d / 2.0,
+                                },
+                                d / 2.0,
+                            )?;
+                        }
+                        let mut spec = spec.clone();
+                        spec.size = t.close_fs * (1.0 + CLOSE_HOVER_SCALE * close_ch);
                         draw_text(
                             g,
-                            spec,
+                            &spec,
                             pl.rect.x,
                             pl.rect.y,
                             pl.rect.w,
                             spec.line_h + 6.0,
                             TextMode::Clip,
-                            alpha_color(pal.muted, hover),
+                            alpha_color(mix_color(pal.muted, pal.warn, close_ch), hover),
                             te,
                         )?;
                     }
@@ -2282,6 +2371,44 @@ fn hovered_row_in(p: &Placed, x: f32, y: f32) -> Option<(usize, usize)> {
     }
     for c in &p.children {
         if let Some(hit) = hovered_row_in(c, x, y) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// 鼠标是否落在某一行的 × 节点内（屏幕坐标先 +scroll 反算内容坐标）。
+/// × 是行的子节点、行不 hover 时还没淡入；这里只按几何判定，由调用方配合行 hover 使用。
+fn hovered_close_uid(
+    placed: &Placed,
+    groups: &[GroupView],
+    hover: Option<(f32, f32)>,
+    scroll: f32,
+) -> Option<u32> {
+    let (mx, my) = hover?;
+    let vp = find_placed_id(placed, ID_VIEWPORT)?;
+    if mx < vp.rect.x || mx >= vp.rect.right() || my < vp.rect.y || my >= vp.rect.bottom() {
+        return None;
+    }
+    let (gidx, iidx) = hovered_close_in(placed, mx, my + scroll)?;
+    let row = groups.get(gidx)?.rows.get(iidx)?;
+    if row.exit.is_some() {
+        return None;
+    }
+    Some(row.uid)
+}
+
+fn hovered_close_in(p: &Placed, x: f32, y: f32) -> Option<(usize, usize)> {
+    if let Some((g, i)) = item_of(p.id) {
+        if p.id == id_item(g, i) + 3 {
+            let r = p.rect;
+            if x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h {
+                return Some((g, i));
+            }
+        }
+    }
+    for c in &p.children {
+        if let Some(hit) = hovered_close_in(c, x, y) {
             return Some(hit);
         }
     }
@@ -4211,6 +4338,106 @@ mod tests {
             ),
             None,
             "视口外的屏幕坐标不应命中任何行"
+        );
+    }
+
+    // ── × 放大 + 自身 hover 动画（2026-11-19）──────────────────────────────
+
+    #[test]
+    fn close_x_is_bigger_without_touching_other_geometry() {
+        let t = Tokens::notify(240.0, 300.0);
+        // AC1：字号 10→13、列宽 14→18（旧值 0.625r / 0.875r，r=16）
+        assert!(t.close_fs >= 12.0, "× 字号应 ≥12px，实得 {}", t.close_fs);
+        assert!(t.close_w >= 17.0, "× 命中列宽应 ≥17px，实得 {}", t.close_w);
+        assert!(t.close_fs > 0.625 * t.r, "× 必须比旧版大");
+        assert!(t.close_w > 0.875 * t.r, "× 命中区必须比旧版大");
+
+        let snap = snap_of(sample_four());
+        let motion = Motion::new();
+        let node = tree_hook(&t, Some(&snap), Options::default(), &motion, Instant::now());
+        let pl = layout_of(&node, &t);
+
+        let close = find_rect(&pl, id_item(0, 0) + 3).expect("× 节点");
+        assert!(
+            (close.w - t.close_w).abs() < 0.01,
+            "× 节点宽应等于 close_w，实得 {}",
+            close.w
+        );
+        // AC6：其它子树没被 × 放大波及（行高、正文宽保持原值）
+        let row = find_rect(&pl, id_item(0, 0)).unwrap();
+        let line = find_rect(&pl, id_item(0, 0) + 2).unwrap();
+        assert!((row.h - t.item_h).abs() < 0.5, "行高不应被 × 改动");
+        assert!(line.w > 100.0, "正文行不应被 × 挤窄：{}", line.w);
+        assert!(close.w < row.w * 0.2, "× 列不应侵占行宽");
+    }
+
+    #[test]
+    fn close_hover_tween_follows_120ms_ease_out_quart() {
+        let t = Tokens::notify(240.0, 300.0);
+        let t0 = Instant::now();
+        let mut motion = Motion::new();
+        let uid = 42;
+        assert!((motion.close_hover_alpha(uid, t0)).abs() < 0.001, "初始应为 0");
+
+        motion.update_close_hover(Some(uid), t0);
+        let mid = motion.close_hover_alpha(uid, t0 + Duration::from_millis(HOVER_MS as u64 / 2));
+        assert!(mid > 0.5 && mid < 1.0, "中点进度应在 (0.5,1)，实得 {mid}");
+        let full = motion.close_hover_alpha(uid, t0 + Duration::from_millis(HOVER_MS as u64));
+        assert!((full - 1.0).abs() < 0.001, "120ms 应到 1，实得 {full}");
+        // AC3：字号放大 ≥1.2×（10→13 → 13→16.25）
+        assert!(1.0 + CLOSE_HOVER_SCALE >= 1.2);
+        assert!(t.close_fs * (1.0 + CLOSE_HOVER_SCALE) >= t.close_fs * 1.2);
+
+        motion.update_close_hover(None, t0 + Duration::from_millis(HOVER_MS as u64));
+        let back = motion.close_hover_alpha(uid, t0 + Duration::from_millis(2 * HOVER_MS as u64));
+        assert!(back < 0.001, "移出后 120ms 应回 0，实得 {back}");
+        let end = t0 + Duration::from_millis(2 * HOVER_MS as u64);
+        motion.prune(end);
+        assert!(motion.close_hover.is_empty(), "prune 应清掉结束的补间");
+    }
+
+    #[test]
+    fn close_hover_participates_in_frame_scheduling() {
+        let now = Instant::now();
+        let mut motion = Motion::new();
+        motion.update_close_hover(Some(7), now);
+        assert!(motion.animating(now), "补间期间应继续出帧");
+        let later = now + Duration::from_millis(HOVER_MS as u64);
+        motion.update_close_hover(None, later);
+        assert!(motion.animating(later), "退场补间期间仍应出帧");
+        let end = now + Duration::from_millis(2 * HOVER_MS as u64);
+        motion.prune(end);
+        assert!(motion.close_hover.is_empty());
+        assert!(!motion.animating(end), "补间结束后不应继续出帧");
+    }
+
+    #[test]
+    fn close_hover_hit_only_when_mouse_is_over_the_x() {
+        let t = Tokens::notify(240.0, 300.0);
+        let snap = snap_of(sample_four());
+        let opts = Options::default();
+        let now = Instant::now();
+        let motion = Motion::new();
+        let node = tree_hook(&t, Some(&snap), opts, &motion, now);
+        let pl = layout_of(&node, &t);
+        let groups = build_groups(Some(&snap), opts, &motion, now);
+        let row = find_rect(&pl, id_item(0, 0)).unwrap();
+        let close = find_rect(&pl, id_item(0, 0) + 3).unwrap();
+        let uid = groups[0].rows[0].uid;
+
+        let on_x = (close.x + close.w / 2.0, close.y + close.h / 2.0);
+        assert_eq!(hovered_close_uid(&pl, &groups, Some(on_x), 0.0), Some(uid));
+        // 同一行左侧正文处：行 hover 命中，但 × 自身不命中
+        let on_text = (row.x + 20.0, row.y + row.h / 2.0);
+        assert_eq!(hovered_close_uid(&pl, &groups, Some(on_text), 0.0), None);
+        assert_eq!(hovered_close_uid(&pl, &groups, Some((on_x.0, -5.0)), 0.0), None);
+        assert_eq!(hovered_close_uid(&pl, &groups, None, 0.0), None);
+        // 滚动口径：内容坐标 = 屏幕 y + scroll；整行 hover 用同一套反算
+        let scrolled = on_x.1 - 20.0;
+        assert_eq!(
+            hovered_close_uid(&pl, &groups, Some((on_x.0, scrolled)), 20.0),
+            Some(uid),
+            "滚动后仍应按 屏幕y+scroll 命中同一行的 ×"
         );
     }
 }

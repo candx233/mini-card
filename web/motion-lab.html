@@ -10,9 +10,7 @@
      每张卡都是 1:1 真尺寸（待办 240×120、时钟 240×120 @ 根字号 0.833）
      左边「现在」= 现有代码的实际行为，右边「改后」= 建议落地的做法
      ══════════════════════════════════════════════════════════════ */
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 400; font-display: block; src: url("fonts/MiSans-Regular.woff2") format("woff2"); }
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 500; font-display: block; src: url("fonts/MiSans-Medium.woff2") format("woff2"); }
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 600; font-display: block; src: url("fonts/MiSans-Semibold.woff2") format("woff2"); }
+  /* 字体 2026-11-19 全栈换微软默认（雅黑/Segoe UI）；MiSans @font-face 已停用 */
 
   :root {
     --bg: #F4F5F7;
@@ -24,8 +22,8 @@
     --accent: #4C9AFF;
     --accent-strong: #1D6AC6;
     --accent-soft: #E8F1FD;
-    --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
-    --font-mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+    --font-body: 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+    --font-mono: 'Segoe UI', 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
 
     /* ─── 建议的动效令牌（本轮要讨论的就是这一组）─── */
     --dur-fast: 120ms;      /* 颜色 / 描边 / 阴影 */

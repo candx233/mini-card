@@ -9,22 +9,25 @@
 // `pub use` 而不是 `mod`：`crate::config::…` / `crate::data::…` 的引用一处都不用改。
 pub use minicard_core::{config, data};
 
-/// 原生绘制进程 + MiSans TTF 的发布期内嵌。
+/// 原生绘制进程的发布期内嵌。
 ///
 /// release 构建时 `build.rs` 把 `native/minicard-bin/target/release/minicard-bin.exe`
-/// 和三个字体文件写进 `OUT_DIR/native/assets.rs`；首次启动解到
+/// 写进 `OUT_DIR/native/assets.rs`；首次启动解到
 /// `%APPDATA%\mini-card\native\<版本>\`。这样 0.1.1 的旧更新器只换主 exe 也不会
 /// 出现「没有绘制进程、九张卡全没」；debug 构建拿到空常量，走开发态路径。
+///
+/// 2026-11-19 全栈换系统字体（雅黑/Segoe UI）：不再内嵌 MiSans TTF（发布包省 ~49 MiB），
+/// 绘制进程用系统字体集，字体随 Windows 系统走。
 mod native_embed {
     include!(concat!(env!("OUT_DIR"), "/native/assets.rs"));
 
     use std::path::PathBuf;
     use std::sync::OnceLock;
 
-    static CACHE: OnceLock<Option<(PathBuf, PathBuf)>> = OnceLock::new();
+    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-    /// 返回（绘制进程 exe，字体目录）；debug / 未嵌入时返回 None。
-    pub fn ensure() -> Option<(PathBuf, PathBuf)> {
+    /// 返回绘制进程 exe 路径；debug / 未嵌入时返回 None。
+    pub fn ensure() -> Option<PathBuf> {
         CACHE
             .get_or_init(|| {
                 if NATIVE_BIN.is_empty() {
@@ -42,30 +45,19 @@ mod native_embed {
                     crate::spawn_log(&format!("native embed: 建目录失败 {e}"));
                     return None;
                 }
-                let files: [(&str, &[u8]); 4] = [
-                    ("minicard-bin.exe", NATIVE_BIN),
-                    ("MiSans-Regular.ttf", FONT_REGULAR),
-                    ("MiSans-Medium.ttf", FONT_MEDIUM),
-                    ("MiSans-Semibold.ttf", FONT_SEMIBOLD),
-                ];
-                for (name, bytes) in files {
-                    let p = dir.join(name);
-                    // 字节级比较：同版本重打包（0.1.1 曾同版本重传过）时长度可能一样，
-                    // 只比长度会把旧绘制进程/字体留在盘上。
-                    let need = std::fs::read(&p)
-                        .map(|old| old != bytes)
-                        .unwrap_or(true);
-                    if need {
-                        if let Err(e) = std::fs::write(&p, bytes) {
-                            crate::spawn_log(&format!(
-                                "native embed: 写 {} 失败 {e}",
-                                p.display()
-                            ));
-                            return None;
-                        }
+                let p = dir.join("minicard-bin.exe");
+                // 字节级比较：同版本重打包（0.1.1 曾同版本重传过）时长度可能一样，
+                // 只比长度会把旧绘制进程留在盘上。
+                let need = std::fs::read(&p)
+                    .map(|old| old != NATIVE_BIN)
+                    .unwrap_or(true);
+                if need {
+                    if let Err(e) = std::fs::write(&p, NATIVE_BIN) {
+                        crate::spawn_log(&format!("native embed: 写 {} 失败 {e}", p.display()));
+                        return None;
                     }
                 }
-                Some((dir.join("minicard-bin.exe"), dir))
+                Some(p)
             })
             .clone()
     }
@@ -2259,7 +2251,7 @@ static NATIVE_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 /// 装好的版本跟主程序同目录（`minicard-cards.exe`）。
 fn native_cards_exe() -> Option<PathBuf> {
     // 发布版：绘制进程内嵌在主 exe，首次启动已解到 APPDATA（旧更新器只换主 exe 也能用）
-    if let Some((p, _)) = native_embed::ensure() {
+    if let Some(p) = native_embed::ensure() {
         if p.exists() {
             return Some(p);
         }
@@ -2276,21 +2268,6 @@ fn native_cards_exe() -> Option<PathBuf> {
     cands.into_iter().find(|p| p.exists())
 }
 
-/// 字体目录：主程序目录与绘制进程目录都试（开发态两者不在同一层）
-fn font_dir_of(exe_dir: &std::path::Path) -> Option<PathBuf> {
-    let cands = [
-        // 装好的版本：跟主程序同目录
-        exe_dir.join("assets/fonts"),
-        // 开发态（相对主程序 target/debug）
-        exe_dir.join("../../../native/assets/fonts"),
-        exe_dir.join("../../native/assets/fonts"),
-        // 开发态（相对 minicard-bin/target/debug）
-        exe_dir.join("../../../assets/fonts"),
-        exe_dir.join("../../assets/fonts"),
-    ];
-    cands.into_iter().find(|p| p.join("MiSans-Regular.ttf").exists())
-}
-
 /// 保证原生绘制进程在跑（已在跑就什么都不做）
 fn spawn_log(msg: &str) {
     use std::io::Write;
@@ -2304,12 +2281,7 @@ fn ensure_native_cards(app: &AppHandle, cfg: &Config) {
     if NATIVE_CHILD.lock().unwrap().is_some() {
         return;
     }
-    let embedded = native_embed::ensure();
-    let Some(exe) = embedded
-        .as_ref()
-        .map(|(p, _)| p.clone())
-        .or_else(native_cards_exe)
-    else {
+    let Some(exe) = native_embed::ensure().or_else(native_cards_exe) else {
         spawn_log(&format!("找不到绘制进程，exe_dir={:?}", std::env::current_exe()));
         let _ = app.emit("native-cards-missing", ());
         return;
@@ -2318,14 +2290,8 @@ fn ensure_native_cards(app: &AppHandle, cfg: &Config) {
     cmd.arg("--live")
         .arg("--blur")
         .arg(cfg.settings.glass_blur.to_string());
-    if let Some((_, fd)) = &embedded {
-        // 内嵌解出来的三份 TTF 与 exe 同目录
-        cmd.arg("--font").arg(fd.join("MiSans-Regular.ttf"));
-    } else if let Some(exe_dir) = exe.parent() {
-        if let Some(fd) = font_dir_of(exe_dir) {
-            cmd.arg("--font").arg(fd.join("MiSans-Regular.ttf"));
-        }
-    }
+    // 2026-11-19 全栈换系统字体：不再传 --font，绘制进程用系统字体集（雅黑/Segoe UI）。
+    // Args.font 仍有默认值以兼容直接调用，但 native 侧已不使用它渲染。
     // 控制台窗口不要弹出来
     #[cfg(windows)]
     {

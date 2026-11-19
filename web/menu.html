@@ -5,11 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>MiniCard · Menu</title>
 <style>
-  /* ─── 界面字体：MiSans（子集与许可见 web/fonts/，与 card.html 同源） ─── */
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 400; font-display: block; src: url("fonts/MiSans-Regular.woff2") format("woff2"); }
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 500; font-display: block; src: url("fonts/MiSans-Medium.woff2") format("woff2"); }
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 600; font-display: block; src: url("fonts/MiSans-Semibold.woff2") format("woff2"); }
-  @font-face { font-family: 'MiSans'; font-style: normal; font-weight: 700; font-display: block; src: url("fonts/MiSans-Bold.woff2") format("woff2"); }
+  /* ─── 字体：微软默认系统字体栈（2026-11-19 全栈换，见 .engineering/font-swap-ms-default）───
+     中文=微软雅黑，西文/数字=Segoe UI，Windows 自带、天然覆盖 GB2312 外汉字。
+     原 MiSans woff2 保留仅供历史稿，不再 @font-face 引用。 ─── */
   :root {
     --fg:      oklch(0.966 0.005 258.3);
     --muted:   oklch(0.85 0.02 261.1);
@@ -18,7 +16,7 @@
     --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent);
     --danger:  oklch(0.630 0.190 25.0);
     --bg:      oklch(0.210 0.025 255.0);
-    --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
+    --font-body: 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
     /* 菜单底色 = 气泡那一对变量（与 dock.html 的右键菜单同源）：暗主题深底白字、亮主题白底深字 */
     --bubble-bg: color-mix(in oklch, var(--bg) 84%, transparent);
     --bubble-fg: var(--fg);

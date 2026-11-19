@@ -1002,7 +1002,8 @@ pub fn menu_sheet(
 //     --dump-seq docs\verify\_notify_motion_20261116\arrive --exit-after 2200
 //
 // 环境变量：
-//   MC_NOTIFY_MOTION    arrive | arrive-group | remove | scroll | state | clear（默认 arrive）
+//   MC_NOTIFY_MOTION    arrive | arrive-group | remove | scroll | state | clear | hover（默认 arrive）
+//                       hover = 数据不变，只靠 MC_NOTIFY_HOVER 注入鼠标点，拍 × hover 补间
 //   MC_NOTIFY_FRAME_MS  每帧步长（默认 1000/60 ≈ 16.667）
 //   MC_NOTIFY_PRE_MS    事件发生的合成时刻（默认 200；此前都是静止帧，用来当基线）
 
@@ -1122,6 +1123,10 @@ impl NMotion {
             }
             "state" => after.clear(),
             "clear" => {}
+            "hover" => {
+                // 数据完全不变：× 的 hover 补间由 paint 按 g.hover 自行推进。
+                // 配 MC_NOTIFY_HOVER="x,y"（卡内逻辑坐标）使用。
+            }
             "clear-all" => {
                 // 快照故意保持原样：真机上 Windows 异步删除 ≤1.5s 才收敛，
                 // 用旧快照验证 suppress 压住 + 本地塌缩不会闪回。
