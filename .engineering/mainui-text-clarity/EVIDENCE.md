@@ -35,7 +35,8 @@
 - 第 5 轮：用户批准执行方案 2 + 间距专项。改 `web/index.html`（axis-k 12→13px/去字距/列宽26→34；rver/deck-empty span/kbd-row .plus/kbd→12.5px），重编 release。真机验证：axis-k=13px、间距文字宽26px/列34px（8px呼吸）、全量无<12.5px、墨量+17.1%（measure_ink.py）、五页零溢出。verifier4 判通过可交付，E1/E2 两条 S4 已修。AC-E1~E4 全通过。
 - 第 6 轮：用户嫌微调无感、选暴力档+雅黑。真机三档 A/B（final_compare.png）深色像素 A现役1088/B暴力MiSans2455/C暴力雅黑3209 → 落地 C 档（仅 web/index.html 末尾集中覆盖块：雅黑栈+字号+1+字重500+muted#39414D），重编 release。验证：computed 逐项吻合（final_style.json）、五页零溢出（final_pages.json）、开关说明区深色像素 1088→3209(+195%, final_ink.json)。verifier5 判通过可交付。AC-F1~F4 全通过。
   - **重要归因修正**：雅黑无 500 真面，computed=500 实落 Regular、不加墨（verifier5 canvas 实测 400≡500 逐像素相同）；+195% 收益来自**字号+1 / 灰字加深 / 换字形**，非字重。C 档是三因素叠加的结果，勿误归因于「500 字重」这一杠杆。
-  - iframe 预览（card.html/dock.html）仍 MiSans，主界面框架雅黑——已列为残余风险/非目标。
+  - iframe 预览（card.html/dock.html）仍 MiSans，主界面框架曾为雅黑——第 7 轮已换回 MiSans，此不一致消除。
+- 第 7 轮：用户看完暴力档 MiSans vs 雅黑对照（`violent_misans_vs_yahei.png`）后要换回 MiSans。仅改 `web/index.html` 覆盖块两行字体变量回 MiSans + 注释，其余暴力设置不动。真机验证：computed 正文族 MiSans、等宽族 Cascadia/Consolas/MiSans，字号15/18/14.5/13.5 与 weight500/#39414D 不变（final_style.json 覆写）、开关说明区深色像素 1445 = 第6轮 A/B 的 B 档逐像素一致、五页 bad=[]、exe mtime 12:45:06>index 12:43:40、实例 PID14260 运行。AC-G1~G3 全通过。
 
 ## 残余风险 / 未验证项
 

@@ -489,12 +489,14 @@
      依据：Chromium/Skia 灰阶栅格改不动（A/B 已证透明窗非主因）、
        换雅黑的 hinting 收益被 Skia 吃掉（font_ab_compare.png），
        唯一见效的杠杆 = 墨量：字号 +1px / 字重 500 / 灰字加深。
-     整档撤销 = 删掉这一段，即回到 MiSans / 400 / 12.5px / #4F5865。
-     ⚠ 代价：雅黑随 Windows 版本像素不一致；无 500 真面（落 Regular/合成）。
+     字体：2026-11-19 起回 MiSans（跨机一致 + 与卡片预览同源），只保留暴力三件套。
+     整档撤销 = 删掉这一段，即回到 400 / 12.5px / #4F5865。
      ════════════════════════════════════════════════════════════════════ */
   :root {
-    --font-body: 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif !important;
-    --font-mono: 'Microsoft YaHei', 'Consolas', ui-monospace, monospace !important;
+    /* 字体回 MiSans（用户 2026-11-19 定）：跨机像素一致，且与卡片/Dock 预览 iframe 同源。
+       暴力档的清晰度靠下面的字号+字重+灰字加深拿到，不依赖换字体（实测换雅黑hinting收益被Skia吃掉）。 */
+    --font-body: 'MiSans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif !important;
+    --font-mono: 'Cascadia Mono', 'Consolas', 'MiSans', ui-monospace, monospace !important;
     --muted: #39414D !important;
     --muted-2: #4F5865 !important;
   }

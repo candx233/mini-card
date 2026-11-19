@@ -96,3 +96,14 @@
 - **非目标**：不动 native 卡片字体（仍 MiSans）、不改卡片库/Dock 预览里的 `card.html`/`dock.html`（它们是独立文档，仍 MiSans——列为残余风险）。
 - **已向用户声明的代价**：雅黑跨机像素不一致（随 Windows 版本）、无 500 真面（500 落 Regular/合成），但用户已知悉并明确选择。
 - **回滚**：git 可秒级回滚 `web/index.html`；暴力配置集中在一处便于整体撤销。
+
+## 第 7 轮执行契约（用户看完对照后：换回 MiSans）
+
+原话：「换成misans吧」（在看完 `violent_misans_vs_yahei.png` 暴力档 MiSans vs 雅黑对照后）
+
+- **目标**：仅把第 6 轮暴力覆盖块的两行字体变量换回 MiSans；字号/字重/灰字加深全部保留。
+- **改动**：`web/index.html` 覆盖块 `--font-body` 回 `'MiSans','Segoe UI',system-ui,'Microsoft YaHei',sans-serif`；`--font-mono` 回 `'Cascadia Mono','Consolas','MiSans',ui-monospace,monospace`；同步改注释（去掉雅黑代价声明）。
+- **AC-G1**：computed 正文族 = MiSans、等宽族 = Cascadia/Consolas/MiSans；字号/字重/颜色与第 6 轮一致。
+- **AC-G2**：落地版开关说明区深色像素 = 1445，与第 6 轮 A/B 的 B 档（暴力 MiSans）逐像素一致；五页零溢出。
+- **AC-G3**：重编 release，exe mtime > index.html，实例运行。
+- **理由记录**：MiSans 跨机像素一致 + 与卡片/Dock 预览 iframe 同源；暴力档清晰度来自字号/字重/灰字加深，不依赖换字体（第 6 轮已证雅黑 hinting 收益被 Skia 吃掉）。
