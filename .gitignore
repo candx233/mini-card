@@ -41,3 +41,9 @@ docs/verify/**/*.png
 /minicard发版计划.md
 # 设计阶段的截图/对比图产物（本地取证，不进仓库）
 /design-shots/
+
+# 工程台账（.engineering/）：只收三件套契约文档（*.md），
+# 取证产物（bgra/png 帧、脚本、txt dump、日志）留本地不进公开仓库。
+/.engineering/**
+!/.engineering/*/
+!/.engineering/**/*.md
