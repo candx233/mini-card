@@ -118,6 +118,9 @@ pub struct Tokens {
     /// （13px / 18px）：留出字号插值到 1.25× 的余量，且命中区不被裁。
     pub close_fs: f32,
     pub close_w: f32,
+    /// × 命中列右缘到整行右缘的留缝（2026-11-19 用户反馈「× 底圈右缘与整行 hover 底色贴在一起」）。
+    /// 加在行节点的右 padding 上，使圆底右缘停在整个 hover 行右缘内侧 close_gap_r。
+    pub close_gap_r: f32,
     pub body_fs: f32,
     pub body_lh: f32,
     pub tile: f32,
@@ -142,9 +145,11 @@ impl Tokens {
             r,
             radius: r,
             pad_t: 0.8125 * r,
-            pad_l: 0.8125 * r,
+            // 2026-11-19「正文显示宽一点 / 左右留空充裕」：左右内边距 0.8125r→0.625r
+            // （13→10px @240），把空间让给正文。上下不动。
+            pad_l: 0.625 * r,
             pad_b: 0.6875 * r,
-            pad_r: 0.8125 * r,
+            pad_r: 0.625 * r,
             header_fs: 0.90625 * r,
             header_lh: 1.0625 * r,
             count_fs: 0.75 * r,
@@ -171,10 +176,13 @@ impl Tokens {
             title_lh: 1.03125 * r,
             item_h: 2.375 * r,
             item_gap: 0.1875 * r,
-            item_indent: 1.5 * r,
+            // A（条目左缩进）1.5r→1.125r（24→18px @240），和 C（卡片左右 padding）各压缩一点，
+            // 把省下的横向空间给正文；与右侧 close_gap_r 合计后正文净增约 8px。
+            item_indent: 1.125 * r,
             dot: 0.28125 * r,
             close_fs: 0.8125 * r,
             close_w: 1.125 * r,
+            close_gap_r: 0.25 * r,
             body_fs: 0.75 * r,
             body_lh: 0.9375 * r,
             tile: 1.25 * r,
@@ -1808,7 +1816,9 @@ fn tree(
                 .style(move |s| {
                     s.size(Dim::Pct(1.0), Dim::Px(row_h))
                         .mar([0.0, 0.0, mar_b, 0.0])
-                        .pad([0.0, 0.0, 0.0, t.item_indent])
+                        // 右 padding = close_gap_r：× 列整体左移，使圆底右缘停在整行 hover 底色
+                        // 右缘内侧 4px（用户反馈「两者几乎贴在一起」）。左 padding 仍是 item_indent。
+                        .pad([0.0, t.close_gap_r, 0.0, t.item_indent])
                         .align(Align::Center)
                         .gap(0.25 * t.r)
                 })
@@ -2019,13 +2029,23 @@ fn paint_tree(
                         }
                         let mut spec = spec.clone();
                         spec.size = t.close_fs * (1.0 + CLOSE_HOVER_SCALE * close_ch);
+                        // 2026-11-19「× 没在正中间」：圆底以节点中心为圆心，但 draw_text 居的是
+                        // advance 盒 + 行盒顶对齐，墨迹中心会偏离节点中心（基线/字距/上下 overhang
+                        // 不对称）。按 DWrite overhang 量出墨迹中心相对布局盒中心的偏差，反解绘制
+                        // 原点，使墨迹中心精确落在圆心。测量口径与 draw_text 完全一致（同 spec、
+                        // 同 w/h、同 Mode::Clip），且随字号补间每一帧重算，放大过程始终居中。
+                        let cy = pl.rect.y + pl.rect.h / 2.0;
+                        let box_h = spec.line_h + 6.0;
+                        let (bx, by) = te.ink_center_bias_2d(&spec, pl.rect.w, box_h);
+                        let draw_x = pl.rect.x - bx;
+                        let draw_y = cy - box_h / 2.0 - by;
                         draw_text(
                             g,
                             &spec,
-                            pl.rect.x,
-                            pl.rect.y,
+                            draw_x,
+                            draw_y,
                             pl.rect.w,
-                            spec.line_h + 6.0,
+                            box_h,
                             TextMode::Clip,
                             alpha_color(mix_color(pal.muted, pal.warn, close_ch), hover),
                             te,
@@ -4369,6 +4389,47 @@ mod tests {
         assert!((row.h - t.item_h).abs() < 0.5, "行高不应被 × 改动");
         assert!(line.w > 100.0, "正文行不应被 × 挤窄：{}", line.w);
         assert!(close.w < row.w * 0.2, "× 列不应侵占行宽");
+    }
+
+    /// 2026-11-19「正文显示宽一点 / × 底圈别贴整行右缘」：AC2 + AC3。
+    /// 基线（改前）240×300：pad_l/r=13、item_indent=24、正文 w=159.5、× 右缘=227=行右缘。
+    #[test]
+    fn body_wider_and_x_circle_inset_from_row_edge() {
+        let t = Tokens::notify(240.0, 300.0);
+        // AC2：A、C 各压缩一点（pad 13→10、indent 24→18），× 圆圈保持 18px 不动
+        assert!((t.pad_l - 10.0).abs() < 0.01, "pad_l 应 10，实得 {}", t.pad_l);
+        assert!((t.pad_r - 10.0).abs() < 0.01, "pad_r 应 10，实得 {}", t.pad_r);
+        assert!((t.item_indent - 18.0).abs() < 0.01, "item_indent 应 18，实得 {}", t.item_indent);
+        assert!((t.close_w - 18.0).abs() < 0.01, "× 圆圈仍应 18px，实得 {}", t.close_w);
+        assert!((t.close_gap_r - 4.0).abs() < 0.01, "右缝应 4px，实得 {}", t.close_gap_r);
+
+        let snap = snap_of(sample_four());
+        let motion = Motion::new();
+        let node = tree_hook(&t, Some(&snap), Options::default(), &motion, Instant::now());
+        let pl = layout_of(&node, &t);
+        let row = find_rect(&pl, id_item(0, 0)).unwrap();
+        let line = find_rect(&pl, id_item(0, 0) + 2).unwrap();
+        let close = find_rect(&pl, id_item(0, 0) + 3).unwrap();
+
+        // AC2：正文净增 ≥5px（159.5 → ≥165），且仍合理不贴边
+        assert!(
+            (line.w - 167.5).abs() < 0.01,
+            "正文应为 167.5px（基线 159.5 + pad 6 + indent 6 − 右缝 4），实得 {}",
+            line.w
+        );
+        // AC3：圆底右缘 = × 节点右缘 = 行右缘 − 4。圆直径 = close_w，
+        // paint 以节点中心为圆心，故圆右缘恰为 close.x + close.w。
+        let circle_right = close.x + t.close_w;
+        assert!(
+            (circle_right - (row.x + row.w - t.close_gap_r)).abs() < 0.01,
+            "圆底右缘应停在整个 hover 行右缘内侧 4px：circle_right={} row_right={}",
+            circle_right,
+            row.x + row.w
+        );
+        assert!(
+            (close.x + close.w - circle_right).abs() < 0.01,
+            "× 命中节点应完整包住圆底（右缘对齐）"
+        );
     }
 
     #[test]

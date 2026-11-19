@@ -40,20 +40,20 @@ use minicard_shell::gfx::Gfx;
 
 use crate::display::{advance_deadline, DisplayTiming};
 
-/// 超采样倍率（环境变量控制，默认 **1× = 原生栅格**）：`MC_SS=2` 时卡片/Dock 按 2× 像素渲染、
-/// DComp 0.5 缩放显示 —— 文字边缘多 4 倍采样，但盒式降采样会柔化小字高频细节。
+/// 超采样倍率（环境变量控制，默认 **2×**）：卡片/Dock 按 2× 像素渲染、
+/// DComp 0.5 缩放显示 —— 文字斜边多 4 倍采样，抹平 1× 原生栅格下可见的阶梯毛刺。
 ///
-/// 历史：0.1.3 起默认 2×，为的是磨掉 MiSans（无 hinting）大字的锯齿台阶；release 实测 9 卡
-/// 只 +0.9～1.8 单核百分点、私有内存 +1.4～1.9 MB。2026-11-19 全栈换系统雅黑后改回默认 1×：
-/// 雅黑自带 hinting + 笔画更实，1× 下锯齿已不明显；而 2× 的小字补墨（400→500 真 Medium）
-/// 在雅黑无 500 面时已失效、柔化代价却仍在。本机 1× vs 2× 对照见
-/// `.engineering/card-small-text-clarity/clk_ab_yahei.png`，1× 更锐。
-/// `MC_SS=2` 可显式开回 2×（A/B 对照用）。
+/// 历史：0.1.3 起默认 2×（磨掉 MiSans 大字锯齿台阶，release 实测 9 卡只 +0.9～1.8 单核百分点、
+/// 私有内存 +1.4～1.9 MB）。2026-11-19 全栈换系统雅黑后曾一度改回默认 1×（认为雅黑 hinting
+/// 够用、1× 小字更锐），但实测（`.engineering/card-text-edge-burrs/edge_zoom_ss1_vs_ss2.png`）
+/// 1× 下大字斜边/曲边阶梯毛刺明显、2× 盒降后平滑，用户明确要求修掉毛刺，故恢复默认 2×。
+/// 小字柔化代价见同目录 EVIDENCE AC5 量化（`MC_SMALL_EMBOLD` 在雅黑无 500 面时本就失效）。
+/// `MC_SS=1` 可显式退回 1×（A/B 对照 / 性能回退用）。
 pub(crate) fn ss_factor() -> u32 {
     std::env::var("MC_SS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(1)
+        .unwrap_or(2)
         .clamp(1, 4)
 }
 
@@ -3945,9 +3945,9 @@ pub fn start(font: &std::path::Path, blur: f32, topmost: bool, exit_after: Optio
 mod tests {
     use super::*;
 
-    /// 默认超采样 = 1×（2026-11-19 换雅黑后从 2× 改回）；MC_SS 仍可覆盖、clamp 1–4。
+    /// 默认超采样 = 2×（2026-11-19 修字形边缘毛刺，从 1× 恢复）；MC_SS 仍可覆盖、clamp 1–4。
     #[test]
-    fn 默认超采样1倍且可环境变量覆盖() {
+    fn 默认超采样2倍且可环境变量覆盖() {
         // RAII：断言中途 panic 也能恢复 MC_SS，不污染同进程并行测试
         struct EnvGuard(Option<std::ffi::OsString>);
         impl Drop for EnvGuard {
@@ -3961,9 +3961,9 @@ mod tests {
         let _guard = EnvGuard(std::env::var_os("MC_SS"));
 
         std::env::remove_var("MC_SS");
-        assert_eq!(ss_factor(), 1, "无 MC_SS 时必须默认 1×");
-        std::env::set_var("MC_SS", "2");
-        assert_eq!(ss_factor(), 2, "MC_SS=2 必须可开回超采样");
+        assert_eq!(ss_factor(), 2, "无 MC_SS 时必须默认 2×（抹平字形斜边毛刺）");
+        std::env::set_var("MC_SS", "1");
+        assert_eq!(ss_factor(), 1, "MC_SS=1 必须可退回原生 1×");
         std::env::set_var("MC_SS", "9");
         assert_eq!(ss_factor(), 4, "MC_SS 必须 clamp 到 4");
         std::env::set_var("MC_SS", "0");

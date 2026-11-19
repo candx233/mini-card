@@ -736,6 +736,28 @@ impl TextEngine {
         }
     }
 
+    /// **ink 中心相对布局盒中心的 (水平, 垂直) 偏差**（正 = 墨迹偏右/偏下，单位 px）。
+    /// 水平口径与 [`Self::ink_center_bias`] 完全一致；垂直同理用 `GetOverhangMetrics`
+    /// 的 top/bottom：`ink 中心 = 盒中心 + ((right−left)/2, (bottom−top)/2)`。
+    /// 调用方要把字形墨迹精确压到色块圆心时，按 `-bias` 微移绘制原点即可。
+    /// `width/height` 必须与 `draw_text` 实际用的布局盒一致，否则 overhang 盒口径不同。
+    pub fn ink_center_bias_2d(
+        &self,
+        t: &crate::layout::TextSpec,
+        width: f32,
+        height: f32,
+    ) -> (f32, f32) {
+        match self.layout_spec(t, width, height, Mode::Clip) {
+            Ok(l) => unsafe {
+                match l.GetOverhangMetrics() {
+                    Ok(o) => ((o.right - o.left) / 2.0, (o.bottom - o.top) / 2.0),
+                    Err(_) => (0.0, 0.0),
+                }
+            },
+            Err(_) => (0.0, 0.0),
+        }
+    }
+
     /// 字体字面框（ascent, descent）的 em 比例 —— 行内元素（如单位 `<i>`）的盒子
     /// 高度是字面框而不是行高，卡片算度量时需要。
     pub fn font_box(&self) -> (f32, f32) {
