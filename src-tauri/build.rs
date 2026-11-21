@@ -13,6 +13,7 @@ use std::path::PathBuf;
 /// release 构建必须先把 `native/minicard-bin` 编出来，否则直接 panic。
 fn main() {
     println!("cargo:rerun-if-changed=../web");
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let native_dir = out_dir.join("native");
@@ -22,7 +23,13 @@ fn main() {
     let root = manifest.parent().expect("src-tauri 的父目录").to_path_buf();
     let release = env::var("PROFILE").unwrap_or_default() == "release";
 
-    let bin = root.join("native/minicard-bin/target/release/minicard-bin.exe");
+    // 绘制进程优先从 CARGO_TARGET_DIR/release 取（cargo 被重定向时产物在那里），
+    // 否则回退仓库内 native/minicard-bin/target/release。两者必须与实际构建产物一致，
+    // 否则会把旧版绘制进程嵌进新 exe（曾发生过：换环境后嵌入旧 native，native 层改动全失效）。
+    let bin = match env::var_os("CARGO_TARGET_DIR") {
+        Some(d) if !d.is_empty() => PathBuf::from(d).join("release/minicard-bin.exe"),
+        _ => root.join("native/minicard-bin/target/release/minicard-bin.exe"),
+    };
 
     let mut generated = String::new();
 

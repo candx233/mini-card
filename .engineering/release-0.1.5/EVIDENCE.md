@@ -23,6 +23,18 @@
 3. **包内容**：zip 仅 `mini-card.exe` / `LICENSE` / `使用说明.txt` 三项；10.10 MB（换系统字体后去掉 ~49MiB 字体）。
 4. **签名**：latest.json pubkey == update.rs:20 == `BrG25loJ…wdY=`；验签 payload `0.1.5|<sha256>` 通过。
 
+## 第 2 轮：就地安装看效果（D2）
+
+| 项 | 证据 | 结论 |
+|---|---|---|
+| D2 根因 | `build.rs:25` 原写死仓库内 native 路径，不认 `CARGO_TARGET_DIR`；首次重编嵌入旧 native（sha `c0fc292c`），重启解压旧版 → native 改动不生效 | 已修：build.rs 优先 `$CARGO_TARGET_DIR/release/minicard-bin.exe` + `rerun-if-env-changed` |
+| 内嵌校验 | 串行重编后 OUT_DIR 内嵌 native sha=`322435f4`（新）；主 exe sha `f8627845`→`74dc718e` | 通过 |
+| 就地替换 | 备份 `%TEMP%\minicard_rollback_20261121_230433`；关旧进程→替换 exe→删旧 0.1.5 目录→原命令行重启（PID 30936 + 绘制 32776） | 通过 |
+| 效果铁证 | APPDATA `0.1.5\minicard-bin.exe` sha=`322435f4`==新构建 native；spawn log `0.1.5 --live --blur 30` 无 `--font`；native 日志 9 卡窗口/Dock 17 项/天气刷新 OK | 通过 |
+| 连带重打包 | 主 exe 变更后重打 zip+latest.json，10/10 离线校验 PASS，包内 exe sha=`74dc718e`==运行实例 | 通过 |
+
+回滚方法：关掉 mini-card 进程，把 `%TEMP%\minicard_rollback_20261121_230433\mini-card.exe` 复制回 `src-tauri\target\release\`，重启即可回到 0.1.4。
+
 ## 复验命令
 
 ```bat

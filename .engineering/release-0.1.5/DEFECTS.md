@@ -11,6 +11,12 @@
 | V2 | 独立检验者 | S3 | 裸版本号防呆 `b"0.1.5" in exe` 对旧 exe 返回 True | 旧 exe 含裸 `0.1.5`×1（来自依赖路径 `http-range-0.1.5`）+ `APPDATAmini-card0.1.4`；新 exe 含 `APPDATAmini-card0.1.5` | 裸串误判：依赖路径里可能有同形版本号 | 防呆改用精确标记 `APPDATAmini-card<ver>` + `re` 扫 `mini-card(\d+\.\d+\.\d+)` 断言无其它版本残留 | 已修 | 1 |
 | V3 | 独立检验者 | S4 | DEFECTS.md 中 D1 状态仍为「待修」；台账未入库 | — | 台账未随修复同步、SPEC 单独提交时 DEFECTS 尚未创建 | 更新 D1 状态为已修；DEFECTS.md/EVIDENCE.md 一并补提交 | 已修 | 1 |
 
+## 第 2 轮：就地安装看效果时发现（D2）
+
+| 编号 | 来源 | 严重度 | 复现步骤 | 证据 | 根因 | 修复 | 状态 | 轮次 |
+|---|---|---|---|---|---|---|---|---|
+| D2 | 实施者（就地替换） | S1 | 装 0.1.5 重启后，`native\0.1.5\minicard-bin.exe` sha=`c0fc292c`（=旧 0.1.4），native 层改动不生效 | 新构建 native sha=`322435f4`；`build.rs:25` 写死仓库内 `native/minicard-bin/target/release`，而 native 产物被 `CARGO_TARGET_DIR=F:\build-targets` 重定向 → build.rs 嵌了仓库内旧 native | build.rs 不认 `CARGO_TARGET_DIR`，与打包脚本/实际产物路径口径不一致；D1 只修了打包脚本没修 build.rs | build.rs 优先从 `$CARGO_TARGET_DIR/release/minicard-bin.exe` 取、无则回退仓库内；加 `rerun-if-env-changed=CARGO_TARGET_DIR`。串行重编后 OUT_DIR 内嵌 native sha=`322435f4`、重启解压 native=`322435f4`，效果生效 | 已修 | 2 |
+
 ## 返工验证（第 1 轮修复后）
 
 - V2 防呆判别力实测：新 exe（标记在、无残留）→ 放行；旧 exe（标记无、有 0.1.4 残留）→ 拦截。
@@ -23,7 +29,15 @@
 - 远端 draft Release / 资产上传 / PATCH / Publish / 建 tag / 代码签名：契约非目标，未做。
 - AC8 单测由实施者（lead）真实执行并留证；独立检验者受只读约束未复跑，属证据来源差异，非缺陷。
 
+## 第 2 轮返工验证（D2）
+
+- build.rs 改认 `CARGO_TARGET_DIR` 后串行重编：OUT_DIR 内嵌 native sha=`322435f4`（新），主 exe sha `f8627845`→`74dc718e`。
+- 就地安装：备份旧 exe/config 到 `%TEMP%\minicard_rollback_20261121_230433`；关旧进程→替换运行路径 exe→删旧 0.1.5 解压目录→复用原命令行重启。
+- 铁证：重启后 APPDATA `0.1.5\minicard-bin.exe` sha=`322435f4` == 新构建 native；spawn log 无 `--font`；native 日志 9 卡窗口/Dock 17 项/天气刷新正常 → 改动真实生效。
+- 主 exe 变更连带重打包 0.1.5 zip + latest.json：10/10 离线校验全 PASS，包内 exe sha=`74dc718e` 与运行实例一致。
+
 ## 轮次小结
 
 - 第 1 轮：新增 4（D1 自查 + V1/V2/V3 独立检验）/ 已修 4 / 剩余 0。
-- 返工验证无新发现 → 收敛达成。
+- 第 2 轮：新增 1（D2/S1，就地安装发现 build.rs 嵌入旧 native）/ 已修 1 / 剩余 0。
+- 第 2 轮返工验证无新发现 → 收敛达成。
